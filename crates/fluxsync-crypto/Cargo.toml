@@ -1,0 +1,45 @@
+[package]
+name = "fluxsync-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "FluxSync identity, Noise IK handshake, and ChaCha20-Poly1305 transport."
+
+[features]
+default = []
+# Enables `pair_for_test` so integration tests in dependent crates (notably
+# fluxsyncd) can inject a pre-paired session without driving the QR/safe-words
+# pairing flow. NEVER enable in a production binary.
+test-util = []
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+
+[dependencies]
+snow = "0.9"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+thiserror = { workspace = true }
+
+# blake3 split per target: android cross-build avoids the C/NEON build
+# script, which would require an Android NDK toolchain just to typecheck.
+# `pure` keeps the safe Rust fallback (slower; clipboard hashing is tiny
+# so the throughput hit is invisible).
+[target.'cfg(target_os = "android")'.dependencies]
+blake3 = { version = "1.5", default-features = false, features = ["std", "pure"] }
+[target.'cfg(not(target_os = "android"))'.dependencies]
+blake3 = "1.5"
+
+[dev-dependencies]
+chacha20poly1305 = "0.10"
+hex-literal = "0.4"

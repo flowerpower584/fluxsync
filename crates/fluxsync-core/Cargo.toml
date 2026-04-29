@@ -1,0 +1,35 @@
+[package]
+name = "fluxsync-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "FluxSync pure logic: state machine, battery policy, dedup ring, Lamport clock, classifier."
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+
+[dependencies]
+serde = { workspace = true }
+fluxsync-proto = { path = "../fluxsync-proto" }
+regex = "1.10"
+thiserror = { workspace = true }
+
+# blake3 split per target — see fluxsync-crypto/Cargo.toml for the
+# rationale (android cross-build without NDK).
+[target.'cfg(target_os = "android")'.dependencies]
+blake3 = { version = "1.5", default-features = false, features = ["std", "pure"] }
+[target.'cfg(not(target_os = "android"))'.dependencies]
+blake3 = "1.5"
+
+[dev-dependencies]
+serde_json = "1"

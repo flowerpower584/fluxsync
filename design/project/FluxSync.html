@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FluxSync — Universal Clipboard</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #f0eee9; }
+  body { font-family: 'Inter Tight', -apple-system, sans-serif; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="components.jsx"></script>
+<script type="text/babel" src="frame-macos.jsx"></script>
+<script type="text/babel" src="frame-desktop.jsx"></script>
+<script type="text/babel" src="frame-android.jsx"></script>
+<script type="text/babel" src="frame-logs.jsx"></script>
+
+<script type="text/babel">
+// ── Shared state across all frames ────────────────────────────
+const initialHistory = [
+  { kind: 'url',  preview: 'github.com/torvalds/linux/pull/4821',                    time: '14:32' },
+  { kind: 'text', preview: 'Merci frère, je vois ça ce soir inshallah.',              time: '14:18' },
+  { kind: 'code', preview: 'cargo build --release --target aarch64-linux-android',    time: '13:55' },
+  { kind: 'text', preview: 'Kaolack — 14.1518° N, 16.0726° W',                        time: '13:42' },
+  { kind: 'url',  preview: 'tailscale.com/blog/how-tailscale-works',                  time: '12:09' },
+];
+
+function App() {
+  const [state, setState] = React.useState({
+    on: true,
+    batteryLevel: 87,
+    batteryThreshold: 15,
+    charging: false,
+    peerName: 'Galaxy S21 Ultra',
+    peerBattery: 64,
+    peerCharging: false,
+    history: initialHistory,
+  });
+
+  return (
+    <div className="fs-root" style={{ minHeight: '100vh' }}>
+      <DesignCanvas>
+        <DCSection id="brand" title="FluxSync" subtitle="Universal clipboard · Local-first · End-to-end encrypted · Crafted in Kaolack, Senegal">
+          <DCArtboard id="hero" label="System overview" width={920} height={300}>
+            <SystemOverview state={state} />
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="desktop" title="Desktop trays" subtitle="Same daemon, native chrome per OS — toggle the master switch on any frame, the others react.">
+          <DCArtboard id="macos" label="macOS · M1" width={420} height={520}>
+            <div style={{ background: '#E8E5DF', height: '100%', position: 'relative', padding: 0 }}>
+              {/* desktop wallpaper-ish */}
+              <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(135deg,#D8D2C7 0%,#C4BCB0 100%)' }} />
+              <div style={{ position: 'relative', zIndex: 1 }}>
+                <MacOSMenuBar theme="light" active={state.on} />
+              </div>
+              <div style={{ position: 'absolute', top: 30, right: 18, zIndex: 2 }}>
+                <MacOSTray state={state} setState={setState} />
+              </div>
+            </div>
+          </DCArtboard>
+
+          <DCArtboard id="windows" label="Windows 11" width={420} height={520}>
+            <div style={{ background: '#1a1a1d', height: '100%', position: 'relative' }}>
+              <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
+                <WindowsTaskbar active={state.on} />
+              </div>
+              <div style={{ position: 'absolute', bottom: 50, right: 14 }}>
+                <WindowsTray state={state} setState={setState} />
+              </div>
+            </div>
+          </DCArtboard>
+
+          <DCArtboard id="linux" label="Linux · Arch + i3" width={420} height={520}>
+            <div style={{ background: '#000', height: '100%', position: 'relative', fontFamily: FS.mono }}>
+              <LinuxBar active={state.on} />
+              {/* fake terminal behind */}
+              <div className="mono" style={{ padding: 10, color: '#444', fontSize: 10, lineHeight: 1.6 }}>
+                <div>$ systemctl --user status fluxsyncd</div>
+                <div style={{ color: FS.ok }}>● fluxsyncd.service — FluxSync clipboard daemon</div>
+                <div>     Loaded: loaded (~/.config/systemd/user/fluxsyncd.service)</div>
+                <div>     Active: <span style={{ color: FS.ok }}>active (running)</span> since Sun 2026-04-28</div>
+                <div>       Docs: file:///usr/local/share/doc/fluxsync</div>
+              </div>
+              <div style={{ position: 'absolute', top: 40, right: 14 }}>
+                <LinuxTray state={state} setState={setState} />
+              </div>
+            </div>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="mobile" title="Mobile" subtitle="Android, single page. Surface every status the user needs without scrolling for it.">
+          <DCArtboard id="android" label="Android · S21 Ultra" width={400} height={820}>
+            <div style={{
+              background: '#000', padding: '20px 20px',
+              height: '100%',
+              display: 'flex', justifyContent: 'center', alignItems: 'flex-start',
+            }}>
+              <div style={{ borderRadius: 28, overflow: 'hidden', border: '1px solid #2a2a2e' }}>
+                <AndroidApp state={state} setState={setState} />
+              </div>
+            </div>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="logs" title="Activity log" subtitle="Plain English by default — toggle 'Show raw' for the engineer's view. Both come from the same JSON stream.">
+          <DCArtboard id="logs-light" label="Light" width={680} height={500}>
+            <div style={{ padding: 20, background: '#FAFAF9', height: '100%' }}>
+              <LogsView state={state} theme="light" />
+            </div>
+          </DCArtboard>
+          <DCArtboard id="logs-dark" label="Dark" width={680} height={500}>
+            <div style={{ padding: 20, background: '#0B0B0C', height: '100%' }}>
+              <LogsView state={state} theme="dark" />
+            </div>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection id="system" title="Design system" subtitle="The tokens — colors, type, status semantics. Reuse, don't reinvent.">
+          <DCArtboard id="tokens" label="Tokens" width={920} height={520}>
+            <DesignTokens />
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+    </div>
+  );
+}
+
+// ── System overview hero ──────────────────────────────────────
+function SystemOverview({ state }) {
+  return (
+    <div style={{ padding: '32px 40px', background: '#FAFAF9', height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', borderBottom: '1px solid #E4E4E7' }}>
+      <div>
+        <div className="mono" data-uppercase style={{ fontSize: 10, color: FS.crit, letterSpacing: '0.1em' }}>
+          ● v0.4.2 · stable
+        </div>
+        <h1 style={{ fontSize: 38, fontWeight: 600, margin: '10px 0 6px', letterSpacing: '-0.02em' }}>
+          The clipboard, everywhere it should be.
+        </h1>
+        <p style={{ fontSize: 15, color: '#52525B', maxWidth: 620, margin: 0, lineHeight: 1.5 }}>
+          One daemon, four operating systems, zero servers. Copy on your S21,
+          paste on your M1. Encrypted end-to-end, paused when your battery
+          dies, invisible the rest of the time.
+        </p>
+      </div>
+      <div style={{ display: 'flex', gap: 32, alignItems: 'center', fontSize: 11 }} className="mono">
+        <span style={{ color: '#71717A' }} data-uppercase><Dot status="ok" size={5} style={{ marginRight: 6 }} />Local-first</span>
+        <span style={{ color: '#71717A' }} data-uppercase><Dot status="ok" size={5} style={{ marginRight: 6 }} />Zero-knowledge</span>
+        <span style={{ color: '#71717A' }} data-uppercase><Dot status="ok" size={5} style={{ marginRight: 6 }} />ChaCha20-Poly1305</span>
+        <span style={{ color: '#71717A' }} data-uppercase><Dot status="ok" size={5} style={{ marginRight: 6 }} />Open source · MIT</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Design tokens artboard ────────────────────────────────────
+function DesignTokens() {
+  const swatch = (label, hex, fg = '#0A0A0A') => (
+    <div style={{ flex: 1 }}>
+      <div style={{ height: 56, background: hex, border: '1px solid #E4E4E7', borderRadius: 2 }} />
+      <div className="mono" style={{ marginTop: 6, fontSize: 10, color: '#71717A' }} data-uppercase>{label}</div>
+      <div className="mono" style={{ fontSize: 10, color: fg }}>{hex}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ padding: 32, background: '#FAFAF9', height: '100%', overflow: 'auto', color: '#0A0A0A' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 40 }}>
+        <div>
+          <div className="mono" data-uppercase style={{ fontSize: 10, color: '#71717A', marginBottom: 12 }}>Palette · Light</div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+            {swatch('bg', '#FAFAF9')}
+            {swatch('surface', '#FFFFFF')}
+            {swatch('border', '#E4E4E7')}
+            {swatch('muted', '#71717A', '#fff')}
+            {swatch('fg', '#0A0A0A', '#fff')}
+          </div>
+          <div className="mono" data-uppercase style={{ fontSize: 10, color: '#71717A', marginBottom: 12 }}>Palette · Dark</div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+            {swatch('bg', '#0B0B0C', '#fff')}
+            {swatch('surface', '#131316', '#fff')}
+            {swatch('border', '#1F1F22', '#fff')}
+            {swatch('muted', '#A1A1AA')}
+            {swatch('fg', '#FAFAFA')}
+          </div>
+          <div className="mono" data-uppercase style={{ fontSize: 10, color: '#71717A', marginBottom: 12 }}>Status · Semantic</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {swatch('ok · synced', '#3FAE5A', '#fff')}
+            {swatch('warn · paused', '#D9A441', '#fff')}
+            {swatch('crit · halted', '#D43F3F', '#fff')}
+            {swatch('info · neutral', '#5B7FBF', '#fff')}
+          </div>
+          <div style={{ marginTop: 14, fontSize: 11, color: '#52525B', lineHeight: 1.6 }}>
+            Le rouge sénégalais (#D43F3F) sert d'accent identitaire et marque uniquement les états critiques + l'identité de marque. Jamais en décoration. Le vert et l'ambre disent l'état du système, pas l'humeur.
+          </div>
+        </div>
+
+        <div>
+          <div className="mono" data-uppercase style={{ fontSize: 10, color: '#71717A', marginBottom: 12 }}>Typography</div>
+          <div style={{ borderTop: '1px solid #E4E4E7', paddingTop: 12 }}>
+            <div style={{ fontSize: 28, fontWeight: 600, letterSpacing: '-0.02em', marginBottom: 4 }}>Inter Tight</div>
+            <div style={{ color: '#71717A', fontSize: 12, marginBottom: 16 }}>UI · headings · body · 400/500/600</div>
+
+            <div className="mono" style={{ fontSize: 24, marginBottom: 4 }}>JetBrains Mono</div>
+            <div className="mono" style={{ color: '#71717A', fontSize: 12, marginBottom: 16 }}>data · IDs · logs · timestamps</div>
+          </div>
+
+          <div className="mono" data-uppercase style={{ fontSize: 10, color: '#71717A', margin: '20px 0 10px' }}>Components</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 18, padding: 14, border: '1px solid #E4E4E7', borderRadius: 4, background: '#FFF' }}>
+            <Toggle on={true} onChange={() => {}} />
+            <Toggle on={false} onChange={() => {}} />
+            <Battery level={82} />
+            <Battery level={12} threshold={15} />
+            <Battery level={3} threshold={15} />
+            <Battery level={45} charging />
+            <E2EBadge />
+            <span><Dot status="ok" pulse style={{ marginRight: 5 }} /><span className="mono" data-uppercase style={{ fontSize: 10 }}>live</span></span>
+          </div>
+
+          <div className="mono" data-uppercase style={{ fontSize: 10, color: '#71717A', margin: '20px 0 10px' }}>Identity</div>
+          <div style={{ fontSize: 11, color: '#52525B', lineHeight: 1.6 }}>
+            Updates futurs : version sémantique en footer mono, pas de modal "What's new", pas d'animation gratuite. La densité d'information remplace le bling. Une nouvelle feature = une ligne de plus dans le changelog, pas une bannière.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

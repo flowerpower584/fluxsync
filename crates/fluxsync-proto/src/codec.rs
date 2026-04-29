@@ -1,0 +1,263 @@
+use crate::error::ProtoError;
+use crate::types::{Chunk, ClipboardItem, Frame, Msg};
+use crate::{MAX_CHUNKS, MAX_CHUNK_DATA, MAX_PAYLOAD, PROTOCOL_VERSION};
+
+/// Encode a [`Frame`] to CBOR bytes.
+///
+/// Validates the frame before encoding so we never put a malformed datagram
+/// on the wire even by mistake.
+///
+/// # Errors
+/// Returns [`ProtoError::Version`] if `frame.version != PROTOCOL_VERSION`,
+/// [`ProtoError::PayloadTooLarge`] / [`ProtoError::ChunkDataTooLarge`] /
+/// [`ProtoError::ChunkTotalTooLarge`] / [`ProtoError::ChunkIndexOutOfRange`] /
+/// [`ProtoError::BatteryLevel`] when the corresponding field violates its
+/// bound, or [`ProtoError::CborEncode`] if the underlying serializer fails.
+pub fn encode(frame: &Frame) -> Result<Vec<u8>, ProtoError> {
+    if frame.version != PROTOCOL_VERSION {
+        return Err(ProtoError::Version {
+            got: frame.version,
+            expected: PROTOCOL_VERSION,
+        });
+    }
+    validate(frame)?;
+    let mut out = Vec::new();
+    ciborium::ser::into_writer(frame, &mut out)
+        .map_err(|e| ProtoError::CborEncode(e.to_string()))?;
+    Ok(out)
+}
+
+/// Decode CBOR bytes into a [`Frame`], validating the result.
+///
+/// Anything that fails validation is rejected here so higher layers can trust
+/// the resulting [`Frame`] without re-checking field bounds.
+///
+/// # Errors
+/// Returns [`ProtoError::Cbor`] for malformed CBOR, [`ProtoError::Version`]
+/// for an unsupported wire version, or one of the field-bound errors when a
+/// payload exceeds the v0.1 caps.
+pub fn decode(bytes: &[u8]) -> Result<Frame, ProtoError> {
+    let frame: Frame =
+        ciborium::de::from_reader(bytes).map_err(|e| ProtoError::Cbor(e.to_string()))?;
+    if frame.version != PROTOCOL_VERSION {
+        return Err(ProtoError::Version {
+            got: frame.version,
+            expected: PROTOCOL_VERSION,
+        });
+    }
+    validate(&frame)?;
+    Ok(frame)
+}
+
+fn validate(frame: &Frame) -> Result<(), ProtoError> {
+    match &frame.msg {
+        Msg::ClipboardItem(item) => validate_item(item),
+        Msg::Chunk(chunk) => validate_chunk(chunk),
+        Msg::BatteryStatus(b) if b.level > 100 => Err(ProtoError::BatteryLevel(b.level)),
+        _ => Ok(()),
+    }
+}
+
+fn validate_item(item: &ClipboardItem) -> Result<(), ProtoError> {
+    if item.payload.len() > MAX_PAYLOAD {
+        return Err(ProtoError::PayloadTooLarge(item.payload.len()));
+    }
+    Ok(())
+}
+
+fn validate_chunk(chunk: &Chunk) -> Result<(), ProtoError> {
+    if chunk.data.len() > MAX_CHUNK_DATA {
+        return Err(ProtoError::ChunkDataTooLarge(chunk.data.len()));
+    }
+    if chunk.total == 0 {
+        return Err(ProtoError::ChunkTotalZero);
+    }
+    if chunk.total > MAX_CHUNKS {
+        return Err(ProtoError::ChunkTotalTooLarge(chunk.total));
+    }
+    if chunk.idx >= chunk.total {
+        return Err(ProtoError::ChunkIndexOutOfRange {
+            idx: chunk.idx,
+            total: chunk.total,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Ack, BatteryStatus, ClipboardItem, Heartbeat, Kind};
+
+    fn frame(msg: Msg) -> Frame {
+        Frame {
+            version: PROTOCOL_VERSION,
+            msg,
+        }
+    }
+
+    #[test]
+    fn round_trip_bye() {
+        let f = frame(Msg::Bye);
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn round_trip_ack() {
+        let f = frame(Msg::Ack(Ack {
+            lamport: 42,
+            hash: [7; 32],
+        }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn round_trip_heartbeat() {
+        let f = frame(Msg::Heartbeat(Heartbeat {
+            lamport: 1,
+            rtt_hint: Some(11),
+        }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn round_trip_clipboard_url() {
+        let f = frame(Msg::ClipboardItem(ClipboardItem {
+            lamport: 99,
+            hash: [3; 32],
+            kind: Kind::Url,
+            payload: b"https://github.com".to_vec(),
+            sensitive: false,
+            wall_time_ms: 1_700_000_000_000,
+        }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn rejects_unknown_version_on_decode() {
+        // Build a frame with a bogus version byte by encoding under v1 then
+        // mutating the leading version field. Easier: build directly.
+        let bogus = Frame {
+            version: 0x99,
+            msg: Msg::Bye,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&bogus, &mut bytes).unwrap();
+        let err = decode(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ProtoError::Version {
+                    got: 0x99,
+                    expected: 0x01
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_version_on_encode() {
+        let bogus = Frame {
+            version: 0x42,
+            msg: Msg::Bye,
+        };
+        let err = encode(&bogus).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoError::Version {
+                got: 0x42,
+                expected: 0x01
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_payload() {
+        let item = ClipboardItem {
+            lamport: 0,
+            hash: [0; 32],
+            kind: Kind::Text,
+            payload: vec![0u8; MAX_PAYLOAD + 1],
+            sensitive: false,
+            wall_time_ms: 0,
+        };
+        let err = encode(&frame(Msg::ClipboardItem(item))).unwrap_err();
+        assert!(matches!(err, ProtoError::PayloadTooLarge(n) if n == MAX_PAYLOAD + 1));
+    }
+
+    #[test]
+    fn rejects_chunk_data_too_large() {
+        let chunk = Chunk {
+            item_id: [0; 32],
+            idx: 0,
+            total: 1,
+            data: vec![0u8; MAX_CHUNK_DATA + 1],
+        };
+        let err = encode(&frame(Msg::Chunk(chunk))).unwrap_err();
+        assert!(matches!(err, ProtoError::ChunkDataTooLarge(n) if n == MAX_CHUNK_DATA + 1));
+    }
+
+    #[test]
+    fn rejects_chunk_total_too_large() {
+        let chunk = Chunk {
+            item_id: [0; 32],
+            idx: 0,
+            total: 257,
+            data: vec![],
+        };
+        let err = encode(&frame(Msg::Chunk(chunk))).unwrap_err();
+        assert!(matches!(err, ProtoError::ChunkTotalTooLarge(257)));
+    }
+
+    #[test]
+    fn rejects_chunk_total_zero() {
+        let chunk = Chunk {
+            item_id: [0; 32],
+            idx: 0,
+            total: 0,
+            data: vec![],
+        };
+        let err = encode(&frame(Msg::Chunk(chunk))).unwrap_err();
+        assert!(matches!(err, ProtoError::ChunkTotalZero));
+    }
+
+    #[test]
+    fn rejects_chunk_idx_out_of_range() {
+        let chunk = Chunk {
+            item_id: [0; 32],
+            idx: 5,
+            total: 5,
+            data: vec![],
+        };
+        let err = encode(&frame(Msg::Chunk(chunk))).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoError::ChunkIndexOutOfRange { idx: 5, total: 5 }
+        ));
+    }
+
+    #[test]
+    fn rejects_battery_over_100() {
+        let bs = BatteryStatus {
+            lamport: 0,
+            level: 101,
+            charging: false,
+        };
+        let err = encode(&frame(Msg::BatteryStatus(bs))).unwrap_err();
+        assert!(matches!(err, ProtoError::BatteryLevel(101)));
+    }
+
+    #[test]
+    fn rejects_truncated_cbor() {
+        let f = frame(Msg::Bye);
+        let bytes = encode(&f).unwrap();
+        let truncated = &bytes[..bytes.len() - 1];
+        let err = decode(truncated).unwrap_err();
+        assert!(matches!(err, ProtoError::Cbor(_)));
+    }
+}
