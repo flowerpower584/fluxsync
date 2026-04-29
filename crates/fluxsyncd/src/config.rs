@@ -13,16 +13,21 @@ pub struct DaemonConfig {
     pub udp_port: u16,
     pub udp_bind: String, // e.g. "127.0.0.1" or "0.0.0.0"
     pub ipc_path: PathBuf,
+    /// Pre-trusted peer static pubkeys (32 B each) — typically empty at
+    /// boot; gets populated at pair-time. Persistence to keychain lands
+    /// in v0.1.2.
     pub trusted_peer_keys: Vec<[u8; 32]>,
     pub charge_override: bool,
     pub wall_clock: Arc<dyn WallClock + Send + Sync>,
-    /// Test injection: skip mDNS + handshake, jump straight to `Linked`
-    /// using the pre-paired session below.
-    ///
-    /// Production binaries always set this to `None`. Integration tests
-    /// in `crates/fluxsyncd/tests/` use it together with
-    /// `fluxsync_crypto::test_util::pair_for_test` so a sync-path
-    /// regression is distinguishable from a pairing regression.
+    /// Skip mDNS service register + browse. Default false. Tests on
+    /// loopback (where macOS multicast is unreliable) set this true and
+    /// drive pairing with the `pair-accept --addr` manual address path.
+    pub disable_mdns: bool,
+    /// Test injection: skip discovery + handshake, jump straight to
+    /// `Linked` using the pre-paired session below. Production binaries
+    /// always set this to `None`. Integration tests use it with
+    /// `fluxsync_crypto::test_util::pair_for_test` so sync-path bugs
+    /// stay distinguishable from pairing-path bugs.
     pub test_pair: Option<TestPair>,
 }
 
@@ -41,6 +46,7 @@ impl DaemonConfig {
             trusted_peer_keys: Vec::new(),
             charge_override: true,
             wall_clock: Arc::new(ChronoWallClock),
+            disable_mdns: false,
             test_pair: None,
         }
     }

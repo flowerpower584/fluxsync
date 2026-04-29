@@ -9,7 +9,9 @@
 
 pub mod cmd;
 pub mod config;
+pub mod discovery;
 pub mod driver;
+pub mod handshake;
 pub mod ipc;
 pub mod logs;
 pub mod transport;

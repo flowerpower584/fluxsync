@@ -41,6 +41,16 @@ pub enum CmdOp {
     Revoke { peer_id: String },
     DebugCapture,
     Shutdown,
+    /// Print this device's pair info (peer-id, base32 static pubkey,
+    /// 6-word fingerprint).
+    PairShow,
+    /// Trust the given remote pubkey + start the initiator handshake.
+    /// `addr` is required when mDNS is unavailable (pre-discovery).
+    PairAccept {
+        pubkey_b32: String,
+        name: String,
+        addr: Option<String>,
+    },
 }
 
 /// Response envelope on the `cmd` channel. `id` echoes the request.
