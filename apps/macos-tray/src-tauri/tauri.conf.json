@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FluxSync",
+  "version": "0.5.0",
+  "identifier": "sn.kaolack.fluxsync",
+  "build": {
+    "frontendDist": "../src",
+    "beforeBuildCommand": "",
+    "beforeDevCommand": ""
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "menu",
+        "title": "FluxSync",
+        "width": 360,
+        "height": 540,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false
+      },
+      {
+        "label": "settings",
+        "title": "FluxSync — Settings",
+        "width": 760,
+        "height": 500,
+        "resizable": false,
+        "decorations": true,
+        "transparent": false,
+        "visible": false,
+        "url": "settings.html"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "externalBin": [
+      "binaries/fluxsyncd"
+    ],
+    "targets": ["dmg", "app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ],
+    "category": "Utility",
+    "shortDescription": "Universal clipboard, local-first, peer-to-peer.",
+    "longDescription": "FluxSync mirrors your clipboard between paired devices on the same Wi-Fi. End-to-end encrypted with Noise IK + ChaCha20-Poly1305. No servers, no accounts."
+  }
+}

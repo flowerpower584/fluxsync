@@ -1,0 +1,17 @@
+# Tauri / Rust build artefacts
+src-tauri/target/
+src-tauri/gen/
+src-tauri/Cargo.lock
+
+# Node tooling (Tauri CLI lives here)
+node_modules/
+package-lock.json
+
+# Bundled outputs
+dist/
+*.app/
+*.dmg
+
+# Drop your own icons here — keep them out of git for now to avoid
+# vendoring binaries before the brand asset is finalized.
+icons/

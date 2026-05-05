@@ -38,3 +38,5 @@ thiserror = { workspace = true }
 base64 = "0.22"
 anyhow = "1"
 tracing = "0.1"
+android_logger = "0.14"
+log = "0.4"

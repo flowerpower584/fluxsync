@@ -1,0 +1,250 @@
+/* FluxSync macOS Settings Styles - v0.5.0 */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+* { box-sizing: border-box; font-family: var(--fs-ui); -webkit-font-smoothing: antialiased; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--fs-surface);
+  color: var(--fs-fg);
+  font-size: 13px;
+  overflow: hidden;
+  height: 100vh;
+}
+
+.settings-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ── Title Bar ─────────────────────────────────────────────────── */
+.settings-titlebar {
+  height: 40px;
+  background: var(--fs-bg);
+  border-bottom: 1px solid var(--fs-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  -webkit-app-region: drag;
+}
+
+.settings-titlebar .title {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* ── Layout ────────────────────────────────────────────────────── */
+.settings-layout {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 200px;
+  background: var(--fs-bg);
+  border-right: 1px solid var(--fs-border);
+  padding: 14px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pane-content {
+  flex: 1;
+  padding: 24px 32px;
+  overflow-y: auto;
+}
+
+/* ── Sidebar Buttons ───────────────────────────────────────────── */
+.tab-btn {
+  width: 100%;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: 0;
+  color: var(--fs-fg);
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.tab-btn:hover { background: var(--fs-hover); }
+.tab-btn.active {
+  background: var(--fs-crit-soft);
+  color: var(--fs-crit);
+  font-weight: 500;
+}
+.tab-btn svg { flex-shrink: 0; }
+
+/* ── Panes ─────────────────────────────────────────────────────── */
+.pane-header { margin-bottom: 24px; }
+.pane-header h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+.pane-header p { color: var(--fs-muted); font-size: 12px; margin: 0; }
+
+.field-row {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--fs-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+.field-row.no-border { border-bottom: none; }
+
+.field-info .label { font-size: 13px; }
+.field-info .hint { color: var(--fs-muted); font-size: 11px; margin-top: 2px; }
+
+/* ── Components ────────────────────────────────────────────────── */
+.toggle {
+  width: 36px; height: 20px;
+  border: 1px solid var(--fs-border-strong);
+  border-radius: 2px;
+  position: relative;
+  background: transparent;
+  transition: all .15s ease;
+  cursor: pointer;
+  padding: 0;
+}
+.toggle .knob {
+  position: absolute; top: 1px; left: 1px;
+  width: 16px; height: 16px;
+  background: var(--fs-muted);
+  border-radius: 1px;
+  transition: all .15s ease;
+}
+.toggle.on { background: var(--fs-crit); border-color: var(--fs-crit); }
+.toggle.on .knob { left: 17px; background: #fff; }
+.toggle.disabled { opacity: 0.4; cursor: not-allowed; }
+
+.slider-container { width: 200px; }
+input[type="range"] {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 2px;
+  background: var(--fs-border);
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px; height: 12px;
+  background: var(--fs-surface);
+  border: 1px solid var(--fs-crit);
+  border-radius: 1px;
+  cursor: pointer;
+  transition: transform .1s ease, background-color .1s ease;
+}
+input[type="range"]:active::-webkit-slider-thumb {
+  transform: scale(1.2);
+  background: var(--fs-crit-soft);
+}
+
+.mono-val { font-family: var(--fs-mono); font-size: 13px; color: var(--fs-fg); }
+.mono-val.dimmed { color: var(--fs-muted); font-size: 11px; }
+
+.v06-badge {
+  font-family: var(--fs-mono);
+  font-size: 8px;
+  background: var(--fs-crit-soft);
+  color: var(--fs-crit);
+  padding: 1px 4px;
+  border-radius: 2px;
+  margin-left: 6px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+/* ── About Section ─────────────────────────────────────────────── */
+.about-hero {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--fs-border);
+}
+
+.app-icon-box {
+  width: 56px; height: 56px;
+  border: 1px solid var(--fs-border);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-meta h2 { font-size: 18px; font-weight: 600; margin: 0; }
+.app-meta .build { color: var(--fs-muted); font-size: 11px; margin-top: 3px; }
+.app-meta .desc { color: var(--fs-subtle); font-size: 11px; margin-top: 4px; }
+
+.link { color: var(--fs-muted); font-size: 11px; cursor: pointer; }
+.link:hover { color: var(--fs-fg); }
+
+.check-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  border: 1px solid var(--fs-crit);
+  color: var(--fs-crit);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+.check-btn:hover { background: var(--fs-crit-soft); }
+
+.about-footer {
+  margin-top: 24px;
+  padding: 14px 16px;
+  background: var(--fs-bg);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--fs-muted);
+  line-height: 1.6;
+}
+
+/* ── Devices List ──────────────────────────────────────────────── */
+.device-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+.device-item {
+  padding: 12px 14px;
+  border: 1px solid var(--fs-border);
+  border-radius: 6px;
+  background: var(--fs-surface);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.device-item .name-row { display: flex; align-items: center; gap: 6px; }
+.device-item .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--fs-ok); }
+.device-item .name { font-weight: 500; }
+.device-item .meta { font-family: var(--fs-mono); font-size: 10px; color: var(--fs-subtle); margin-top: 4px; }
+.device-item .last-seen { font-family: var(--fs-mono); font-size: 10px; color: var(--fs-muted); margin-top: 2px; }
+
+.unpair-btn {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--fs-crit);
+  border: 1px solid var(--fs-crit);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--fs-mono);
+}
+
+.add-device-btn {
+  width: 100%;
+  padding: 12px;
+  border: 1px dashed var(--fs-border-strong);
+  border-radius: 6px;
+  color: var(--fs-fg);
+  font-size: 13px;
+  font-weight: 500;
+  background: transparent;
+  cursor: pointer;
+}
+.add-device-btn .plus { color: var(--fs-crit); margin-right: 8px; }

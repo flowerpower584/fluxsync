@@ -21,6 +21,7 @@ too_many_lines = "allow"
 
 [dependencies]
 fluxsync-proto = { path = "../fluxsync-proto" }
+dirs = "5"
 fluxsync-crypto = { path = "../fluxsync-crypto" }
 fluxsync-core = { path = "../fluxsync-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal", "fs"] }
@@ -33,9 +34,20 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 thiserror = { workspace = true }
+mdns-sd = "0.13"
+base32 = "0.5"
+hex = "0.4"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", features = ["fs"] }
+nix = { version = "0.28", features = ["fs", "hostname"] }
+
+# `arboard` only ships backends for desktop OSes (macOS Cocoa, Linux
+# X11/Wayland, Windows Win32). On Android the same daemon is linked
+# into `fluxsync-mobile-ffi` and the OS clipboard is read/written from
+# `MainActivity` via Android's `ClipboardManager`, so the daemon doesn't
+# need this dep there. Excluding it keeps `cargo ndk` builds green.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = { version = "3", default-features = false }
 
 [dev-dependencies]
 fluxsync-crypto = { path = "../fluxsync-crypto", features = ["test-util"] }

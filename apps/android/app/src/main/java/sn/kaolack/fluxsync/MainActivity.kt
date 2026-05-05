@@ -1,77 +1,116 @@
 package sn.kaolack.fluxsync
 
-import android.app.Activity
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.os.BatteryManager
+import android.os.Build
 import android.os.Bundle
-import android.util.Log
-import android.widget.TextView
-import java.io.File
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.runtime.LaunchedEffect
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import sn.kaolack.fluxsync.ui.FluxsyncApp
+import sn.kaolack.fluxsync.ui.theme.FluxsyncTheme
+import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
 /**
- * v0.1 skeleton: load the FluxSync UniFFI shared library, start the
- * daemon, install a state observer that logs every snapshot to logcat,
- * and display the most recent JSON in a single TextView.
+ * Compose entry point. Owns the `FluxsyncViewModel` (which boots/shuts
+ * down the Rust daemon thread) and three pieces of OS plumbing the
+ * daemon can't do from Rust:
  *
- * No Compose UI here yet. The shape of the data the UI will render is
- * defined by the design bundle in `design/` and the JSON shape served
- * by `start()`'s `observe_state` callback.
+ *   * **Clipboard** — registers a `ClipboardManager` listener so local
+ *     copies are pushed to the peer; observes `vm.state.history[0]` so
+ *     items received from the peer are written to the OS clipboard.
+ *     Both directions dedup against `lastWrittenText` to break the
+ *     read-our-own-write echo.
+ *   * **Battery** — registers a `ACTION_BATTERY_CHANGED` receiver and
+ *     forwards level/charging into the daemon via `vm.setSelfBattery`,
+ *     so the peer device sees the real battery instead of a hardcoded
+ *     100%.
+ *   * **Lifecycle** — the Activity's lifecycleScope cancels the
+ *     listeners + receiver in `onDestroy`, which the ViewModel can't do
+ *     because it doesn't have a Context.
  *
- * Build:
- *   1. `cargo ndk -t arm64-v8a build --release -p fluxsync-mobile-ffi`
- *      (or `cross build --target aarch64-linux-android --release -p fluxsync-mobile-ffi`)
- *   2. Copy `target/aarch64-linux-android/release/libfluxsync_mobile_ffi.so`
- *      into `apps/android/app/src/main/jniLibs/arm64-v8a/`
- *   3. Generate Kotlin bindings:
- *      `cargo run -p uniffi-bindgen-cli -- generate \
- *         --library target/aarch64-linux-android/release/libfluxsync_mobile_ffi.so \
- *         --language kotlin \
- *         --out-dir apps/android/app/src/main/java`
- *   4. `./gradlew assembleDebug`
+ * Build pipeline (run from the workspace root):
+ *
+ *   1. cargo ndk -t arm64-v8a -o apps/android/app/src/main/jniLibs \
+ *        build --release -p fluxsync-mobile-ffi
+ *   2. cargo run -p uniffi-bindgen -- generate \
+ *        --library apps/android/app/src/main/jniLibs/arm64-v8a/libfluxsync_mobile_ffi.so \
+ *        --language kotlin \
+ *        --out-dir apps/android/app/src/main/java
+ *   3. (cd apps/android && ./gradlew assembleDebug)
  */
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
 
-    private lateinit var view: TextView
-    private var handle: FluxsyncHandle? = null
+    private lateinit var clipboard: ClipboardManager
+    private var currentVm: FluxsyncViewModel? = null
+
+    private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
+        val clip = clipboard.primaryClip ?: return@OnPrimaryClipChangedListener
+        if (clip.itemCount == 0) return@OnPrimaryClipChangedListener
+        val raw = clip.getItemAt(0).coerceToText(this) ?: return@OnPrimaryClipChangedListener
+        val text = raw.toString()
+        if (text.isEmpty()) return@OnPrimaryClipChangedListener
+        if (text == FluxsyncManager.lastPeerClipText) return@OnPrimaryClipChangedListener
+        
+        val vm = currentVm ?: return@OnPrimaryClipChangedListener
+        lifecycleScope.launch { vm.pushText(text) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        view = TextView(this).apply { text = "starting fluxsync..." }
-        setContentView(view)
 
-        val ipcPath = File(filesDir, "fluxsync.sock").absolutePath
-        try {
-            val h = FluxsyncHandle.start(
-                peerName = "${android.os.Build.MODEL}",
-                ipcPath = ipcPath,
-                udpPort = 41889u,
-                identitySecretB64 = null, // v0.1: regenerate on every boot
-            )
-            handle = h
+        // Request notification permission for Android 13+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+            }
+        }
 
-            // Hop to UI thread inside the callback — required by Compose
-            // and by classic Views alike. The Rust side fires on a Rust
-            // worker thread.
-            h.observeState(object : StateObserver {
-                override fun onState(json: String) {
-                    runOnUiThread {
-                        view.text = json
-                    }
-                }
-            })
+        clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.addPrimaryClipChangedListener(clipListener)
 
-            Log.i(TAG, "fluxsync started; ipc=$ipcPath")
-        } catch (t: Throwable) {
-            Log.e(TAG, "fluxsync failed to start", t)
-            view.text = "error: ${t.message}"
+        setContent {
+            val vm: FluxsyncViewModel = viewModel()
+            currentVm = vm
+
+            FluxsyncTheme {
+                FluxsyncApp(vm)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        currentVm?.checkAccessibility()
+        
+        // Force a clipboard check when the app is opened
+        val clip = clipboard.primaryClip
+        if (clip != null && clip.itemCount > 0) {
+            val text = clip.getItemAt(0).coerceToText(this)?.toString()?.trim()
+            if (text != null && text.isNotEmpty() && text != FluxsyncManager.lastPeerClipText?.trim()) {
+                currentVm?.pushText(text)
+            }
         }
     }
 
     override fun onDestroy() {
+        try {
+            clipboard.removePrimaryClipChangedListener(clipListener)
+        } catch (_: Throwable) {
+        }
+        currentVm = null
         super.onDestroy()
-        handle?.stop()
-        handle = null
-    }
-
-    companion object {
-        private const val TAG = "FluxSync"
     }
 }

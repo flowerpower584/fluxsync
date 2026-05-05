@@ -29,7 +29,7 @@ pub use error::CoreError;
 pub use events::{Action, Event, LogEntry, LogLevel};
 pub use fsm::{transition, Phase};
 pub use policy::status_for;
-pub use state::{Config, HistoryItem, State, Status};
+pub use state::{Config, HistoryItem, HistorySource, State, Status};
 
 // Re-export Kind from proto so wire and IPC representations stay in sync.
 pub use fluxsync_proto::Kind;

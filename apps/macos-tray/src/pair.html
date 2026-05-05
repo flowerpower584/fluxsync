@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=420, initial-scale=1" />
+  <title>FluxSync — Pair</title>
+  <link rel="stylesheet" href="shared.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="pair">
+    <div class="appbar">
+      <div class="brand">
+        <div class="glyph"></div>
+        <div>
+          <div class="name">Pair a device</div>
+          <div class="ver">SHOW THIS QR ON THE OTHER PHONE / MAC</div>
+        </div>
+      </div>
+    </div>
+    <div id="pair-error" class="err" style="display:none"></div>
+    <div class="qr-card" id="qr-card">
+      <span style="color:#71717A;font-family:'JetBrains Mono',monospace;font-size:11px">Generating…</span>
+    </div>
+    <div class="fp-words" id="fp-words"></div>
+    <div class="addr" id="addr-hint"></div>
+  </div>
+  <script type="module" src="pair.js"></script>
+</body>
+</html>

@@ -14,8 +14,8 @@ mod types;
 pub use codec::{decode, encode};
 pub use error::ProtoError;
 pub use types::{
-    Ack, BatteryStatus, Chunk, ClipboardItem, Frame, HandshakeInit, HandshakeResp, Heartbeat, Kind,
-    Msg, PeerInfo,
+    Ack, BatteryStatus, Chunk, ClipboardItem, Frame, HandshakeInit, HandshakeResp, Heartbeat,
+    Hello, Kind, Msg, PeerInfo,
 };
 
 /// Wire-format version. Bumped on any breaking change to the CBOR shapes.

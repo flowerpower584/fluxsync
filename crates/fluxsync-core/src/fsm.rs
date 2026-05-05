@@ -23,6 +23,7 @@ pub enum Phase {
 
 /// Compute the next phase + action list for a `(phase, event)` pair.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
     use Action as A;
     use Event as E;
@@ -38,6 +39,18 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
                 A::EmitState,
                 A::EmitLog(LogEntry::info("Sync turned off.")),
             ],
+        ),
+
+        // Global: Manual unpair instantly drops the peer and goes to Idle.
+        (_, E::ManualUnpair) => (
+            P::Idle,
+            vec![
+                A::CloseSession,
+                A::StopDiscovery,
+                A::DropPeer,
+                A::EmitState,
+                A::EmitLog(LogEntry::info("Unpaired from peer.")),
+            ]
         ),
 
         // Idle → Discovering on ToggleOn.
@@ -69,25 +82,58 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             ],
         ),
 
+        // Zero-Day Feature: Cryptographic Reset Detection
+        // Handle globally to ensure we escape any stuck phase (Handshaking, etc)
+        (_, E::UntrustedPeerSeen { .. }) => (
+            P::Discovering,
+            vec![
+                A::DropPeer,
+                A::EmitState,
+                A::EmitLog(LogEntry::warn("Peer cryptographic mismatch detected. Unpairing.")),
+                A::StartDiscovery,
+            ]
+        ),
+
+        // Ghost Timeout: 10 minutes elapsed without seeing the peer.
+        // Rescues from stuck Discovery/Handshake. Does NOT affect Linked session.
+        (P::Discovering | P::Handshaking, E::GhostTimeout) => (
+            P::Discovering,
+            vec![
+                A::DropPeer,
+                A::EmitState,
+                A::EmitLog(LogEntry::warn("Reconnection timeout. Returning to scan mode.")),
+                A::StartDiscovery,
+            ]
+        ),
+
         // Handshaking → Linked on HandshakeOk.
         (P::Handshaking, E::HandshakeOk) => (
             P::Linked,
             vec![
                 A::OpenSession,
                 A::BurstReplay,
+                A::SendBattery {
+                    level: 100, // Placeholder; App will overwrite with real level immediately
+                    charging: false,
+                },
                 A::EmitState,
                 A::EmitLog(LogEntry::ok("Handshake complete. Link is live.")),
             ],
         ),
 
-        // Handshaking → Discovering on timeout.
-        (P::Handshaking, E::HandshakeTimeout) => (
+        // Handshaking → Discovering on timeout or peer lost.
+        (P::Handshaking, E::HandshakeTimeout | E::PeerLost) => (
             P::Discovering,
             vec![
-                A::EmitLog(LogEntry::warn("Handshake timed out. Retrying.")),
+                A::EmitLog(LogEntry::warn("Handshake interrupted or timed out. Retrying.")),
                 A::StartDiscovery,
             ],
         ),
+
+        // ❌ FAILLE #1 FIX: Handshaking + PeerSeen. 
+        // Logic in app.rs will have already checked if it's a mismatch.
+        // If we reach here, it's either the SAME peer or we're allowing it.
+        (P::Handshaking, E::PeerSeen { .. }) => (P::Handshaking, vec![]),
 
         // Linked: outbound clipboard.
         (
@@ -133,8 +179,17 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             ],
         ),
 
-        // Linked → Discovering on PeerLost.
-        (P::Linked, E::PeerLost) => (
+        // Linked: peer name update (Hello exchange after handshake).
+        (P::Linked, E::PeerSeen { .. }) => (
+            P::Linked,
+            vec![
+                A::EmitState,
+                A::EmitLog(LogEntry::ok("Peer identity confirmed.")),
+            ],
+        ),
+
+        // Linked/Paused/Halted → Discovering on PeerLost.
+        (P::Linked | P::Paused | P::Halted, E::PeerLost) => (
             P::Discovering,
             vec![
                 A::CloseSession,
@@ -144,29 +199,39 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             ],
         ),
 
-        // Linked + battery change: handled at App layer (status recompute);
-        // the transition stays in Linked but the App may flip self.phase to
-        // Paused or Halted using `transition` again with a synthesized event.
-        (P::Linked, E::BatteryChangedSelf { .. } | E::BatteryChangedPeer { .. }) => {
-            (P::Linked, vec![A::EmitState])
+        // Battery changes: always update state. In Linked phase, also sync to peer.
+        (P::Linked, E::BatteryChangedSelf { level, charging }) => (
+            P::Linked,
+            vec![
+                A::SendBattery {
+                    level: *level,
+                    charging: *charging,
+                },
+                A::EmitState,
+            ],
+        ),
+        (phase, E::BatteryChangedSelf { .. } | E::BatteryChangedPeer { .. }) => {
+            (phase, vec![A::EmitState])
         }
 
-        // Paused: a fresh battery sample may bring us back to Linked.
-        // The App layer decides; the FSM only acknowledges.
-        (P::Paused, E::BatteryChangedSelf { .. } | E::BatteryChangedPeer { .. }) => {
-            (P::Paused, vec![A::EmitState])
-        }
-
-        // Halted: same — App decides when to come back.
-        (P::Halted, E::BatteryChangedSelf { .. } | E::BatteryChangedPeer { .. }) => {
-            (P::Halted, vec![A::EmitState])
-        }
-
-        // Reconnect after offline → burst replay (handled in Linked).
+        // Reconnect events.
         (P::Linked, E::Reconnect) => (P::Linked, vec![A::BurstReplay]),
+        (P::Discovering, E::Reconnect) => (P::Discovering, vec![A::StartDiscovery]),
+        (P::Handshaking, E::Reconnect) => (P::Handshaking, vec![]),
 
-        // Anything else: no-op. The App emits a DEBUG log if it wants.
-        _ => (phase, vec![]),
+        // Network changes in other phases.
+        (P::Linked, E::NetworkChanged) => (P::Linked, vec![]), // Handled by socket layer roaming
+        (P::Handshaking, E::NetworkChanged) => (P::Discovering, vec![A::StartDiscovery]),
+
+        // Fallback for all other undefined transitions.
+        (phase, _event) => {
+            // Only warn on events that should technically change phase but aren't handled.
+            // Battery changes and clipboard events in Idle are common and don't need warnings.
+            if !matches!(_event, E::BatteryChangedSelf { .. } | E::BatteryChangedPeer { .. }) {
+                tracing::debug!("Undefined FSM transition: ({:?}, {:?})", phase, _event);
+            }
+            (phase, vec![])
+        }
     }
 }
 

@@ -6,3 +6,10 @@
 .idea/
 .vscode/
 proptest-regressions/
+
+# Build artifacts
+build/
+.gradle/
+local.properties
+gradle_output.txt
+*.class
