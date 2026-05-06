@@ -29,10 +29,10 @@ Don't want to build from source? Download the latest stable binaries directly:
 Run the daemon. This handles the background sync and encryption.
 ```sh
 # macOS / Linux
-./fluxsyncd --udp-bind 0.0.0.0 --ipc-path /tmp/flux.sock
+./fluxsyncd --udp-bind 0.0.0.0
 
 # Windows
-# fluxsyncd.exe --udp-bind 0.0.0.0 --ipc-path \\.\pipe\flux
+# fluxsyncd.exe --udp-bind 0.0.0.0
 ```
 
 ### 2. Connect your Devices
@@ -40,8 +40,8 @@ Open the Android app or the macOS Tray icon. Scan the QR code to pair. **Your da
 
 ### 3. Use the CLI (Optional)
 ```sh
-./fluxctl --ipc-path /tmp/flux.sock status
-./fluxctl --ipc-path /tmp/flux.sock push "Hello from Kaolack! 🇸🇳"
+./fluxctl status
+./fluxctl push "Hello from Kaolack! 🇸🇳"
 ```
 
 ---
