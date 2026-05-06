@@ -13,24 +13,48 @@ One daemon, four operating systems, zero servers.
 
 ---
 
-## Quickstart
+## ⚡ v0.5.0 Release: Stabilization & Universal Sync
+Official stable release. No more 40s latency. Instant P2P pairing.
 
+### 📥 Download Pre-built Binaries (Easiest)
+Don't want to build from source? Download the latest stable binaries directly:
+- 📱 **Android**: [**Download fluxsync.apk**](https://github.com/flowerpower584/fluxsync/raw/main/fluxsync.apk)
+- 💻 **macOS**: [**Download fluxsync.dmg**](https://github.com/flowerpower584/fluxsync/raw/main/fluxsync.dmg)
+
+---
+
+## Quickstart (v0.5.0)
+
+### 1. Start the Engine
+Run the daemon. This handles the background sync and encryption.
 ```sh
-# 1. install
-git clone https://github.com/dethie/fluxsync && cd fluxsync && cargo build --release
+# macOS / Linux
+./fluxsyncd --udp-bind 0.0.0.0 --ipc-path /tmp/flux.sock
 
-# 2. run the daemon (one terminal)
-./target/release/fluxsyncd --ipc-path /tmp/flux.sock --udp-bind 127.0.0.1
-
-# 3. drive it (another terminal)
-./target/release/fluxctl --ipc-path /tmp/flux.sock --json status
-./target/release/fluxctl --ipc-path /tmp/flux.sock --json push "https://kaolack.sn"
+# Windows
+# fluxsyncd.exe --udp-bind 0.0.0.0 --ipc-path \\.\pipe\flux
 ```
 
-> v0.1 ships the daemon, the CLI, and the Android UniFFI shell. Real
-> cross-device pairing (mDNS + QR) lands in v0.1.1 — see `CHANGELOG.md`.
+### 2. Connect your Devices
+Open the Android app or the macOS Tray icon. Scan the QR code to pair. **Your data never leaves your local network.**
+
+### 3. Use the CLI (Optional)
+```sh
+./fluxctl status
+./fluxctl push "Hello from Kaolack! 🇸🇳"
+```
+
+---
+
+## 🛠️ Build from Source
+If you prefer to build it yourself (requires Rust):
+```sh
+git clone https://github.com/flowerpower584/fluxsync && cd fluxsync
+cargo build --release
+```
 
 ## Architecture
+(See the Mermaid diagram below for technical details)
 
 ```mermaid
 flowchart LR
@@ -64,14 +88,6 @@ flowchart LR
 | Battery-aware auto-pause                 |   no        |          partial          |   no      |   **yes**    |
 | One Rust daemon, no GUI dep              |   no        |          —                |   yes     |   **yes**    |
 | Open source, MIT                         |   yes (GPL) |          no               |   yes (MPL) | **yes**     |
-
-## Threat model (4 lines)
-
-Every byte that leaves the device is sealed in a Noise IK ChaCha20-Poly1305 session keyed to a peer the user explicitly paired. There is no plaintext fallback, ever. A 6-word verbal fingerprint defeats LAN MITM at pair-time. Long-term identity keys live in the OS keychain, never on disk in clear. Full threat model: [`docs/SECURITY.md`](docs/SECURITY.md).
-
-## License
-
-MIT. See [`LICENSE`](LICENSE).
 
 ---
 Crafted in Kaolack, Senegal 🇸🇳

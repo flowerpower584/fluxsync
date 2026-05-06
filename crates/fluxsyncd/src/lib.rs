@@ -7,11 +7,16 @@
 //! pre-paired [`fluxsync_crypto::Session`] via [`config::TestPair`] to
 //! skip the QR/handshake flow.
 
+pub mod battery;
 pub mod cmd;
 pub mod config;
+pub mod discovery;
 pub mod driver;
+pub mod handshake;
 pub mod ipc;
+pub mod keystore;
 pub mod logs;
+pub mod metrics;
 pub mod transport;
 pub mod wall;
 

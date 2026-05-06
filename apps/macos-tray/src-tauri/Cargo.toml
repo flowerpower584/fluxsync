@@ -1,0 +1,47 @@
+[package]
+name = "fluxsync-macos-tray"
+version = "0.5.0"
+edition = "2021"
+description = "FluxSync macOS menu-bar app — Tauri v2 wrapper around fluxsyncd's IPC."
+
+# Tauri v2 lib + bin pattern. The lib carries the actual `run()`
+# entry point so that the iOS / desktop binaries (`src/main.rs`)
+# stay one-line shims.
+[lib]
+name = "fluxsync_macos_tray_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# `build.rs` writes placeholder PNG icons before `tauri-build` runs, so
+# `tauri::generate_context!()` always finds a valid icon set even when
+# the artist hasn't dropped real assets into `icons/` yet. The dep is
+# build-only — it does not leak into the runtime binary.
+png = "0.17"
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+blake3 = "1.5"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dirs = "5"
+
+# QR encoder used by the pair window. `default-features = false`
+# strips PNG/image rendering — we only need the SVG renderer for the
+# WebView.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+# Sized down to "what we actually link" — tracing-subscriber not pulled
+# because Tauri's own log plugin handles user-facing logs.
+tracing = "0.1"
+
+# This crate lives outside the main Cargo workspace deliberately. Tauri
+# generates its own `target/` and runs `cargo build` with the bundle
+# settings from `tauri.conf.json`; mixing it into the workspace tends
+# to fight with `cargo check` invariants the rest of the repo relies on.
+[workspace]

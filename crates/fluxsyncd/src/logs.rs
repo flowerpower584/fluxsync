@@ -23,6 +23,11 @@ impl LogTail {
         }
     }
 
+    /// Push a log entry, evicting the oldest if at capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn push(&self, entry: LogEntry) {
         let mut g = self.inner.lock().expect("LogTail mutex poisoned");
         if g.len() == CAPACITY {
@@ -31,6 +36,11 @@ impl LogTail {
         g.push_back(entry);
     }
 
+    /// Return the last `n` entries (most-recent last).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn snapshot(&self, n: usize) -> Vec<LogEntry> {
         let g = self.inner.lock().expect("LogTail mutex poisoned");

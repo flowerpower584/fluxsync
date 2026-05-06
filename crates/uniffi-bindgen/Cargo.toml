@@ -1,0 +1,18 @@
+[package]
+name = "uniffi-bindgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Workspace-local UniFFI bindgen runner — emits the Kotlin glue from libfluxsync_mobile_ffi.so."
+
+[dependencies]
+# `cli` pulls in the `uniffi_bindgen_main` entry point and the kotlin /
+# swift / python backends.
+uniffi = { version = "0.27", features = ["cli"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"

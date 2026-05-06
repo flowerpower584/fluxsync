@@ -31,6 +31,18 @@ pub enum Msg {
     Chunk(Chunk),
     Ack(Ack),
     Bye,
+    /// Sent once per side immediately after the Linked transition.
+    /// Carries the sender's `peer_name_self` so the receiver can drop
+    /// the TOFU "pending" placeholder and show the real device name.
+    Hello(Hello),
+}
+
+/// Post-handshake greeting. The Noise IK handshake itself doesn't carry
+/// friendly names — only static pubkeys — so the responder ends up with
+/// a placeholder until this frame arrives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hello {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

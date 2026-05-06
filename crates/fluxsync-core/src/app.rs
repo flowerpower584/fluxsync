@@ -49,18 +49,29 @@ impl App {
         &self.config
     }
 
+    pub fn set_metrics(&mut self, m: Option<crate::state::ConnectionMetrics>) {
+        self.state.metrics = m;
+    }
+
+    pub fn set_latency(&mut self, ms: u32) {
+        self.state.link_latency_ms = ms;
+    }
+
+    pub fn set_charge_override(&mut self, value: bool) {
+        self.config.charge_override = value;
+        self.state.charge_override = value;
+    }
+
     /// Drive the state machine with one event. Returns the side-effect
     /// commands the daemon must execute, in order.
     ///
     /// `wall` is `?Sized` so callers may pass either a concrete value
     /// (`&StubWallClock` in tests) or a trait object (`&dyn WallClock`
     /// in the daemon, which holds an `Arc<dyn WallClock + Send + Sync>`).
+    #[allow(clippy::needless_pass_by_value)] // Event is consumed by design; callers lose ownership.
     pub fn handle<W: WallClock + ?Sized>(&mut self, event: Event, wall: &W) -> Vec<Action> {
-        // Snapshot so we can detect any state mutation (not just `status`)
-        // and notify subscribers. Without this, e.g. a `LocalClipboardChange`
-        // that grew `history` but did not flip `status` would silently
-        // skip the observer fan-out.
-        let pre_snapshot = self.state.clone();
+        // [FIX] Optimization: Removed expensive state.clone().
+        // Instead, we manually track if we need to EmitState.
 
         // ── Pre-transition state mutations ──────────────────────────────
         // (everything that is "data the FSM expects to already be in state")
@@ -68,7 +79,19 @@ impl App {
         match &event {
             Event::ToggleOn => self.state.on = true,
             Event::ToggleOff => self.state.on = false,
-            Event::PeerSeen { name, .. } => self.state.peer_name = name.clone(),
+            Event::PeerSeen { name, peer_id } => {
+                if self.is_peer_mismatch(*peer_id) {
+                    // [REMEDIATION] Completely abort the process.
+                    // DO NOT transition, DO NOT return any actions.
+                    return vec![];
+                } else {
+                    self.state.peer_name.clone_from(name);
+                    // Don't overwrite peer_id with placeholder
+                    if *peer_id != [0u8; 32] {
+                        self.state.peer_id = *peer_id;
+                    }
+                }
+            }
             Event::BatteryChangedSelf { level, charging } => {
                 self.state.battery_level = *level;
                 self.state.charging = *charging;
@@ -84,15 +107,18 @@ impl App {
                 sensitive,
                 lamport,
             } => {
+                let preview = preview.trim();
                 self.clock.observe(*lamport);
                 if !self.dedup.observe(*hash) {
                     suppress_action = true; // saw it from peer already, don't echo
-                }
-                if !sensitive {
+                } else if !sensitive {
                     self.push_history(HistoryItem {
                         kind: *kind,
-                        preview: preview.clone(),
+                        preview: preview.to_string(),
                         time: wall.hhmm(),
+                        source: crate::state::HistorySource::Local,
+                        sensitive: *sensitive,
+                        lamport: *lamport,
                     });
                 }
             }
@@ -100,32 +126,106 @@ impl App {
                 hash,
                 kind,
                 preview,
+                sensitive,
                 lamport,
             } => {
+                // On nettoie le texte (espaces inutiles aux extrémités)
+                let preview = preview.trim();
+                // On synchronise notre horloge logique (Lamport) avec celle de l'Android
                 self.clock.observe(*lamport);
-                if !self.dedup.observe(*hash) {
-                    suppress_action = true; // duplicate, ack-only
+
+                // [FIX] Anti-écho : On ne bloque que si c'est EXACTEMENT le même texte que le dernier item.
+                // Le DedupRing global était trop sévère et bloquait les tests manuels répétitifs.
+                let is_echo = self.state.history.first()
+                    .map(|item| item.preview == preview)
+                    .unwrap_or(false);
+
+                if is_echo {
+                    // C'est un doublon immédiat (écho), on ignore l'écriture mais on envoie un ACK (accusé de réception)
+                    suppress_action = true;
+                } else {
+                    // On met à jour le ring de dédoublonnage pour éviter de renvoyer ce même texte à l'Android
+                    self.dedup.observe(*hash);
+
+                    if !sensitive {
+                        // Si ce n'est pas une donnée sensible (mot de passe), on l'ajoute à l'historique Mac
+                        self.push_history(HistoryItem {
+                            kind: *kind,
+                            preview: preview.to_string(),
+                            time: wall.hhmm(),
+                            source: crate::state::HistorySource::Remote,
+                            sensitive: *sensitive,
+                            lamport: *lamport,
+                        });
+                    }
                 }
-                self.push_history(HistoryItem {
-                    kind: *kind,
-                    preview: preview.clone(),
-                    time: wall.hhmm(),
-                });
+            }
+            Event::PeerLost => {
+                self.state.peer_battery = 100;
+                self.state.peer_charging = false;
+            }
+            Event::UntrustedPeerSeen { .. } => {
+                self.state.peer_name.clear();
+                self.state.peer_id = [0u8; 32];
+                self.state.peer_battery = 100;
+                self.state.peer_charging = false;
+                self.state.history.clear();
+            }
+            Event::GhostTimeout => {
+                // [FIX] Only clear if we were actually stuck in discovery/handshake
+                if !matches!(self.phase, Phase::Linked | Phase::Paused | Phase::Halted) {
+                    self.state.peer_name.clear();
+                    self.state.peer_id = [0u8; 32];
+                    self.state.peer_battery = 100;
+                    self.state.peer_charging = false;
+                    self.state.history.clear();
+                }
+            }
+            Event::ManualUnpair => {
+                self.state.on = false;
+                self.state.peer_name.clear();
+                self.state.peer_id = [0u8; 32];
+                self.state.trusted_peer_name = None;
+                self.state.peer_battery = 100;
+                self.state.peer_charging = false;
+                self.state.history.clear(); // [FIX] Prevent privacy leak
+            }
+            Event::SetTrustedPeer { name } => {
+                self.state.trusted_peer_name = Some(name.clone());
             }
             _ => {}
+        }
+
+        if suppress_action {
+            // [REMEDIATION] If suppressed (duplicate/replay), we skip the FSM transition entirely.
+            // However, for incoming clipboard frames, we still MUST send an Ack to stop the peer's retransmission.
+            if let Event::FrameReceivedClipboard { hash, .. } = &event {
+                return vec![Action::AckItem { hash: *hash }];
+            }
+            return vec![];
         }
 
         // ── Run the pure transition ─────────────────────────────────────
         let (next, mut actions) = transition(self.phase, &event);
 
-        // ── Battery-policy phase override (post-transition) ──────────────
-        // status_for() is the single source of truth for `state.status`;
-        // the FSM phase mirrors it for Linked / Paused / Halted but not for
-        // Idle / Discovering / Handshaking, which are protocol-driven.
+        // Battery-policy phase override (post-transition)
+        // [FIX] Force Halted/Paused even in Discovering/Handshaking if battery is bad.
         self.phase = match next {
-            Phase::Linked | Phase::Paused | Phase::Halted => self.phase_for_policy(),
-            other => other,
+            Phase::Idle => Phase::Idle,
+            _ => self.phase_for_policy_ext(next),
         };
+
+        // Sync phase name into the serializable State so Android/macOS
+        // can read the actual FSM phase from the JSON.
+        self.state.phase = match self.phase {
+            Phase::Idle => "idle",
+            Phase::Discovering => "discovering",
+            Phase::Handshaking => "handshaking",
+            Phase::Linked => "linked",
+            Phase::Paused => "paused",
+            Phase::Halted => "halted",
+        }
+        .to_string();
 
         // Recompute derived `status` field after every event, then make
         // sure subscribers are notified if it actually changed.
@@ -137,39 +237,82 @@ impl App {
             }
         }
 
-        if suppress_action {
-            // Drop SendItem actions for items we already saw from the peer.
-            actions.retain(|a| !matches!(a, Action::SendItem { .. }));
-        }
-
-        // Catch-all: anything that mutated `state` without producing an
-        // explicit `EmitState` (e.g. a history append while phase was
-        // Idle) still fans out so observers stay in sync.
-        if pre_snapshot != self.state && !actions.contains(&Action::EmitState) {
+        // Catch-all: Ensure EmitState is present if any significant state changed.
+        // We unconditionally add it for events that mutate state.
+        if matches!(event, Event::ToggleOn | Event::ToggleOff | Event::BatteryChangedSelf { .. } | Event::BatteryChangedPeer { .. } 
+            | Event::PeerSeen { .. } | Event::PeerLost | Event::ManualUnpair 
+            | Event::UntrustedPeerSeen { .. } | Event::GhostTimeout | Event::SetTrustedPeer { .. }
+            | Event::FrameReceivedClipboard { .. } | Event::LocalClipboardChange { .. }) 
+            && !actions.contains(&Action::EmitState) {
             actions.push(Action::EmitState);
         }
 
         actions
     }
 
+    pub fn is_peer_mismatch(&self, other_id: [u8; 32]) -> bool {
+        // [FIX] Accept [0u8; 32] as it is used by Msg::Hello to update the name
+        if other_id == [0u8; 32] {
+            return false;
+        }
+        // If we are already handshaking or linked with someone else
+        if !self.state.peer_name.is_empty() && self.state.peer_id != other_id {
+            // We only care about mismatches if we are NOT in Idle or Discovering
+            return !matches!(self.phase, Phase::Idle | Phase::Discovering);
+        }
+        false
+    }
+
     fn push_history(&mut self, item: HistoryItem) {
+        // [FIX] Zero-Day: Lamport clocks reset to 0 when the daemon restarts, causing
+        // new items from the Mac to be sorted to the BOTTOM of the Android's history.
+        // Android Kotlin code only checks the FIRST item to update the OS clipboard,
+        // so it silently ignored new copies.
+        // By inserting at index 0 and NOT sorting by Lamport, we guarantee the
+        // newest item is always at the top of the history.
         self.state.history.insert(0, item);
+        
         if self.state.history.len() > HISTORY_SOFT_CAP {
             self.state.history.truncate(HISTORY_SOFT_CAP);
         }
     }
 
-    fn phase_for_policy(&self) -> Phase {
+    fn phase_for_policy_ext(&self, fsm_next: Phase) -> Phase {
         use crate::state::Status;
         match status_for(&self.state) {
-            Status::Critical => Phase::Halted,
-            Status::Paused => Phase::Paused,
-            Status::Syncing | Status::Inactive => Phase::Linked,
+            Status::Critical => {
+                // Critical battery: force Halted ONLY if we're in a
+                // connected phase. Never override Discovering/Handshaking
+                // — the FSM needs those to reconnect.
+                match fsm_next {
+                    Phase::Linked | Phase::Paused | Phase::Halted => Phase::Halted,
+                    other => other,
+                }
+            }
+            Status::Paused => {
+                // If FSM wants to be Linked/Paused/Halted, we obey battery.
+                // If it wants to be Discovering/Handshaking, we let it stay there
+                // unless it's Critical.
+                match fsm_next {
+                    Phase::Linked | Phase::Paused | Phase::Halted => Phase::Paused,
+                    other => other,
+                }
+            }
+            Status::Syncing | Status::Inactive => {
+                // Battery is healthy: upgrade Paused/Halted back to Linked.
+                // NEVER promote Discovering/Handshaking to Linked — that
+                // would trap the FSM with a dead session after PeerLost.
+                match fsm_next {
+                    Phase::Paused | Phase::Halted => Phase::Linked,
+                    other => other,
+                }
+            }
         }
     }
 
     /// Logger helper for the daemon — wraps a manual `EmitLog` in a single
     /// place so the friendly text stays consistent with what the FSM emits.
+    #[must_use]
     pub fn log(level_msg: LogEntry) -> Action {
         Action::EmitLog(level_msg)
     }

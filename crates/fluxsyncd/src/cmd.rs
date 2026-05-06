@@ -39,8 +39,52 @@ pub enum CmdOp {
     SetThreshold { value: u8 },
     SetChargeOverride { value: bool },
     Revoke { peer_id: String },
-    DebugCapture,
-    Shutdown,
+    /// Manually unpair from the current active peer and reset state.
+    Unpair {},
+    DebugCapture {},
+    Shutdown {},
+    /// Force a reconnection by dropping the current session and starting discovery.
+    Reconnect {},
+    /// Wake/sleep the FSM. `on=true` fires `Event::ToggleOn`, sending
+    /// the daemon from `Idle` into `Discovering`. `on=false` returns
+    /// to `Idle`.
+    Toggle { on: bool },
+    /// Print this device's pair info (peer-id, base32 static pubkey,
+    /// 6-word fingerprint, LAN address hint, and the QR-encodable
+    /// `fluxsync://pair/...` URI).
+    PairShow {},
+    /// Trust the given remote pubkey + start the initiator handshake.
+    /// `addr` is required when mDNS is unavailable (pre-discovery).
+    PairAccept {
+        pubkey_b32: String,
+        name: String,
+        addr: Option<String>,
+    },
+    /// Parse a `fluxsync://pair/...` URI and trust the embedded peer.
+    /// Equivalent to a `PairAccept` with values pulled from the URI.
+    /// `name` is supplied separately because the URI deliberately
+    /// excludes it (one less field to URL-encode + the receiving user
+    /// usually wants to nickname the peer at scan time).
+    PairFromUri {
+        uri: String,
+        name: String,
+    },
+    /// Push the host OS battery percentage + charging flag into the
+    /// daemon. Fired by the Android `MainActivity` whenever the system
+    /// `ACTION_BATTERY_CHANGED` broadcast arrives. Without this, the
+    /// daemon reports a hardcoded 100% and the peer device sees stale
+    /// battery info — which the FSM also feeds into the
+    /// pause-on-low-battery policy.
+    SetSelfBattery {
+        level: u8,
+        charging: bool,
+    },
+    SetLaunchAtLogin {
+        value: bool,
+    },
+    SetPreferLan {
+        value: bool,
+    },
 }
 
 /// Response envelope on the `cmd` channel. `id` echoes the request.
@@ -63,6 +107,19 @@ pub enum CmdData {
     Peers(Vec<PeerEntry>),
     Tail(Vec<LogEntry>),
     Pull(Option<HistoryItem>),
+    PairInfo {
+        peer_id_hex: String,
+        pubkey_b32: String,
+        fingerprint_words: Vec<String>,
+        /// Best-guess LAN socket address (`<ip>:<port>`) the daemon is
+        /// reachable at. Falls back to `0.0.0.0:<port>` if no route is
+        /// available — callers should treat that as "unknown" and ask
+        /// the user for the IP.
+        addr_hint: String,
+        /// Self-contained URI suitable for QR encoding. Format:
+        /// `fluxsync://pair/<pubkey_b32>?a=<ip:port>&f=<w1.w2.w3.w4.w5.w6>`
+        uri: String,
+    },
     Pong,
 }
 

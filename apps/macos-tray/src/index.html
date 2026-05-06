@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=360, initial-scale=1" />
+  <title>FluxSync</title>
+  <link rel="stylesheet" href="shared.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="dark"> <!-- Default to dark for tray as per spec -->
+  <div class="tray-container" id="tray-container">
+    <!-- Header -->
+    <header class="tray-header" data-tauri-drag-region>
+      <div class="brand">
+        <div class="glyph-container">
+          <svg class="glyph" id="brand-glyph" width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <rect x="2.5" y="3" width="8" height="9" stroke="currentColor" stroke-width="1.3" />
+            <rect x="5.5" y="6" width="8" height="9" stroke="currentColor" stroke-width="1.3" fill="var(--fs-surface)" />
+            <circle class="active-dot" cx="13.5" cy="3" r="1.5" fill="var(--fs-ok)" style="display:none" />
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="name">FluxSync</span>
+          <span class="version">v0.5.0</span>
+        </div>
+      </div>
+      <div class="e2e-badge">
+        <svg width="9" height="10" viewBox="0 0 9 10" fill="none">
+          <rect x="1" y="4" width="7" height="5" stroke="var(--fs-ok)" stroke-width="1" />
+          <path d="M2.5 4V2.5a2 2 0 014 0V4" stroke="var(--fs-ok)" stroke-width="1" fill="none" />
+        </svg>
+        <span class="mono">E2E · X25519</span>
+      </div>
+    </header>
+
+    <!-- Master Control -->
+    <section class="master-control" id="hero">
+      <div class="status-info">
+        <div class="title">Clipboard sync</div>
+        <div class="status-label mono">
+          <span class="status-dot"></span>
+          <span id="hero-label">INACTIVE</span>
+        </div>
+      </div>
+      <button class="toggle" id="toggle">
+        <span class="knob"></span>
+      </button>
+    </section>
+
+    <!-- Peer Device -->
+    <section class="peer-section" id="dashboard-body" style="display:none">
+      <div class="section-header">
+        <span class="label mono">PEER DEVICE</span>
+        <span class="status-indicator mono">
+          <span class="dot"></span>
+          <span id="peer-status-text">STANDBY</span>
+        </span>
+      </div>
+      
+      <div class="peer-card">
+        <div class="peer-info">
+          <div class="device-icon">
+            <svg width="11" height="16" viewBox="0 0 11 16" fill="none">
+              <rect x="0.5" y="0.5" width="10" height="15" rx="1.5" stroke="var(--fs-muted)" />
+              <circle cx="5.5" cy="13" r="0.7" fill="var(--fs-muted)" />
+            </svg>
+          </div>
+          <div class="peer-details">
+            <div class="name" id="peer-name-pill">Galaxy S21 Ultra</div>
+            <div class="meta mono">android · 192.168.1.42</div>
+          </div>
+        </div>
+        
+        <div class="battery-info">
+          <div class="battery-bar-container">
+            <div class="battery-bar" id="peer-battery-bar"></div>
+          </div>
+          <span class="battery-text mono" id="peer-battery-text">64%</span>
+        </div>
+        
+        <button class="unpair-btn" id="unpair-btn" title="Reset connection and unpair device">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10" />
+          </svg>
+          RESET SESSION
+        </button>
+      </div>
+
+      <div class="pause-banner" id="pause-banner" style="display:none">
+        <span class="icon">⏸</span>
+        <span class="text">Sync auto-paused. Peer below threshold.</span>
+      </div>
+    </section>
+
+    <!-- History -->
+    <section class="history-section">
+      <div class="section-header">
+        <span class="label mono">RECENT CLIPBOARD</span>
+        <span class="count mono" id="recent-count">0 ITEMS</span>
+      </div>
+      <div class="history-list" id="recent">
+        <!-- History items injected here -->
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="tray-footer">
+      <button id="open-settings" class="footer-btn">Settings…</button>
+    </footer>
+  </div>
+
+  <!-- Pairing Entry (shown when not paired) -->
+  <div class="pairing-entry" id="pairing-entry" style="display:none">
+    <div class="entry-card">
+      <h2>Pair this Mac</h2>
+      <p>Both devices must be on the same Wi-Fi network. The pair takes ~30s and only happens once per peer.</p>
+      
+      <div class="entry-actions">
+        <button class="entry-btn primary" id="entry-show-qr">
+          <span class="cap mono">STEP 1 OF 2</span>
+          <span class="label">Show my QR</span>
+        </button>
+        <button class="entry-btn secondary" id="entry-scan-peer">
+          <span class="cap mono">MANUAL / INCOMING</span>
+          <span class="label">Accept from Phone</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -33,6 +33,10 @@ enum Cmd {
     Status,
     /// List paired peers + RTT + battery.
     Peers,
+    /// Wake the daemon (Idle → Discovering).
+    On,
+    /// Sleep the daemon (any phase → Idle).
+    Off,
     /// Inject a clipboard item.
     Push { text: String },
     /// Print the most recent peer item.
@@ -48,9 +52,11 @@ enum Cmd {
     SetChargeOverride { value: bool },
     /// Revoke a peer by hex peer-id.
     Revoke { peer_id: String },
-    /// Generate a debug capture bundle (stub in v0.1).
+    /// Force a reconnection by dropping the current session and starting discovery.
+    Reconnect,
+    /// Generate a debug capture bundle (stub).
     DebugCapture,
-    /// QR-pair on the LAN (stub in v0.1).
+    /// Pair flow.
     Pair {
         #[command(subcommand)]
         sub: PairSub,
@@ -59,8 +65,35 @@ enum Cmd {
 
 #[derive(Subcommand, Debug)]
 enum PairSub {
-    Qr,
-    Accept,
+    /// Print this device's pair info (peer-id, base32 pubkey, 6 safe-words).
+    Show,
+    /// Render this device's pair URI as a terminal QR code (Unicode
+    /// half-blocks). Also prints the URI and 6 safe-words underneath
+    /// so a remote viewer can verify by voice.
+    ShowQr,
+    /// Trust a peer described by a `fluxsync://pair/...` URI (typically
+    /// from a scanned QR). `--name` is required because the URI does
+    /// not carry one.
+    FromUri {
+        #[arg(long)]
+        uri: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Trust a remote pubkey + start the handshake.
+    /// `--addr` is required when mDNS is unavailable (loopback / first-pair).
+    Accept {
+        /// Base32 (RFC 4648, no padding) of the peer's 32-byte X25519 pubkey.
+        #[arg(long)]
+        pubkey: String,
+        /// Friendly peer name (shown in status).
+        #[arg(long)]
+        name: String,
+        /// Optional UDP `IP:PORT` of the peer. When provided, the daemon
+        /// kicks off the initiator handshake immediately (skips mDNS).
+        #[arg(long)]
+        addr: Option<String>,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -97,15 +130,91 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        Cmd::Reconnect => one_shot(&ipc_path, json!({"id": 1, "op": "reconnect"})).await?,
         Cmd::DebugCapture => one_shot(&ipc_path, json!({"id": 1, "op": "debug_capture"})).await?,
-        Cmd::Pair { sub: _ } => {
-            return Err(anyhow!(
-                "v0.1: pairing not yet implemented; use the test harness or wait for v0.1.1"
-            ));
-        }
+        Cmd::On => one_shot(&ipc_path, json!({"id": 1, "op": "toggle", "on": true})).await?,
+        Cmd::Off => one_shot(&ipc_path, json!({"id": 1, "op": "toggle", "on": false})).await?,
+        Cmd::Pair { sub } => match sub {
+            PairSub::Show => one_shot(&ipc_path, json!({"id": 1, "op": "pair_show"})).await?,
+            PairSub::ShowQr => {
+                let resp = one_shot(&ipc_path, json!({"id": 1, "op": "pair_show"})).await?;
+                if args.json {
+                    resp
+                } else {
+                    // Custom rendering replaces the default JSON dump.
+                    render_pair_qr(&resp)?;
+                    return Ok(());
+                }
+            }
+            PairSub::FromUri { uri, name } => {
+                one_shot(
+                    &ipc_path,
+                    json!({"id": 1, "op": "pair_from_uri", "uri": uri, "name": name}),
+                )
+                .await?
+            }
+            PairSub::Accept { pubkey, name, addr } => {
+                let mut req = json!({
+                    "id": 1,
+                    "op": "pair_accept",
+                    "pubkey_b32": pubkey,
+                    "name": name,
+                });
+                if let Some(a) = addr {
+                    req["addr"] = json!(a);
+                }
+                one_shot(&ipc_path, req).await?
+            }
+        },
     };
 
     print(&value, args.json);
+    Ok(())
+}
+
+/// Render the pair URI as a terminal-friendly QR (Unicode half-blocks)
+/// followed by the 6 safe-words and the URI text. The CmdResponse is
+/// expected to wrap a `PairInfo` payload.
+fn render_pair_qr(resp: &Value) -> Result<()> {
+    use qrcode::render::unicode::Dense1x2;
+    use qrcode::QrCode;
+
+    let data = resp
+        .get("data")
+        .ok_or_else(|| anyhow!("response missing data"))?;
+    let uri = data
+        .get("uri")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("response data missing uri"))?;
+    let words = data
+        .get("fingerprint_words")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    let addr = data
+        .get("addr_hint")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let code = QrCode::new(uri).map_err(|e| anyhow!("encode qr: {e}"))?;
+    let rendered = code
+        .render::<Dense1x2>()
+        .dark_color(Dense1x2::Light)
+        .light_color(Dense1x2::Dark)
+        .quiet_zone(true)
+        .build();
+
+    println!("{rendered}");
+    println!("Scan from the peer device, or paste this URI:");
+    println!("  {uri}");
+    println!("Reachable at: {addr}");
+    println!("Verify these words match on both sides:");
+    println!("  {words}");
     Ok(())
 }
 
@@ -117,7 +226,7 @@ async fn one_shot(path: &Path, request: Value) -> Result<Value> {
         .with_context(|| format!("connect ipc {}", path.display()))?;
     let (read, mut write) = stream.into_split();
     write.write_all(b"{\"subscribe\":\"cmd\"}\n").await?;
-    let line = format!("{}\n", request);
+    let line = format!("{request}\n");
     write.write_all(line.as_bytes()).await?;
     write.flush().await?;
     let mut reader = BufReader::new(read);
@@ -128,10 +237,21 @@ async fn one_shot(path: &Path, request: Value) -> Result<Value> {
 }
 
 #[cfg(windows)]
-async fn one_shot(_path: &Path, _request: Value) -> Result<Value> {
-    Err(anyhow!(
-        "Windows IPC is not implemented in v0.1; v0.1.1 will land Named Pipes"
-    ))
+async fn one_shot(path: &Path, request: Value) -> Result<Value> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    let mut stream = ClientOptions::new()
+        .open(path)
+        .with_context(|| format!("connect ipc {}", path.display()))?;
+    let (read, mut write) = tokio::io::split(stream);
+    write.write_all(b"{\"subscribe\":\"cmd\"}\n").await?;
+    let line = format!("{request}\n");
+    write.write_all(line.as_bytes()).await?;
+    write.flush().await?;
+    let mut reader = BufReader::new(read);
+    let mut buf = String::new();
+    reader.read_line(&mut buf).await?;
+    let v: Value = serde_json::from_str(buf.trim())?;
+    Ok(v)
 }
 
 fn print(v: &Value, json: bool) {
@@ -150,6 +270,9 @@ fn print(v: &Value, json: bool) {
 }
 
 fn default_ipc_path() -> PathBuf {
+    if cfg!(windows) {
+        return PathBuf::from(r"\\.\pipe\fluxsync");
+    }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home).join(".fluxsync").join("sock");
     }

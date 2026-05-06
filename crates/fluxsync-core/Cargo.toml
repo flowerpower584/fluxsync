@@ -23,6 +23,7 @@ serde = { workspace = true }
 fluxsync-proto = { path = "../fluxsync-proto" }
 regex = "1.10"
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 # blake3 split per target — see fluxsync-crypto/Cargo.toml for the
 # rationale (android cross-build without NDK).

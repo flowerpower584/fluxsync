@@ -1,0 +1,82 @@
+/* FluxSync Design System Tokens - v0.5.0-hardened */
+
+:root {
+  /* Light Theme (default on macOS) */
+  --fs-light-bg: #FAFAF9;
+  --fs-light-surface: #FFFFFF;
+  --fs-light-fg: #0A0A0A;
+  --fs-light-muted: #71717A;
+  --fs-light-subtle: #A1A1AA;
+  --fs-light-border: #E4E4E7;
+  --fs-light-border-strong: #D4D4D8;
+  --fs-light-hover: #F4F4F5;
+
+  /* Dark Theme */
+  --fs-dark-bg: #0B0B0C;
+  --fs-dark-surface: #131316;
+  --fs-dark-fg: #FAFAFA;
+  --fs-dark-muted: #A1A1AA;
+  --fs-dark-subtle: #71717A;
+  --fs-dark-border: #1F1F22;
+  --fs-dark-border-strong: #2A2A2E;
+  --fs-dark-hover: #1A1A1D;
+
+  /* Semantics */
+  --fs-ok: #3FAE5A;
+  --fs-ok-soft: rgba(63, 174, 90, 0.12);
+  --fs-warn: #D9A441;
+  --fs-warn-soft: rgba(217, 164, 65, 0.14);
+  --fs-crit: #D43F3F;
+  --fs-crit-soft: rgba(212, 63, 63, 0.12);
+  --fs-info: #5B7FBF;
+
+  /* Typography */
+  --fs-ui: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --fs-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+}
+
+[data-theme="light"] {
+  --fs-bg: var(--fs-light-bg);
+  --fs-surface: var(--fs-light-surface);
+  --fs-fg: var(--fs-light-fg);
+  --fs-muted: var(--fs-light-muted);
+  --fs-subtle: var(--fs-light-subtle);
+  --fs-border: var(--fs-light-border);
+  --fs-border-strong: var(--fs-light-border-strong);
+  --fs-hover: var(--fs-light-hover);
+}
+
+[data-theme="dark"] {
+  --fs-bg: var(--fs-dark-bg);
+  --fs-surface: var(--fs-dark-surface);
+  --fs-fg: var(--fs-dark-fg);
+  --fs-muted: var(--fs-dark-muted);
+  --fs-subtle: var(--fs-dark-subtle);
+  --fs-border: var(--fs-dark-border);
+  --fs-border-strong: var(--fs-dark-border-strong);
+  --fs-hover: var(--fs-dark-hover);
+}
+
+/* ── Toast (shared primitive — used by tray and settings) ──────── */
+.fs-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translate(-50%, 12px);
+  max-width: calc(100% - 28px);
+  padding: 8px 12px;
+  background: var(--fs-fg);
+  color: var(--fs-surface);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .2s ease, opacity .2s ease;
+  z-index: 1000;
+}
+.fs-toast.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}

@@ -21,12 +21,14 @@ use tokio::io::{AsyncRead, AsyncWrite};
 mod sys {
     use super::{io, Path, PathBuf};
     use nix::sys::stat::{umask, Mode};
+    use nix::fcntl::{Flock, FlockArg};
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::{UnixListener, UnixStream};
 
     pub struct IpcServer {
         listener: UnixListener,
         _path: PathBuf,
+        _lock: Flock<std::fs::File>,
     }
 
     pub struct IpcConn {
@@ -40,6 +42,27 @@ mod sys {
                 tokio::fs::create_dir_all(parent).await?;
                 std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
             }
+
+            // [REMEDIATION] Atomic Locking: Use a .lock file to prevent double-daemon split-brain.
+            let lock_path = path.with_extension("lock");
+            let lock_file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&lock_path)?;
+
+            // Try to acquire an exclusive lock. If it fails, another daemon is already running.
+            let lock = match Flock::lock(lock_file, FlockArg::LockExclusiveNonblock) {
+                Ok(l) => l,
+                Err((file, e)) => {
+                    drop(file);
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        format!("FluxSync daemon already running (lock held at {}): {}", lock_path.display(), e)
+                    ));
+                }
+            };
+
             // Remove any stale socket.
             if path.exists() {
                 std::fs::remove_file(path)?;
@@ -56,6 +79,7 @@ mod sys {
             Ok(Self {
                 listener,
                 _path: path.to_path_buf(),
+                _lock: lock,
             })
         }
 
@@ -69,31 +93,33 @@ mod sys {
 #[cfg(windows)]
 mod sys {
     use super::{io, Path, PathBuf};
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
     pub struct IpcServer {
-        _path: PathBuf,
+        path: PathBuf,
+        next: tokio::sync::Mutex<NamedPipeServer>,
     }
 
     pub struct IpcConn {
-        // Phantom — never constructed in v0.1.
-        _stream: tokio::io::DuplexStream,
+        pub(crate) stream: NamedPipeServer,
     }
 
     impl IpcServer {
-        pub async fn bind(_path: &Path) -> io::Result<Self> {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Named Pipe IPC for Windows is not implemented in v0.1; \
-                 Linux/macOS only. v0.1.1 will add it via \
-                 tokio::net::windows::named_pipe.",
-            ))
+        pub async fn bind(path: &Path) -> io::Result<Self> {
+            let first = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(path)?;
+            Ok(Self {
+                path: path.to_path_buf(),
+                next: tokio::sync::Mutex::new(first),
+            })
         }
 
         pub async fn accept(&self) -> io::Result<IpcConn> {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Windows IPC not implemented",
-            ))
+            let mut lock = self.next.lock().await;
+            lock.connect().await?;
+            let stream = std::mem::replace(&mut *lock, ServerOptions::new().create(&self.path)?);
+            Ok(IpcConn { stream })
         }
     }
 }
@@ -111,6 +137,6 @@ impl IpcConn {
 
     #[cfg(windows)]
     pub fn split(self) -> (impl AsyncRead + Unpin, impl AsyncWrite + Unpin) {
-        tokio::io::split(self._stream)
+        tokio::io::split(self.stream)
     }
 }

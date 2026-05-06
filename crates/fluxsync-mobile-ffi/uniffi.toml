@@ -1,0 +1,11 @@
+# UniFFI codegen config consumed by the workspace `uniffi-bindgen` bin.
+# Every key here ends up in the generated Kotlin file; flipping
+# `package_name` is a binary-incompatible change for the Android app.
+
+[bindings.kotlin]
+package_name = "sn.kaolack.fluxsync"
+cdylib_name = "fluxsync_mobile_ffi"
+# Don't generate the loader stub — MainActivity calls
+# `System.loadLibrary("fluxsync_mobile_ffi")` itself, so the generated
+# loader becomes dead code.
+generate_immutable_records = true

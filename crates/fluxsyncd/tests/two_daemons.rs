@@ -73,6 +73,7 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_daemons_exchange_one_item_and_shutdown_cleanly() {
+    let _ = tracing_subscriber::fmt::try_init();
     install_panic_hook();
     let _ = Subscribe {
         subscribe: Channel::Cmd,
@@ -97,6 +98,9 @@ async fn two_daemons_exchange_one_item_and_shutdown_cleanly() {
 
     let mut cfg_a = DaemonConfig::new(id_a, port_a, ipc_a.clone());
     cfg_a.udp_bind = "127.0.0.1".into();
+    cfg_a.disable_clipboard = true;
+    cfg_a.disable_mdns = true;
+    cfg_a.peer_name_self = "device-a".into();
     cfg_a.test_pair = Some(TestPair {
         session: sess_a,
         peer_addr: addr_b,
@@ -106,6 +110,9 @@ async fn two_daemons_exchange_one_item_and_shutdown_cleanly() {
 
     let mut cfg_b = DaemonConfig::new(id_b, port_b, ipc_b.clone());
     cfg_b.udp_bind = "127.0.0.1".into();
+    cfg_b.disable_clipboard = true;
+    cfg_b.disable_mdns = true;
+    cfg_b.peer_name_self = "device-b".into();
     cfg_b.test_pair = Some(TestPair {
         session: sess_b,
         peer_addr: addr_a,
@@ -135,7 +142,9 @@ async fn two_daemons_exchange_one_item_and_shutdown_cleanly() {
         )
         .await;
         if let Some(CmdData::State(s)) = resp.data {
-            return s.peer_name == "device-b";
+            if s.peer_name == "device-b" {
+                return true;
+            }
         }
         false
     })
@@ -227,6 +236,7 @@ async fn two_daemons_exchange_one_item_and_shutdown_cleanly() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_starts_unpaired_and_responds_to_status() {
+    let _ = tracing_subscriber::fmt().with_env_filter("trace").try_init();
     install_panic_hook();
     let id = Identity::generate();
     let port = pick_free_udp_port().await;
@@ -235,6 +245,8 @@ async fn daemon_starts_unpaired_and_responds_to_status() {
 
     let mut cfg = DaemonConfig::new(id, port, ipc.clone());
     cfg.udp_bind = "127.0.0.1".into();
+    cfg.disable_clipboard = true;
+    cfg.disable_mdns = true;
     // No test_pair — simulates a fresh first-run with no peer.
 
     let shutdown = Arc::new(Notify::new());

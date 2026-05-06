@@ -17,6 +17,12 @@ pub enum Event {
     PeerLost,
     HandshakeOk,
     HandshakeTimeout,
+    SetTrustedPeer { name: String },
+    UntrustedPeerSeen {
+        name: String,
+    },
+    GhostTimeout,
+    ManualUnpair,
     NetworkChanged,
     BatteryChangedSelf {
         level: u8,
@@ -37,6 +43,7 @@ pub enum Event {
         hash: [u8; 32],
         kind: Kind,
         preview: String,
+        sensitive: bool,
         lamport: u64,
     },
     Reconnect,
@@ -51,6 +58,7 @@ pub enum Action {
     SendHandshake {
         peer_id: [u8; 32],
     },
+    DropPeer,
     OpenSession,
     CloseSession,
     SendItem {
@@ -68,6 +76,10 @@ pub enum Action {
     EmitState,
     EmitLog(LogEntry),
     BurstReplay,
+    SendBattery {
+        level: u8,
+        charging: bool,
+    },
 }
 
 /// A friendly log entry. Routed both to `tracing` (structured) and to the

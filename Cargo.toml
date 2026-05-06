@@ -7,10 +7,11 @@ members = [
     "crates/fluxsyncd",
     "crates/fluxctl",
     "crates/fluxsync-mobile-ffi",
+    "crates/uniffi-bindgen",
 ]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
@@ -23,11 +24,19 @@ serde = { version = "1.0", features = ["derive"] }
 ciborium = "0.2"
 thiserror = "1.0"
 proptest = "1.4"
+tracing = "0.1"
 
 [profile.release]
 lto = true
 codegen-units = 1
-strip = "symbols"
+# `strip = "debuginfo"` (was "symbols") keeps the static symbols
+# UniFFI uses to embed component metadata. With `strip = "symbols"`,
+# `cargo run -p uniffi-bindgen -- generate --library lib*.so` finds no
+# components and silently produces zero Kotlin files. The Android APK
+# is still compact: AGP's own strip pass takes care of symbol removal
+# at packaging time, and `lto + codegen-units = 1` already do the
+# bulk of the size win.
+strip = "debuginfo"
 
 [profile.dev]
 opt-level = 0
