@@ -3,6 +3,18 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [SemVer](https://semver.org/).
 
+## [v0.5.0] — 2026-05-06
+
+**Beta Test Release. Stabilization & Universal Sync.**
+
+### Added
+- Complete stabilization of the cross-device P2P sync.
+- Elimination of the 40s Lamport clock synchronization latency.
+- Direct binary distribution via GitHub (APK & DMG).
+- Full macOS Tray app and Android Compose UI integration.
+- True universal clipboard (macOS, Windows, Android, Linux).
+- Automated test cleanup and strict mock secret redaction for GitHub Push Protection.
+
 ## [v0.1.0] — 2026-04-29
 
 **Backend foundation. No real cross-device sync yet.**
@@ -68,4 +80,5 @@ Versions follow [SemVer](https://semver.org/).
 - 6-word fingerprint over BLAKE3 of the static public key.
 - See [`docs/SECURITY.md`](docs/SECURITY.md) for the full threat model.
 
-[v0.1.0]: https://github.com/dethie/fluxsync/releases/tag/v0.1.0
+[v0.5.0]: https://github.com/flowerpower584/fluxsync/releases/tag/v0.5.0
+[v0.1.0]: https://github.com/flowerpower584/fluxsync/releases/tag/v0.1.0
