@@ -40,8 +40,8 @@ Open the Android app or the macOS Tray icon. Scan the QR code to pair. **Your da
 
 ### 3. Use the CLI (Optional)
 ```sh
-./fluxctl status
-./fluxctl push "Hello from Kaolack! 🇸🇳"
+./fluxctl --ipc-path /tmp/flux.sock status
+./fluxctl --ipc-path /tmp/flux.sock push "Hello from Kaolack! 🇸🇳"
 ```
 
 ---
