@@ -1,3 +1,9 @@
+// `extreme_sync` exercises two daemons over loopback UDP and reads
+// their state via the IPC socket. The IPC client uses
+// `tokio::net::UnixStream`, so the whole file is Unix-only — the
+// Windows variant will be added with the v0.1.1 Named-Pipe daemon.
+#![cfg(unix)]
+
 use fluxsync_crypto::{test_util::pair_for_test, Identity};
 use fluxsyncd::{
     cmd::{CmdData, CmdOp, CmdRequest},
