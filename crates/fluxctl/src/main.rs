@@ -249,10 +249,7 @@ fn render_pair_qr(resp: &Value) -> Result<()> {
                 .join(" ")
         })
         .unwrap_or_default();
-    let addr = data
-        .get("addr_hint")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let addr = data.get("addr_hint").and_then(Value::as_str).unwrap_or("");
 
     let code = QrCode::new(uri).map_err(|e| anyhow!("encode qr: {e}"))?;
     let rendered = code
@@ -292,7 +289,7 @@ async fn one_shot(path: &Path, request: Value) -> Result<Value> {
 #[cfg(windows)]
 async fn one_shot(path: &Path, request: Value) -> Result<Value> {
     use tokio::net::windows::named_pipe::ClientOptions;
-    let mut stream = ClientOptions::new()
+    let stream = ClientOptions::new()
         .open(path)
         .with_context(|| format!("connect ipc {}", path.display()))?;
     let (read, mut write) = tokio::io::split(stream);
@@ -306,7 +303,6 @@ async fn one_shot(path: &Path, request: Value) -> Result<Value> {
     let v: Value = serde_json::from_str(buf.trim())?;
     Ok(v)
 }
-
 
 fn default_ipc_path() -> PathBuf {
     if cfg!(windows) {

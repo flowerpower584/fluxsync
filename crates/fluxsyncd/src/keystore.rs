@@ -53,8 +53,7 @@ pub fn ensure_dir(dir: &Path) -> Result<()> {
             .with_context(|| format!("stat {}", dir.display()))?
             .permissions();
         perms.set_mode(0o700);
-        fs::set_permissions(dir, perms)
-            .with_context(|| format!("chmod 700 {}", dir.display()))?;
+        fs::set_permissions(dir, perms).with_context(|| format!("chmod 700 {}", dir.display()))?;
     }
     Ok(())
 }
@@ -120,8 +119,7 @@ fn write_secret_atomic(path: &Path, bytes: &[u8; 32]) -> Result<()> {
     use std::io::Write;
     let tmp = path.with_extension("bin.tmp");
     {
-        let mut f = fs::File::create(&tmp)
-            .with_context(|| format!("create {}", tmp.display()))?;
+        let mut f = fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(bytes)
             .with_context(|| format!("write {}", tmp.display()))?;
         f.sync_all()

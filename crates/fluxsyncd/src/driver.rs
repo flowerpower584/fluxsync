@@ -18,8 +18,7 @@ use crate::discovery::{self, DiscoveryEvent};
 use crate::handshake::{self, PairingWindow, TrustedPeer, TrustedSet};
 use crate::ipc::{IpcConn, IpcServer};
 use crate::logs::LogTail;
-use crate::metrics::{MetricsTracker, DisconnectReason};
-use std::path::{Path, PathBuf};
+use crate::metrics::{DisconnectReason, MetricsTracker};
 use crate::transport::{RecvFrame, Transport};
 use anyhow::{anyhow, Context, Result};
 use base32::Alphabet;
@@ -28,16 +27,19 @@ use fluxsync_core::{
     WallClock,
 };
 use fluxsync_crypto::{fingerprint, Identity};
+use fluxsync_proto::{
+    ClipboardItem, Frame, Kind, Msg, MAX_CHUNK_DATA, MAX_PAYLOAD, PROTOCOL_VERSION,
+};
 use hex;
-use fluxsync_proto::{ClipboardItem, Frame, Kind, Msg, MAX_CHUNK_DATA, MAX_PAYLOAD, PROTOCOL_VERSION};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify};
 use tokio::task::JoinSet;
-use std::collections::VecDeque;
 
 const BASE32_ALPHA: Alphabet = Alphabet::Rfc4648 { padding: false };
 
@@ -102,8 +104,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
 
     // ── Transport (always bound; session/peer_addr filled later) ───
     let (transport_inner, actual_port) = Transport::bind(&udp_bind, udp_port)
-            .await
-            .with_context(|| format!("bind UDP {udp_bind}:{udp_port}"))?;
+        .await
+        .with_context(|| format!("bind UDP {udp_bind}:{udp_port}"))?;
     let transport = Arc::new(transport_inner);
     let metrics = transport.metrics.clone();
     let udp_port = actual_port; // Shadow with the real port (in case it was 0)
@@ -123,7 +125,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
     // from the peer). The clipboard watcher dedups against this so it
     // doesn't immediately read its own write back, fire LocalClipboardChange,
     // and ping-pong the same item back to the peer.
-    let last_written_hashes: Arc<Mutex<VecDeque<[u8; 32]>>> = Arc::new(Mutex::new(VecDeque::with_capacity(10)));
+    let last_written_hashes: Arc<Mutex<VecDeque<[u8; 32]>>> =
+        Arc::new(Mutex::new(VecDeque::with_capacity(10)));
 
     // ── Test path: install session + jump to Linked ────────────────
     if let Some(tp) = test_pair {
@@ -176,7 +179,11 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
         let g = trusted.lock().await;
         if let Some(peer) = g.values().next() {
             tracing::info!(peer = %peer.name, "Boot: informing UI about trusted peer");
-            event_tx.send(Event::SetTrustedPeer { name: peer.name.clone() }).ok();
+            event_tx
+                .send(Event::SetTrustedPeer {
+                    name: peer.name.clone(),
+                })
+                .ok();
         }
     }
 
@@ -216,8 +223,10 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
         let kd = keystore_dir.clone();
         let metrics = metrics.clone();
         tasks.spawn(async move {
-            transport_recv_loop(transport, identity, trusted, window, pending, event_tx, shutdown, kd, metrics)
-                .await
+            transport_recv_loop(
+                transport, identity, trusted, window, pending, event_tx, shutdown, kd, metrics,
+            )
+            .await
         });
     }
 
@@ -293,7 +302,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
         let shutdown = shutdown.clone();
         tasks.spawn(async move {
             tracing::info!("Clipboard watcher task started");
-            if let Err(e) = clipboard_watcher_loop(transport, cmd_tx, last_written, shutdown).await {
+            if let Err(e) = clipboard_watcher_loop(transport, cmd_tx, last_written, shutdown).await
+            {
                 tracing::error!(error = %e, "clipboard_watcher_loop exited with error");
             }
             Ok(())
@@ -303,9 +313,9 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
     }
 
     // Pairing Watchdog.
-    // If we are in Discovering phase (on + no peer) and have no active session, 
+    // If we are in Discovering phase (on + no peer) and have no active session,
     // ensure the pairing window is open so the QR code appears.
-    // 
+    //
     // Ghost Timeout: If we are in Discovering phase with a known peer, and 10 minutes
     // pass without reconnecting, drop the peer to prevent permanent ghosting.
     {
@@ -328,7 +338,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
                         *g = Some(Instant::now() + Duration::from_secs(300));
                     }
                 }
-                
+
                 // Ghost Timeout Check
                 if state.phase == "discovering" && !state.peer_name.is_empty() {
                     if let Some(start) = last_discovering_with_peer {
@@ -343,7 +353,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
                 } else {
                     last_discovering_with_peer = None;
                 }
-                
+
                 let loop_start = Instant::now();
                 tokio::select! {
                     () = shutdown.notified() => break,
@@ -351,7 +361,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
                     () = tokio::time::sleep(Duration::from_secs(5)) => {}
                 }
 
-                // [REMEDIATION] Wake Jump Protection: If the loop paused for >30s, 
+                // [REMEDIATION] Wake Jump Protection: If the loop paused for >30s,
                 // we likely just woke up from sleep. Reset the timer.
                 if loop_start.elapsed() > Duration::from_secs(30) {
                     last_discovering_with_peer = None;
@@ -490,10 +500,17 @@ async fn dispatch(
                     if let Ok(bytes) = fluxsync_proto::encode(&frame) {
                         let peer = *transport.peer_addr.lock().await;
                         let has_session = transport.session.lock().await.is_some();
-                        tracing::info!(?peer, has_session, len = bytes.len(), "SendItem: attempting send_encrypted");
+                        tracing::info!(
+                            ?peer,
+                            has_session,
+                            len = bytes.len(),
+                            "SendItem: attempting send_encrypted"
+                        );
                         match transport.send_encrypted(&bytes).await {
                             Ok(()) => tracing::info!("SendItem: send_encrypted OK"),
-                            Err(e) => tracing::error!(error = %e, "SendItem: send_encrypted FAILED"),
+                            Err(e) => {
+                                tracing::error!(error = %e, "SendItem: send_encrypted FAILED")
+                            }
                         }
                     } else {
                         tracing::error!("SendItem: CBOR encode failed");
@@ -569,15 +586,13 @@ async fn dispatch(
                 #[cfg(not(target_os = "android"))]
                 {
                     let text = preview.clone();
-                    tokio::task::spawn_blocking(move || {
-                        match arboard::Clipboard::new() {
-                            Ok(mut cb) => {
-                                if let Err(e) = cb.set_text(text) {
-                                    tracing::warn!(error = %e, "clipboard set_text failed");
-                                }
+                    tokio::task::spawn_blocking(move || match arboard::Clipboard::new() {
+                        Ok(mut cb) => {
+                            if let Err(e) = cb.set_text(text) {
+                                tracing::warn!(error = %e, "clipboard set_text failed");
                             }
-                            Err(e) => tracing::warn!(error = %e, "clipboard init failed"),
                         }
+                        Err(e) => tracing::warn!(error = %e, "clipboard init failed"),
                     });
                 }
                 #[cfg(target_os = "android")]
@@ -638,7 +653,7 @@ async fn dispatch(
                 if let Ok(bytes) = fluxsync_proto::encode(&frame) {
                     let _ = transport.send_encrypted(&bytes).await;
                 }
-                
+
                 tracing::info!("DropPeer: clearing all trusted peers from memory");
                 trusted.lock().await.clear();
                 transport.drop_session().await;
@@ -646,9 +661,7 @@ async fn dispatch(
             Action::SendHandshake { .. } => {
                 metrics.lock().await.on_handshake_start();
             }
-            Action::StartDiscovery
-            | Action::StopDiscovery
-            | Action::BurstReplay => {
+            Action::StartDiscovery | Action::StopDiscovery | Action::BurstReplay => {
                 // FSM-emitted but driven by discovery / pair-accept paths
                 // directly in v0.1.1. v0.1.2 may wire these explicitly.
             }
@@ -680,7 +693,19 @@ async fn ensure_online(
         return;
     }
     let actions = app.handle(Event::ToggleOn, &**wall);
-    dispatch(actions, app, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+    dispatch(
+        actions,
+        app,
+        transport,
+        trusted,
+        keystore_dir,
+        state_watch_tx,
+        logs_bcast_tx,
+        log_tail,
+        last_written_hashes,
+        metrics,
+    )
+    .await;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -743,7 +768,19 @@ async fn handle_driver_cmd(
                     &**wall,
                 );
                 tracing::debug!(?actions, "LocalClipboardChange results");
-                dispatch(actions, app, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+                dispatch(
+                    actions,
+                    app,
+                    transport,
+                    trusted,
+                    keystore_dir,
+                    state_watch_tx,
+                    logs_bcast_tx,
+                    log_tail,
+                    last_written_hashes,
+                    metrics,
+                )
+                .await;
             }
             CmdResponse::ok(req_id, None)
         }
@@ -769,7 +806,19 @@ async fn handle_driver_cmd(
                     },
                     &**wall,
                 );
-                dispatch(actions, app, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+                dispatch(
+                    actions,
+                    app,
+                    transport,
+                    trusted,
+                    keystore_dir,
+                    state_watch_tx,
+                    logs_bcast_tx,
+                    log_tail,
+                    last_written_hashes,
+                    metrics,
+                )
+                .await;
                 CmdResponse::ok(req_id, None)
             }
             Err(e) => CmdResponse::err(req_id, e.to_string()),
@@ -786,28 +835,77 @@ async fn handle_driver_cmd(
                 },
                 &**wall,
             );
-            dispatch(actions, app, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+            dispatch(
+                actions,
+                app,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+            )
+            .await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::DebugCapture {} | CmdOp::Shutdown {} => CmdResponse::ok(req_id, None),
         CmdOp::Unpair {} => {
             tracing::info!("Manual unpair requested via IPC");
             let actions = app.handle(Event::ManualUnpair, &**wall);
-            dispatch(actions, app, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+            dispatch(
+                actions,
+                app,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+            )
+            .await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::Toggle { on } => {
-            let ev = if on { Event::ToggleOn } else { Event::ToggleOff };
+            let ev = if on {
+                Event::ToggleOn
+            } else {
+                Event::ToggleOff
+            };
             let actions = app.handle(ev, &**wall);
-            dispatch(actions, app, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+            dispatch(
+                actions,
+                app,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+            )
+            .await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::SetSelfBattery { level, charging } => {
-            let actions = app.handle(
-                Event::BatteryChangedSelf { level, charging },
-                &**wall,
-            );
-            dispatch(actions, app, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+            let actions = app.handle(Event::BatteryChangedSelf { level, charging }, &**wall);
+            dispatch(
+                actions,
+                app,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+            )
+            .await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::Revoke { peer_id } => {
@@ -820,7 +918,19 @@ async fn handle_driver_cmd(
             };
             trusted.lock().await.remove(&arr);
             let actions = app.handle(Event::ManualUnpair, &**wall);
-            dispatch(actions, app, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+            dispatch(
+                actions,
+                app,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+            )
+            .await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::SetLaunchAtLogin { value: _ } => {
@@ -852,7 +962,19 @@ async fn handle_driver_cmd(
             // the (Handshaking → Linked) transition can fire. Without
             // this, (Idle, HandshakeOk) is a no-op and clipboard sync
             // stays dead even though the Noise tunnel is up.
-            ensure_online(app, wall, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+            ensure_online(
+                app,
+                wall,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+            )
+            .await;
             CmdResponse::ok(
                 req_id,
                 Some(CmdData::PairInfo {
@@ -905,7 +1027,19 @@ async fn handle_driver_cmd(
             // Scanning a peer's QR is implicit "I want to sync". Bump
             // the FSM into Discovering before we send msg1 so the
             // (Handshaking → Linked) chain can fire when msg2 arrives.
-            ensure_online(app, wall, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+            ensure_online(
+                app,
+                wall,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+            )
+            .await;
             // URI always carries an address hint; if it parses, kick off
             // the initiator immediately. If not, the trust has been
             // recorded and discovery (or a later pair-accept --addr) can
@@ -968,7 +1102,19 @@ async fn handle_driver_cmd(
             }
 
             // Same intent as PairFromUri: caller wants the link live.
-            ensure_online(app, wall, transport, trusted, keystore_dir, state_watch_tx, logs_bcast_tx, log_tail, last_written_hashes, metrics).await;
+            ensure_online(
+                app,
+                wall,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+            )
+            .await;
 
             // If addr supplied, kick off the initiator immediately
             // (skips mDNS discovery — useful for tests + for first-pair).
@@ -1031,9 +1177,10 @@ async fn transport_recv_loop(
     metrics: Arc<Mutex<MetricsTracker>>,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
-    let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> = Arc::new(Mutex::new(HashMap::new()));
+    let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(5));
-    
+
     loop {
         tokio::select! {
             biased;
@@ -1173,11 +1320,11 @@ async fn clipboard_watcher_loop(
             _ = interval.tick() => {
                 let est = transport.session_established_at_ms.load(std::sync::atomic::Ordering::SeqCst);
                 let session_active = transport.session.lock().await.is_some();
-                
+
                 if !session_active {
                     continue;
                 }
-                
+
                 // [REMEDIATION] Session Seeding: If this is a fresh session, seed last_seen_hash
                 // with the current OS clipboard to avoid blasting disconnected-state copies to the peer.
                 if est != last_session_est {
@@ -1246,7 +1393,7 @@ async fn heartbeat_loop(
             () = shutdown.notified() => return Ok(()),
             _ = interval.tick() => {
                 let session_active = transport.session.lock().await.is_some();
-                
+
                 if session_active {
                     // 1. Send Heartbeat (Ping)
                     let frame = fluxsync_proto::Frame {
@@ -1265,7 +1412,7 @@ async fn heartbeat_loop(
                     // 2. Check for receive timeout (10 seconds)
                     let last_rx = transport.last_rx_ms.load(std::sync::atomic::Ordering::Relaxed);
                     let now = crate::transport::now_ms();
-                    
+
                     if now.saturating_sub(last_rx) > 5_000 {
                         missed_pings += 1;
                         metrics.lock().await.on_heartbeat_missed();
@@ -1280,7 +1427,7 @@ async fn heartbeat_loop(
                         missed_pings = 0;
                     }
                 } else {
-                    // DISCOVERY PROBE: If no session but we have a last known peer IP, 
+                    // DISCOVERY PROBE: If no session but we have a last known peer IP,
                     // try a direct handshake poke.
                     if let Some(_addr) = *transport.last_peer_addr.lock().await {
                          // We don't initiate here because we lack the peer's static_pub,
@@ -1292,7 +1439,6 @@ async fn heartbeat_loop(
         }
     }
 }
-
 
 async fn save_current_peers(
     _dir: &Path,
@@ -1348,7 +1494,10 @@ async fn dispatch_inbound_frame(
             let mut map = reassembly.lock().await;
 
             if !map.contains_key(&c.item_id) && map.len() >= 5 {
-                let oldest = map.iter().min_by_key(|(_, r)| r.last_update).map(|(k, _)| *k);
+                let oldest = map
+                    .iter()
+                    .min_by_key(|(_, r)| r.last_update)
+                    .map(|(k, _)| *k);
                 if let Some(k) = oldest {
                     map.remove(&k);
                 }
@@ -1360,16 +1509,16 @@ async fn dispatch_inbound_frame(
                 last_update: Instant::now(),
                 first_seen: Instant::now(),
             });
-            
+
             r.last_update = Instant::now();
             if r.chunks.is_empty() {
                 r.chunks = vec![None; c.total as usize];
             }
-            
+
             if (c.idx as usize) < r.chunks.len() {
                 r.chunks[c.idx as usize] = Some(c.data);
             }
-            
+
             // Check if complete
             if r.metadata.is_some() && r.chunks.iter().all(|x| x.is_some()) {
                 let (lamport, kind, sensitive) = r.metadata.unwrap();
@@ -1402,7 +1551,10 @@ async fn dispatch_inbound_frame(
             metrics.lock().await.on_heartbeat_received();
             let frame = fluxsync_proto::Frame {
                 version: fluxsync_proto::PROTOCOL_VERSION,
-                msg: fluxsync_proto::Msg::Ack(fluxsync_proto::Ack { lamport: 0, hash: [0u8; 32] }),
+                msg: fluxsync_proto::Msg::Ack(fluxsync_proto::Ack {
+                    lamport: 0,
+                    hash: [0u8; 32],
+                }),
             };
             if let Ok(bytes) = fluxsync_proto::encode(&frame) {
                 let _ = transport.send_encrypted(&bytes).await;
@@ -1434,7 +1586,6 @@ struct Reassembly {
     first_seen: Instant,
 }
 
-
 // ─────────────────────────────────────────────────────────────────
 // mDNS discovery dispatcher
 // ─────────────────────────────────────────────────────────────────
@@ -1460,13 +1611,13 @@ async fn discovery_dispatcher(
                 if !has_session {
                     let addr_opt = *transport.last_peer_addr.lock().await;
                     let id_opt = *transport.last_peer_id.lock().await;
-                    
+
                     if let (Some(_addr), Some(id)) = (addr_opt, id_opt) {
                         let peer_opt = {
                             let g = trusted.lock().await;
                             g.get(&id).cloned()
                         };
-                        
+
                         if let Some(peer) = peer_opt {
                             let history = transport.roaming_history.lock().await.clone();
                             for h_addr in history {
@@ -1477,7 +1628,7 @@ async fn discovery_dispatcher(
                                 let transport_clone = transport.clone();
                                 let pending_tx = pending_initiator_tx.clone();
                                 let event_tx_clone = event_tx.clone();
-                                
+
                                 // [REMEDIATION] Proactive Probe Tie-break: only one side initiates.
                                 if id_clone.public_key() >= static_pub {
                                     tracing::debug!(peer = %hex::encode(&peer_id_clone[..4]), "proactive probe tie-break: peer initiates");
@@ -1607,9 +1758,7 @@ async fn start_initiator(
 
 fn decode_hex32(s: &str) -> Result<[u8; 32]> {
     let v = hex::decode(s)?;
-    let arr: [u8; 32] = v
-        .try_into()
-        .map_err(|_| anyhow!("hex not 32 bytes"))?;
+    let arr: [u8; 32] = v.try_into().map_err(|_| anyhow!("hex not 32 bytes"))?;
     Ok(arr)
 }
 

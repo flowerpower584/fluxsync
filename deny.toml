@@ -16,7 +16,16 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+    # bincode 1.3.3 — the maintainer publicly stopped development after a
+    # harassment incident, but they explicitly stated 1.3.3 is a complete
+    # final release that does not need updates. Pulled in transitively;
+    # we accept it as-is until a downstream dep migrates.
+    "RUSTSEC-2025-0141",
+    # paste — proc-macro author archived the crate; widely used,
+    # functional, no known vulnerability. Pulled in by uniffi/tokio.
+    "RUSTSEC-2024-0436",
+]
 
 # ─────────────────────────────────────────────────────────────────
 # License compliance
@@ -69,7 +78,13 @@ license-files = [
 # ─────────────────────────────────────────────────────────────────
 [bans]
 multiple-versions = "warn"
+# Workspace-internal `path = "../foo"` deps are recorded in the
+# dependency graph as wildcard versions. They are never published, so
+# the wildcard concern (an upstream `*` could pull anything) doesn't
+# apply. `allow-wildcard-paths = true` keeps the lint on for actual
+# `version = "*"` deps from crates.io.
 wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 deny = []
 skip = []

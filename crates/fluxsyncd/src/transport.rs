@@ -68,10 +68,22 @@ pub fn now_ms() -> u64 {
 
 #[derive(Debug)]
 pub enum RecvFrame {
-    HandshakeInit { from: SocketAddr, msg: Vec<u8> },
-    HandshakeResp { from: SocketAddr, msg: Vec<u8> },
-    Encrypted { from: SocketAddr, plaintext: Vec<u8> },
-    Other { from: SocketAddr, type_byte: u8 },
+    HandshakeInit {
+        from: SocketAddr,
+        msg: Vec<u8>,
+    },
+    HandshakeResp {
+        from: SocketAddr,
+        msg: Vec<u8>,
+    },
+    Encrypted {
+        from: SocketAddr,
+        plaintext: Vec<u8>,
+    },
+    Other {
+        from: SocketAddr,
+        type_byte: u8,
+    },
 }
 
 impl Transport {
@@ -79,18 +91,21 @@ impl Transport {
         let addr = format!("{bind}:{port}");
         let socket = UdpSocket::bind(&addr).await?;
         let actual_port = socket.local_addr()?.port();
-        Ok((Self {
-            socket: Arc::new(socket),
-            peer_addr: Arc::new(Mutex::new(None)),
-            last_peer_addr: Arc::new(Mutex::new(None)),
-            last_peer_id: Arc::new(Mutex::new(None)),
-            session: Arc::new(Mutex::new(None)),
-            session_generation: Arc::new(AtomicU64::new(0)),
-            roaming_history: Arc::new(Mutex::new(Vec::new())),
-            last_rx_ms: Arc::new(AtomicU64::new(now_ms())),
-            session_established_at_ms: Arc::new(AtomicU64::new(0)),
-            metrics: Arc::new(Mutex::new(crate::metrics::MetricsTracker::new())),
-        }, actual_port))
+        Ok((
+            Self {
+                socket: Arc::new(socket),
+                peer_addr: Arc::new(Mutex::new(None)),
+                last_peer_addr: Arc::new(Mutex::new(None)),
+                last_peer_id: Arc::new(Mutex::new(None)),
+                session: Arc::new(Mutex::new(None)),
+                session_generation: Arc::new(AtomicU64::new(0)),
+                roaming_history: Arc::new(Mutex::new(Vec::new())),
+                last_rx_ms: Arc::new(AtomicU64::new(now_ms())),
+                session_established_at_ms: Arc::new(AtomicU64::new(0)),
+                metrics: Arc::new(Mutex::new(crate::metrics::MetricsTracker::new())),
+            },
+            actual_port,
+        ))
     }
 
     pub async fn set_peer_addr(&self, addr: SocketAddr) {
@@ -110,7 +125,8 @@ impl Transport {
         *self.session.lock().await = Some(session);
         *self.last_peer_id.lock().await = Some(id);
         self.session_generation.fetch_add(1, Ordering::SeqCst);
-        self.session_established_at_ms.store(now_ms(), Ordering::SeqCst);
+        self.session_established_at_ms
+            .store(now_ms(), Ordering::SeqCst);
     }
 
     async fn push_history(&self, addr: SocketAddr) {
@@ -133,7 +149,8 @@ impl Transport {
         drop(g);
         *self.last_peer_id.lock().await = Some(id);
         self.session_generation.fetch_add(1, Ordering::SeqCst);
-        self.session_established_at_ms.store(now_ms(), Ordering::SeqCst);
+        self.session_established_at_ms
+            .store(now_ms(), Ordering::SeqCst);
         true
     }
 
@@ -186,10 +203,7 @@ impl Transport {
     pub async fn recv(&self, buf: &mut [u8]) -> Result<RecvFrame> {
         let (n, from) = self.socket.recv_from(buf).await?;
         if n == 0 {
-            return Ok(RecvFrame::Other {
-                from,
-                type_byte: 0,
-            });
+            return Ok(RecvFrame::Other { from, type_byte: 0 });
         }
         let type_byte = buf[0];
         let body = &buf[1..n];
@@ -216,7 +230,7 @@ impl Transport {
                         }
                     }
                 };
-                
+
                 // ROAMING: If decryption succeeds, this packet is authentic.
                 // Update the peer address to the one we just received from.
                 {

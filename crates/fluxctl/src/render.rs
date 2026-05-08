@@ -25,18 +25,27 @@ pub fn render_status(v: &Value) {
     let status = data.get("status").and_then(Value::as_str).unwrap_or("?");
     let cipher = data.get("cipher").and_then(Value::as_str).unwrap_or("?");
     let version = data.get("version").and_then(Value::as_str).unwrap_or("?");
-    let battery = data.get("battery_level").and_then(Value::as_u64).unwrap_or(0);
+    let battery = data
+        .get("battery_level")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let threshold = data
         .get("battery_threshold")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let charging = data.get("charging").and_then(Value::as_bool).unwrap_or(false);
+    let charging = data
+        .get("charging")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let latency = data
         .get("link_latency_ms")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let peer_name = data.get("peer_name").and_then(Value::as_str).unwrap_or("");
-    let peer_batt = data.get("peer_battery").and_then(Value::as_u64).unwrap_or(0);
+    let peer_batt = data
+        .get("peer_battery")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let peer_charging = data
         .get("peer_charging")
         .and_then(Value::as_bool)
@@ -59,8 +68,16 @@ pub fn render_status(v: &Value) {
         "─".repeat(rpad).dimmed()
     );
 
-    let daemon_dot = if on { "●".green().to_string() } else { "●".bright_black().to_string() };
-    let daemon_label = if on { "ON".green().bold().to_string() } else { "OFF".bright_black().to_string() };
+    let daemon_dot = if on {
+        "●".green().to_string()
+    } else {
+        "●".bright_black().to_string()
+    };
+    let daemon_label = if on {
+        "ON".green().bold().to_string()
+    } else {
+        "OFF".bright_black().to_string()
+    };
     let status_color = match status {
         "syncing" | "linked" => status.green().to_string(),
         "discovering" | "pairing" => status.yellow().to_string(),
@@ -75,7 +92,11 @@ pub fn render_status(v: &Value) {
         status_color
     );
 
-    let bolt = if charging { "⚡".yellow().to_string() } else { " ".to_string() };
+    let bolt = if charging {
+        "⚡".yellow().to_string()
+    } else {
+        " ".to_string()
+    };
     let battery_color = if charging || battery > threshold {
         format!("{battery}%").green().to_string()
     } else {
@@ -96,16 +117,16 @@ pub fn render_status(v: &Value) {
     } else {
         format!("{latency} ms").yellow().to_string()
     };
-    println!(
-        "  {}      {:<16}  UDP 41889",
-        "link".dimmed(),
-        lat_color
-    );
+    println!("  {}      {:<16}  UDP 41889", "link".dimmed(), lat_color);
 
     let peer_line = if peer_name.is_empty() {
         "— (no peer)".bright_black().to_string()
     } else {
-        let bolt = if peer_charging { "⚡".yellow().to_string() } else { String::new() };
+        let bolt = if peer_charging {
+            "⚡".yellow().to_string()
+        } else {
+            String::new()
+        };
         format!(
             "{} {}{}",
             peer_name.cyan().bold(),
@@ -134,10 +155,7 @@ pub fn render_peers(v: &Value) {
         }
     };
     if arr.is_empty() {
-        println!(
-            "{} no paired peers yet.",
-            "·".bright_black()
-        );
+        println!("{} no paired peers yet.", "·".bright_black());
         println!(
             "  run {} on this device, then scan from the peer.",
             "fluxctl pair show-qr".cyan().bold()
@@ -220,7 +238,10 @@ pub fn render_tail(v: &Value) {
 pub fn render_pull(v: &Value) {
     let data = v.get("data");
     if data.is_none() || data == Some(&Value::Null) {
-        println!("{}", "(clipboard empty — nothing pulled yet)".bright_black());
+        println!(
+            "{}",
+            "(clipboard empty — nothing pulled yet)".bright_black()
+        );
         return;
     }
     let item = data.unwrap();
@@ -253,10 +274,7 @@ pub fn render_pair_show(v: &Value) -> Result<()> {
         .get("peer_id_hex")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let pubkey = data
-        .get("pubkey_b32")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let pubkey = data.get("pubkey_b32").and_then(Value::as_str).unwrap_or("");
     let addr = data.get("addr_hint").and_then(Value::as_str).unwrap_or("");
     let words: Vec<&str> = data
         .get("fingerprint_words")
@@ -298,6 +316,9 @@ pub fn render_ack(v: &Value, action: &str) {
 }
 
 fn render_err(v: &Value, action: &str) {
-    let err = v.get("error").and_then(Value::as_str).unwrap_or("malformed response");
+    let err = v
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("malformed response");
     println!("{} {action}: {}", "✗".red().bold(), err.red());
 }

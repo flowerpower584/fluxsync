@@ -136,7 +136,10 @@ impl App {
 
                 // [FIX] Anti-écho : On ne bloque que si c'est EXACTEMENT le même texte que le dernier item.
                 // Le DedupRing global était trop sévère et bloquait les tests manuels répétitifs.
-                let is_echo = self.state.history.first()
+                let is_echo = self
+                    .state
+                    .history
+                    .first()
                     .map(|item| item.preview == preview)
                     .unwrap_or(false);
 
@@ -238,11 +241,22 @@ impl App {
 
         // Catch-all: Ensure EmitState is present if any significant state changed.
         // We unconditionally add it for events that mutate state.
-        if matches!(event, Event::ToggleOn | Event::ToggleOff | Event::BatteryChangedSelf { .. } | Event::BatteryChangedPeer { .. } 
-            | Event::PeerSeen { .. } | Event::PeerLost | Event::ManualUnpair 
-            | Event::UntrustedPeerSeen { .. } | Event::GhostTimeout | Event::SetTrustedPeer { .. }
-            | Event::FrameReceivedClipboard { .. } | Event::LocalClipboardChange { .. }) 
-            && !actions.contains(&Action::EmitState) {
+        if matches!(
+            event,
+            Event::ToggleOn
+                | Event::ToggleOff
+                | Event::BatteryChangedSelf { .. }
+                | Event::BatteryChangedPeer { .. }
+                | Event::PeerSeen { .. }
+                | Event::PeerLost
+                | Event::ManualUnpair
+                | Event::UntrustedPeerSeen { .. }
+                | Event::GhostTimeout
+                | Event::SetTrustedPeer { .. }
+                | Event::FrameReceivedClipboard { .. }
+                | Event::LocalClipboardChange { .. }
+        ) && !actions.contains(&Action::EmitState)
+        {
             actions.push(Action::EmitState);
         }
 
@@ -270,7 +284,7 @@ impl App {
         // By inserting at index 0 and NOT sorting by Lamport, we guarantee the
         // newest item is always at the top of the history.
         self.state.history.insert(0, item);
-        
+
         if self.state.history.len() > HISTORY_SOFT_CAP {
             self.state.history.truncate(HISTORY_SOFT_CAP);
         }

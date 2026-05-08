@@ -79,9 +79,7 @@ fn hostname_or(default: &str) -> String {
     // gethostname() is the reliable way to get the device name on
     // macOS/Linux. The `HOSTNAME` / `COMPUTERNAME` env vars are often
     // unset on macOS, causing the fallback to "this device".
-    if let Ok(name) = std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-    {
+    if let Ok(name) = std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")) {
         if !name.is_empty() {
             return name;
         }

@@ -9,10 +9,10 @@
 //! linked → Mac still says "linked". User brings phone back online →
 //! phone says "searching" but Mac still says "linked". Dead session.
 
-use fluxsync_core::*;
 use fluxsync_core::events::{Action, Event, LogEntry};
-use fluxsync_core::state::{Config, Status};
 use fluxsync_core::fsm::Phase;
+use fluxsync_core::state::{Config, Status};
+use fluxsync_core::*;
 use fluxsync_proto::Kind;
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -92,7 +92,10 @@ fn test_01_peer_b_goes_offline_a_detects() {
     let actions = a.handle(Event::PeerLost, &wall());
     assert_eq!(a.phase, Phase::Discovering);
     assert!(has_action(&actions, |a| matches!(a, Action::CloseSession)));
-    assert!(has_action(&actions, |a| matches!(a, Action::StartDiscovery)));
+    assert!(has_action(&actions, |a| matches!(
+        a,
+        Action::StartDiscovery
+    )));
     assert!(has_action(&actions, |a| {
         matches!(a, Action::EmitLog(LogEntry { msg, .. }) if msg.contains("Peer offline"))
     }));
@@ -202,11 +205,7 @@ fn test_05_rapid_disconnect_reconnect_5x() {
             },
             &wall(),
         );
-        assert_eq!(
-            a.phase,
-            Phase::Handshaking,
-            "round {round} after PeerSeen"
-        );
+        assert_eq!(a.phase, Phase::Handshaking, "round {round} after PeerSeen");
 
         // Handshake completes.
         a.handle(Event::HandshakeOk, &wall());
@@ -535,7 +534,10 @@ fn test_19_clipboard_push_while_linked_fires_send() {
         },
         &wall(),
     );
-    assert!(has_action(&actions, |a| matches!(a, Action::SendItem { .. })));
+    assert!(has_action(&actions, |a| matches!(
+        a,
+        Action::SendItem { .. }
+    )));
     assert_eq!(a.snapshot().history[0].preview, "hello from mac");
 }
 
@@ -574,7 +576,10 @@ fn test_20_full_offline_online_cycle_end_to_end() {
         },
         &wall(),
     );
-    assert!(has_action(&actions, |a| matches!(a, Action::SendItem { .. })));
+    assert!(has_action(&actions, |a| matches!(
+        a,
+        Action::SendItem { .. }
+    )));
     assert_eq!(a.phase, Phase::Linked); // Still linked (doesn't know B is gone)
 
     // ── Step 3: A's heartbeat fires PeerLost ──
@@ -611,10 +616,34 @@ fn test_20_full_offline_online_cycle_end_to_end() {
     b.handle(Event::HandshakeOk, &wall());
 
     // Re-sync battery info.
-    a.handle(Event::BatteryChangedSelf { level: 80, charging: false }, &wall());
-    a.handle(Event::BatteryChangedPeer { level: 75, charging: false }, &wall());
-    b.handle(Event::BatteryChangedSelf { level: 75, charging: false }, &wall());
-    b.handle(Event::BatteryChangedPeer { level: 80, charging: false }, &wall());
+    a.handle(
+        Event::BatteryChangedSelf {
+            level: 80,
+            charging: false,
+        },
+        &wall(),
+    );
+    a.handle(
+        Event::BatteryChangedPeer {
+            level: 75,
+            charging: false,
+        },
+        &wall(),
+    );
+    b.handle(
+        Event::BatteryChangedSelf {
+            level: 75,
+            charging: false,
+        },
+        &wall(),
+    );
+    b.handle(
+        Event::BatteryChangedPeer {
+            level: 80,
+            charging: false,
+        },
+        &wall(),
+    );
 
     assert_eq!(a.phase, Phase::Linked);
     assert_eq!(b.phase, Phase::Linked);
@@ -632,7 +661,10 @@ fn test_20_full_offline_online_cycle_end_to_end() {
         },
         &wall(),
     );
-    assert!(has_action(&b_actions, |a| matches!(a, Action::SendItem { .. })));
+    assert!(has_action(&b_actions, |a| matches!(
+        a,
+        Action::SendItem { .. }
+    )));
 
     let a_actions = a.handle(
         Event::FrameReceivedClipboard {
@@ -640,7 +672,7 @@ fn test_20_full_offline_online_cycle_end_to_end() {
             kind: Kind::Text,
             preview: "from android".into(),
             lamport: 2,
-                sensitive: false
+            sensitive: false,
         },
         &wall(),
     );

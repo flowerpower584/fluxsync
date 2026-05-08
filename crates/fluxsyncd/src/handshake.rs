@@ -132,7 +132,7 @@ pub async fn run_responder(
                 "TOFU: trusting new peer during pairing window"
             );
             trusted_guard.insert(peer_id, new_peer.clone());
-            
+
             // PERSIST to disk so we remember this peer after restart
             if let Some(ref dir) = keystore_dir {
                 let mut stored = crate::keystore::load_peers(dir).unwrap_or_default();
@@ -144,7 +144,7 @@ pub async fn run_responder(
                 });
                 let _ = crate::keystore::save_peers(dir, &stored);
             }
-            
+
             new_peer
         }
     };

@@ -26,10 +26,7 @@ fn paired_app() -> (App, StubWallClock) {
 
     app.handle(Event::HandshakeOk, &wall);
     assert!(
-        matches!(
-            app.phase,
-            Phase::Linked | Phase::Paused | Phase::Halted
-        ),
+        matches!(app.phase, Phase::Linked | Phase::Paused | Phase::Halted),
         "should be Linked (or policy override), got {:?}",
         app.phase
     );
@@ -68,7 +65,10 @@ fn untrusted_peer_seen_clears_peer_name() {
     );
 
     // peer_name MUST be cleared.
-    assert_eq!(app.state.peer_name, "", "peer_name should be empty after UntrustedPeerSeen");
+    assert_eq!(
+        app.state.peer_name, "",
+        "peer_name should be empty after UntrustedPeerSeen"
+    );
     assert_eq!(app.phase, Phase::Discovering);
 
     // FSM must have emitted DropPeer + EmitState.
@@ -104,7 +104,10 @@ fn ghost_timeout_clears_peer_name() {
     // 10 minutes later, the driver fires GhostTimeout.
     let actions = app.handle(Event::GhostTimeout, &wall);
 
-    assert_eq!(app.state.peer_name, "", "peer_name should be empty after GhostTimeout");
+    assert_eq!(
+        app.state.peer_name, "",
+        "peer_name should be empty after GhostTimeout"
+    );
     assert_eq!(app.phase, Phase::Discovering);
 
     assert!(
@@ -127,9 +130,19 @@ fn manual_unpair_resets_everything() {
     // Unpair while still linked!
     let actions = app.handle(Event::ManualUnpair, &wall);
 
-    assert_eq!(app.state.peer_name, "", "peer_name should be empty after ManualUnpair");
-    assert_eq!(app.phase, Phase::Idle, "FSM should go to Idle after ManualUnpair");
-    assert_eq!(app.state.on, false, "on should be false after ManualUnpair (Idle)");
+    assert_eq!(
+        app.state.peer_name, "",
+        "peer_name should be empty after ManualUnpair"
+    );
+    assert_eq!(
+        app.phase,
+        Phase::Idle,
+        "FSM should go to Idle after ManualUnpair"
+    );
+    assert_eq!(
+        app.state.on, false,
+        "on should be false after ManualUnpair (Idle)"
+    );
 
     assert!(
         actions.iter().any(|a| matches!(a, Action::DropPeer)),
@@ -165,7 +178,10 @@ fn wifi_blip_does_not_clear_peer() {
         &wall,
     );
     assert_eq!(app.phase, Phase::Handshaking);
-    assert_eq!(app.state.peer_name, "MacBook-Pro", "peer_name should still be set");
+    assert_eq!(
+        app.state.peer_name, "MacBook-Pro",
+        "peer_name should still be set"
+    );
 
     // Handshake completes.
     app.handle(Event::HandshakeOk, &wall);

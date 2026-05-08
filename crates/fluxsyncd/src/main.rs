@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
                 if let Ok(bytes) = hex::decode(&sp.static_pub_hex) {
                     if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
                         cfg.trusted_peer_keys.push(arr);
-                        
+
                         // v0.1.1 Intelligence: if we have a last known address,
                         // seed the transport's roaming history so we can probe it immediately.
                         if let Some(addr_str) = &sp.last_addr {

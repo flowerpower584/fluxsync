@@ -33,12 +33,22 @@ pub struct CmdRequest {
 pub enum CmdOp {
     Status,
     Peers,
-    Push { text: String },
+    Push {
+        text: String,
+    },
     Pull,
-    Tail { n: usize },
-    SetThreshold { value: u8 },
-    SetChargeOverride { value: bool },
-    Revoke { peer_id: String },
+    Tail {
+        n: usize,
+    },
+    SetThreshold {
+        value: u8,
+    },
+    SetChargeOverride {
+        value: bool,
+    },
+    Revoke {
+        peer_id: String,
+    },
     /// Manually unpair from the current active peer and reset state.
     Unpair {},
     DebugCapture {},
@@ -48,7 +58,9 @@ pub enum CmdOp {
     /// Wake/sleep the FSM. `on=true` fires `Event::ToggleOn`, sending
     /// the daemon from `Idle` into `Discovering`. `on=false` returns
     /// to `Idle`.
-    Toggle { on: bool },
+    Toggle {
+        on: bool,
+    },
     /// Print this device's pair info (peer-id, base32 static pubkey,
     /// 6-word fingerprint, LAN address hint, and the QR-encodable
     /// `fluxsync://pair/...` URI).

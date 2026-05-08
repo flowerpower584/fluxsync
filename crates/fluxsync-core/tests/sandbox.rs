@@ -14,7 +14,13 @@ fn test_zero_day_timeout_sandbox() {
     assert_eq!(app.phase, Phase::Discovering);
 
     // User pairs with a peer
-    app.handle(Event::PeerSeen { peer_id: [1; 32], name: "MacBook".into() }, &wall);
+    app.handle(
+        Event::PeerSeen {
+            peer_id: [1; 32],
+            name: "MacBook".into(),
+        },
+        &wall,
+    );
     assert_eq!(app.phase, Phase::Handshaking);
 
     // Handshake successful
@@ -24,7 +30,7 @@ fn test_zero_day_timeout_sandbox() {
 
     // Peer drops (e.g. macOS closes or resets)
     app.handle(Event::PeerLost, &wall);
-    
+
     // We are back in Discovering, BUT peer_name is persistent so Android UI shows "Reconnecting..."
     assert_eq!(app.phase, Phase::Discovering);
     assert_eq!(app.state.peer_name, "MacBook");
@@ -32,7 +38,7 @@ fn test_zero_day_timeout_sandbox() {
     // ZERO-DAY SCENARIO: 10 seconds pass. The driver emits a Timeout.
     // We want the app to stay in Discovering (so it can find new peers)
     // but clear the peer_name (so Android UI jumps to QR code).
-    
+
     // app.handle(Event::DiscoveringTimeout, &wall);
     // assert_eq!(app.phase, Phase::Discovering);
     // assert_eq!(app.state.peer_name, "");

@@ -50,7 +50,7 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
                 A::DropPeer,
                 A::EmitState,
                 A::EmitLog(LogEntry::info("Unpaired from peer.")),
-            ]
+            ],
         ),
 
         // Idle → Discovering on ToggleOn.
@@ -89,9 +89,11 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             vec![
                 A::DropPeer,
                 A::EmitState,
-                A::EmitLog(LogEntry::warn("Peer cryptographic mismatch detected. Unpairing.")),
+                A::EmitLog(LogEntry::warn(
+                    "Peer cryptographic mismatch detected. Unpairing.",
+                )),
                 A::StartDiscovery,
-            ]
+            ],
         ),
 
         // Ghost Timeout: 10 minutes elapsed without seeing the peer.
@@ -101,9 +103,11 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             vec![
                 A::DropPeer,
                 A::EmitState,
-                A::EmitLog(LogEntry::warn("Reconnection timeout. Returning to scan mode.")),
+                A::EmitLog(LogEntry::warn(
+                    "Reconnection timeout. Returning to scan mode.",
+                )),
                 A::StartDiscovery,
-            ]
+            ],
         ),
 
         // Handshaking → Linked on HandshakeOk.
@@ -125,12 +129,14 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
         (P::Handshaking, E::HandshakeTimeout | E::PeerLost) => (
             P::Discovering,
             vec![
-                A::EmitLog(LogEntry::warn("Handshake interrupted or timed out. Retrying.")),
+                A::EmitLog(LogEntry::warn(
+                    "Handshake interrupted or timed out. Retrying.",
+                )),
                 A::StartDiscovery,
             ],
         ),
 
-        // ❌ FAILLE #1 FIX: Handshaking + PeerSeen. 
+        // ❌ FAILLE #1 FIX: Handshaking + PeerSeen.
         // Logic in app.rs will have already checked if it's a mismatch.
         // If we reach here, it's either the SAME peer or we're allowing it.
         (P::Handshaking, E::PeerSeen { .. }) => (P::Handshaking, vec![]),
@@ -227,7 +233,10 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
         (phase, _event) => {
             // Only warn on events that should technically change phase but aren't handled.
             // Battery changes and clipboard events in Idle are common and don't need warnings.
-            if !matches!(_event, E::BatteryChangedSelf { .. } | E::BatteryChangedPeer { .. }) {
+            if !matches!(
+                _event,
+                E::BatteryChangedSelf { .. } | E::BatteryChangedPeer { .. }
+            ) {
                 tracing::debug!("Undefined FSM transition: ({:?}, {:?})", phase, _event);
             }
             (phase, vec![])

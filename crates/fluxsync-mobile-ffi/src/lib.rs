@@ -195,13 +195,8 @@ impl FluxsyncHandle {
         let path_for_logs = ipc_path.clone();
         let shutdown_for_logs = shutdown.clone();
         runtime.spawn(async move {
-            if let Err(e) = logs_subscriber_loop(
-                path_for_logs,
-                logs_clone,
-                seq_clone,
-                shutdown_for_logs,
-            )
-            .await
+            if let Err(e) =
+                logs_subscriber_loop(path_for_logs, logs_clone, seq_clone, shutdown_for_logs).await
             {
                 tracing::warn!(error = %e, "logs subscriber loop exited");
             }
@@ -255,10 +250,7 @@ impl FluxsyncHandle {
             Ok(g) => g,
             Err(_) => return Vec::new(),
         };
-        g.iter()
-            .filter(|e| e.seq > since)
-            .cloned()
-            .collect()
+        g.iter().filter(|e| e.seq > since).cloned().collect()
     }
 
     /// Highest log seq observed so far. Useful for Kotlin's first poll
@@ -439,7 +431,11 @@ async fn send_cmd(path: &PathBuf, request: serde_json::Value) -> anyhow::Result<
     let mut buf = String::new();
     reader.read_line(&mut buf).await?;
     let v: serde_json::Value = serde_json::from_str(buf.trim())?;
-    if !v.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+    if !v
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
         let err = v
             .get("err")
             .and_then(|x| x.as_str())
@@ -506,9 +502,7 @@ async fn logs_subscriber_loop(
     shutdown: Arc<Notify>,
 ) -> anyhow::Result<()> {
     loop {
-        if let Err(e) =
-            logs_subscribe_once(&path, &last_logs, &log_seq, &shutdown).await
-        {
+        if let Err(e) = logs_subscribe_once(&path, &last_logs, &log_seq, &shutdown).await {
             tracing::warn!(error = %e, "logs subscribe loop error; reconnecting in 500ms");
         }
         tokio::select! {

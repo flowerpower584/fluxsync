@@ -53,9 +53,9 @@ pub struct ConnectionMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisconnectReason {
-    HeartbeatTimeout,        // 3 missed = peer offline
-    NetworkChanged,          // if-watch a détecté un changement
-    DecryptFailure,          // tag invalide → session destroyed
+    HeartbeatTimeout, // 3 missed = peer offline
+    NetworkChanged,   // if-watch a détecté un changement
+    DecryptFailure,   // tag invalide → session destroyed
     PeerSentBye,
     IpcShutdown,
     UnknownTransportError,

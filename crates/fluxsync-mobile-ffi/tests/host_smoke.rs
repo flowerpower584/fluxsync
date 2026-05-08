@@ -9,7 +9,6 @@
 
 use fluxsync_mobile_ffi::FluxsyncHandle;
 
-
 fn pick_free_udp_port() -> u16 {
     let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
     s.local_addr().unwrap().port()

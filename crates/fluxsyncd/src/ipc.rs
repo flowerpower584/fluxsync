@@ -20,8 +20,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(unix)]
 mod sys {
     use super::{io, Path, PathBuf};
-    use nix::sys::stat::{umask, Mode};
     use nix::fcntl::{Flock, FlockArg};
+    use nix::sys::stat::{umask, Mode};
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::{UnixListener, UnixStream};
 
@@ -58,7 +58,11 @@ mod sys {
                     drop(file);
                     return Err(io::Error::new(
                         io::ErrorKind::AddrInUse,
-                        format!("FluxSync daemon already running (lock held at {}): {}", lock_path.display(), e)
+                        format!(
+                            "FluxSync daemon already running (lock held at {}): {}",
+                            lock_path.display(),
+                            e
+                        ),
                     ));
                 }
             };

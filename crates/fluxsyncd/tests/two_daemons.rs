@@ -236,7 +236,9 @@ async fn two_daemons_exchange_one_item_and_shutdown_cleanly() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_starts_unpaired_and_responds_to_status() {
-    let _ = tracing_subscriber::fmt().with_env_filter("trace").try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("trace")
+        .try_init();
     install_panic_hook();
     let id = Identity::generate();
     let port = pick_free_udp_port().await;

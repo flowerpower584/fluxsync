@@ -17,7 +17,9 @@ pub enum Event {
     PeerLost,
     HandshakeOk,
     HandshakeTimeout,
-    SetTrustedPeer { name: String },
+    SetTrustedPeer {
+        name: String,
+    },
     UntrustedPeerSeen {
         name: String,
     },

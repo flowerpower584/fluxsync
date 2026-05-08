@@ -1,8 +1,8 @@
+use fluxsync_core::events::Event;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
-use std::sync::Arc;
-use fluxsync_core::events::Event;
 
 /// Polls macOS battery status via `pmset -g batt`.
 pub async fn battery_watcher_loop(
@@ -24,16 +24,13 @@ pub async fn battery_watcher_loop(
 }
 
 fn get_macos_battery() -> anyhow::Result<(u8, bool)> {
-    let output = Command::new("pmset")
-        .arg("-g")
-        .arg("batt")
-        .output()?;
-    
+    let output = Command::new("pmset").arg("-g").arg("batt").output()?;
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Typical output:
     // Now drawing from 'Battery Power'
     // -InternalBattery-0 (id=1234567)	85%; discharging; 10:00 remaining present: true
-    
+
     let mut level = 0;
     let mut charging = false;
 
@@ -41,7 +38,10 @@ fn get_macos_battery() -> anyhow::Result<(u8, bool)> {
         if line.contains("InternalBattery") {
             // Find percentage
             if let Some(pct_idx) = line.find('%') {
-                let start = line[..pct_idx].rfind(|c: char| !c.is_digit(10)).map(|i| i + 1).unwrap_or(0);
+                let start = line[..pct_idx]
+                    .rfind(|c: char| !c.is_digit(10))
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
                 if let Ok(val) = line[start..pct_idx].parse::<u8>() {
                     level = val;
                 }
