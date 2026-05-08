@@ -11,12 +11,12 @@
 **Universal clipboard. Local-first. Peer-to-peer. End-to-end encrypted.**
 One Rust daemon, dedicated apps for macOS + Android, zero servers.
 
-> **Platform status (v0.5.0):** macOS tray app + Android app are the two first-class clients. The daemon + CLI also build cleanly on Linux (cross-compile to `x86_64-unknown-linux-musl` is green) so headless Linux use is supported. Windows daemon/CLI is not tested yet. No GUI on Linux/Windows — contributions welcome.
+> **Platform status (v0.5.1):** macOS tray app (universal — Apple Silicon + Intel) + Android app are the two first-class clients. The daemon + CLI also build cleanly on Linux (cross-compile to `x86_64-unknown-linux-musl` is green) so headless Linux use is supported. Windows daemon/CLI is not tested yet. No GUI on Linux/Windows — contributions welcome.
 
 ---
 
-## ⚡ v0.5.0 Release: Stabilization & Universal Sync
-Official stable release. No more 40s latency. Instant P2P pairing.
+## ⚡ v0.5.1 Release: Terminal Polish + Universal macOS Binary
+Universal macOS DMG (Apple Silicon + Intel). Styled `fluxctl` terminal output. Linux headless cross-compile green. Daemon version now tied to `CARGO_PKG_VERSION` automatically.
 
 ---
 
@@ -27,11 +27,13 @@ Official stable release. No more 40s latency. Instant P2P pairing.
 2. On the device, allow installs from the browser/Files app (Settings → Apps → Special access → Install unknown apps).
 3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access.
 
-### 💻 macOS (Apple Silicon) — recommended
+### 💻 macOS (Apple Silicon + Intel) — recommended
 
 > **Heads up — Gatekeeper.** The build is **unsigned** (no Apple Developer ID — that subscription costs $99/year and isn't funded yet). Running it is safe but macOS will block the first launch with a *"FluxSync.app cannot be opened because Apple cannot check it for malicious software"* dialog. **Run the `xattr` command in step 3 BEFORE you double‑click the app** and you'll never see that dialog. Without it, you'll have to detour through System Settings → Privacy & Security to approve the app.
 
-1. Download [**fluxsync.dmg**](https://github.com/flowerpower584/fluxsync/raw/main/fluxsync.dmg).
+The DMG is a universal binary (`x86_64 + arm64` lipo'd together) — same file works on Intel Macs and Apple Silicon (M1/M2/M3).
+
+1. Download [**FluxSync_0.5.1_universal.dmg**](https://github.com/flowerpower584/fluxsync/releases/download/v0.5.1/FluxSync_0.5.1_universal.dmg) (~8 MB).
 2. Open the `.dmg` and drag **FluxSync.app** into `/Applications`. (You can eject the disk image now.)
 3. **Open Terminal** and run this once — it strips the Safari quarantine flag so Gatekeeper lets the app start:
    ```sh
@@ -59,7 +61,7 @@ The daemon and CLI cross-compile cleanly to Linux (`x86_64-unknown-linux-musl` c
 ```sh
 # Option A: cargo install (any distro with rustup)
 cargo install --git https://github.com/flowerpower584/fluxsync \
-              --tag v0.5.0 fluxsyncd fluxctl
+              --tag v0.5.1 fluxsyncd fluxctl
 
 # Option B: clone and build (lets you keep up with HEAD)
 git clone https://github.com/flowerpower584/fluxsync.git
@@ -96,7 +98,7 @@ cargo build --release
 
 ---
 
-## Quickstart (v0.5.0)
+## Quickstart (v0.5.1)
 
 ### 1. Run the daemon
 The macOS tray app and the Android app start the daemon for you — skip to step 2.
