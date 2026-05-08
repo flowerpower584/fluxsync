@@ -32,6 +32,7 @@ mod elite_sandbox {
             kind: Kind::Text,
             preview: "Old Secret B (Leaked)".into(),
             lamport: 10,
+            sensitive: false,
         }, &wall);
 
         // Verify that WriteClipboard was NOT emitted.
@@ -61,6 +62,7 @@ mod elite_sandbox {
             kind: Kind::Text,
             preview: "First".into(),
             lamport: 10,
+            sensitive: false,
         }, &wall);
         assert!(actions.iter().any(|a| matches!(a, Action::WriteClipboard { .. })));
 
@@ -70,6 +72,7 @@ mod elite_sandbox {
             kind: Kind::Text,
             preview: "First".into(),
             lamport: 11,
+            sensitive: false,
         }, &wall);
 
         // Should ONLY return AckItem, no WriteClipboard, no EmitState

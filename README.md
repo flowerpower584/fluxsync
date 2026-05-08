@@ -8,6 +8,12 @@
                              |___/
 ```
 
+[![CI](https://github.com/flowerpower584/fluxsync/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/flowerpower584/fluxsync/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Latest release](https://img.shields.io/github/v/release/flowerpower584/fluxsync?label=release)](https://github.com/flowerpower584/fluxsync/releases)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Android%20%7C%20Linux-lightgrey)](#install)
+
 **Universal clipboard. Local-first. Peer-to-peer. End-to-end encrypted.**
 One Rust daemon, dedicated apps for macOS + Android, zero servers.
 

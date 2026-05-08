@@ -341,6 +341,7 @@ mod tests {
             kind: Kind::Text,
             preview: "Bonjour".into(),
             lamport: 11,
+            sensitive: false,
         };
         let (p, a) = transition(Phase::Linked, &ev);
         assert_eq!(p, Phase::Linked);

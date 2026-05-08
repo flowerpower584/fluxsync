@@ -171,15 +171,14 @@ impl App {
                 self.state.peer_charging = false;
                 self.state.history.clear();
             }
-            Event::GhostTimeout => {
-                // [FIX] Only clear if we were actually stuck in discovery/handshake
-                if !matches!(self.phase, Phase::Linked | Phase::Paused | Phase::Halted) {
-                    self.state.peer_name.clear();
-                    self.state.peer_id = [0u8; 32];
-                    self.state.peer_battery = 100;
-                    self.state.peer_charging = false;
-                    self.state.history.clear();
-                }
+            Event::GhostTimeout
+                if !matches!(self.phase, Phase::Linked | Phase::Paused | Phase::Halted) =>
+            {
+                self.state.peer_name.clear();
+                self.state.peer_id = [0u8; 32];
+                self.state.peer_battery = 100;
+                self.state.peer_charging = false;
+                self.state.history.clear();
             }
             Event::ManualUnpair => {
                 self.state.on = false;
@@ -572,6 +571,7 @@ mod tests {
                 kind: Kind::Text,
                 preview: "Bonjour".into(),
                 lamport: 5,
+                sensitive: false,
             },
             &wall(),
         );
@@ -611,6 +611,7 @@ mod tests {
                     kind: Kind::Text,
                     preview: format!("item-{i}"),
                     lamport: u64::from(i),
+                    sensitive: false,
                 },
                 &wall(),
             );
