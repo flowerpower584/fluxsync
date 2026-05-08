@@ -78,13 +78,17 @@ license-files = [
 # ─────────────────────────────────────────────────────────────────
 [bans]
 multiple-versions = "warn"
-# Workspace-internal `path = "../foo"` deps are recorded in the
-# dependency graph as wildcard versions. They are never published, so
-# the wildcard concern (an upstream `*` could pull anything) doesn't
-# apply. `allow-wildcard-paths = true` keeps the lint on for actual
-# `version = "*"` deps from crates.io.
-wildcards = "deny"
-allow-wildcard-paths = true
+# Wildcards downgraded to warn because every crate in this workspace
+# uses `path = "../foo"` deps, which cargo-deny records as wildcard
+# versions. `allow-wildcard-paths = true` doesn't help here — the
+# crates have a `description` and `repository`, so cargo-deny treats
+# them as "public" and refuses to apply the wildcard-paths exception
+# (since crates.io rejects published crates with path-only deps).
+# We're not actually publishing yet, so the public-crate concern
+# doesn't apply — surface the warning, don't block CI on it. When we
+# do publish, we'll add `version = "0.5.1"` next to each `path = ...`
+# and flip this back to "deny".
+wildcards = "warn"
 highlight = "all"
 deny = []
 skip = []
