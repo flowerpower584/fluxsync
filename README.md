@@ -9,7 +9,9 @@
 ```
 
 **Universal clipboard. Local-first. Peer-to-peer. End-to-end encrypted.**
-One daemon, four operating systems, zero servers.
+One Rust daemon, dedicated apps for macOS + Android, zero servers.
+
+> **Platform status (v0.5.0):** macOS tray app + Android app are the two first-class clients. Linux and Windows are not officially supported yet — the daemon is pure Rust and probably builds on both, but no GUI ships and neither target is tested in CI. Contributions welcome.
 
 ---
 
@@ -34,8 +36,8 @@ Official stable release. No more 40s latency. Instant P2P pairing.
    ```
 4. Launch FluxSync — a tray icon appears in the menu bar. Approve the macOS prompt for **Local Network** access (required for mDNS peer discovery on UDP/41889).
 
-### 🍺 Homebrew (macOS / Linux CLI + daemon)
-The fastest way to get `fluxsyncd` and `fluxctl` on your `$PATH`. Builds from source the first time (~1–2 min on Apple Silicon, pulls Rust as a build dep).
+### 🍺 Homebrew (macOS — CLI + daemon)
+The fastest way to get `fluxsyncd` and `fluxctl` on your `$PATH`. Builds from source the first time (~1–2 min on Apple Silicon, pulls Rust as a build dep). Linuxbrew users may be able to install the same formula, but it isn't tested yet.
 ```sh
 brew tap flowerpower584/fluxsync
 brew install fluxsync
@@ -71,7 +73,7 @@ If you built from source, run it manually (defaults: `~/.fluxsync/sock` IPC, UDP
 Open the Android app or click the macOS tray icon → **Pair**. Show the QR on one device and scan it from the other. **Your data never leaves your local network.**
 
 ### 3. Use the CLI (optional)
-The CLI talks to the daemon via the local IPC socket — useful for scripting or running the daemon headless on Linux. If you installed via Homebrew, drop the `./target/release/` prefix (binaries are on `$PATH`).
+The CLI talks to the daemon via the local IPC socket — useful for scripting headless setups. If you installed via Homebrew, drop the `./target/release/` prefix (binaries are on `$PATH`).
 ```sh
 fluxctl status
 fluxctl push "Hello from Kaolack! 🇸🇳"
@@ -106,7 +108,7 @@ flowchart LR
 
 | Need                                     | KDE Connect | Apple Universal Clipboard | syncthing | **FluxSync** |
 |------------------------------------------|:-----------:|:-------------------------:|:---------:|:------------:|
-| Works across macOS / Win / Linux / Android |   yes       |          no (Apple-only)  |   yes     |   **yes**    |
+| Works across macOS + Android (apps shipped) |   partial (Linux+Android focus) |          macOS+iOS only  |   yes (file sync, not clipboard) |   **yes**    |
 | End-to-end encrypted by default          |   yes       |          yes              |   yes     |   **yes**    |
 | Zero servers / zero account              |   yes       |          no               |   yes     |   **yes**    |
 | Designed for clipboard (not file sync)   |   yes       |          yes              |   no      |   **yes**    |
