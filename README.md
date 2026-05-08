@@ -11,7 +11,7 @@
 **Universal clipboard. Local-first. Peer-to-peer. End-to-end encrypted.**
 One Rust daemon, dedicated apps for macOS + Android, zero servers.
 
-> **Platform status (v0.5.0):** macOS tray app + Android app are the two first-class clients. Linux and Windows are not officially supported yet — the daemon is pure Rust and probably builds on both, but no GUI ships and neither target is tested in CI. Contributions welcome.
+> **Platform status (v0.5.0):** macOS tray app + Android app are the two first-class clients. The daemon + CLI also build cleanly on Linux (cross-compile to `x86_64-unknown-linux-musl` is green) so headless Linux use is supported. Windows daemon/CLI is not tested yet. No GUI on Linux/Windows — contributions welcome.
 
 ---
 
@@ -27,26 +27,65 @@ Official stable release. No more 40s latency. Instant P2P pairing.
 2. On the device, allow installs from the browser/Files app (Settings → Apps → Special access → Install unknown apps).
 3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access.
 
-### 💻 macOS (Apple Silicon)
+### 💻 macOS (Apple Silicon) — recommended
+
+> **Heads up — Gatekeeper.** The build is **unsigned** (no Apple Developer ID — that subscription costs $99/year and isn't funded yet). Running it is safe but macOS will block the first launch with a *"FluxSync.app cannot be opened because Apple cannot check it for malicious software"* dialog. **Run the `xattr` command in step 3 BEFORE you double‑click the app** and you'll never see that dialog. Without it, you'll have to detour through System Settings → Privacy & Security to approve the app.
+
 1. Download [**fluxsync.dmg**](https://github.com/flowerpower584/fluxsync/raw/main/fluxsync.dmg).
-2. Open the `.dmg` and drag **FluxSync.app** into `/Applications`.
-3. The build is unsigned, so Gatekeeper will block the first launch. Either right‑click the app → **Open** → **Open** in the dialog, or remove the quarantine flag once:
+2. Open the `.dmg` and drag **FluxSync.app** into `/Applications`. (You can eject the disk image now.)
+3. **Open Terminal** and run this once — it strips the Safari quarantine flag so Gatekeeper lets the app start:
    ```sh
    xattr -dr com.apple.quarantine /Applications/FluxSync.app
    ```
-4. Launch FluxSync — a tray icon appears in the menu bar. Approve the macOS prompt for **Local Network** access (required for mDNS peer discovery on UDP/41889).
+   (If you already double-clicked the app and got the warning dialog, click **Cancel**, run the command above, then launch again.)
+4. Launch **FluxSync** from Launchpad / Spotlight / `/Applications`. A tray icon appears in the menu bar (top-right).
+5. macOS will prompt for **Local Network** access — approve it. This is required for mDNS peer discovery on UDP/41889; without it the app cannot find your phone.
 
-### 🍺 Homebrew (macOS — CLI + daemon)
-The fastest way to get `fluxsyncd` and `fluxctl` on your `$PATH`. Builds from source the first time (~1–2 min on Apple Silicon, pulls Rust as a build dep). Linuxbrew users may be able to install the same formula, but it isn't tested yet.
+**Stuck on macOS Sequoia (15+)?** Apple removed the right-click → Open shortcut. The `xattr` step above is now the easiest unblock. The other route is *System Settings → Privacy & Security → scroll to the bottom → "Open Anyway"* after the warning dialog, then click *"Open"* on the second confirmation.
+
+### 🍺 Homebrew (macOS — terminal users)
+A second-class option for people who already live in the terminal. Builds the daemon + CLI from source (~1–2 min on Apple Silicon, pulls Rust as a build dep). **No tray icon, no QR popup** — pair via `fluxctl pair show-qr` (renders the QR as Unicode in your terminal) and scan from the phone. Linuxbrew may work too — same formula — but isn't tested.
 ```sh
 brew tap flowerpower584/fluxsync
 brew install fluxsync
 brew services start fluxsync   # auto-start daemon at login
 fluxctl status                 # smoke-test
 ```
-The tap lives at [`flowerpower584/homebrew-fluxsync`](https://github.com/flowerpower584/homebrew-fluxsync).
+The tap lives at [`flowerpower584/homebrew-fluxsync`](https://github.com/flowerpower584/homebrew-fluxsync). **Don't run brew + the `.dmg` together** — both ship a daemon and they'll fight over UDP 41889 and `~/.fluxsync/sock`. Pick one path per machine.
 
-### 🛠️ Build from source
+### 🐧 Linux (terminal — headless)
+The daemon and CLI cross-compile cleanly to Linux (`x86_64-unknown-linux-musl` checked from this machine). No tray app yet, so this is a CLI / systemd-unit setup — fine for servers and power-users. Two ways to install:
+
+```sh
+# Option A: cargo install (any distro with rustup)
+cargo install --git https://github.com/flowerpower584/fluxsync \
+              --tag v0.5.0 fluxsyncd fluxctl
+
+# Option B: clone and build (lets you keep up with HEAD)
+git clone https://github.com/flowerpower584/fluxsync.git
+cd fluxsync
+cargo build --release
+# binaries: ./target/release/{fluxsyncd,fluxctl}
+```
+
+Auto-start on login via a per-user systemd unit at `~/.config/systemd/user/fluxsync.service`:
+```ini
+[Unit]
+Description=FluxSync clipboard daemon
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.cargo/bin/fluxsyncd
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+Then: `systemctl --user enable --now fluxsync.service`.
+
+> **Linux clipboard caveat.** The daemon uses [`arboard`](https://crates.io/crates/arboard) which needs an X11 or Wayland session. On a fully headless box (no display at all) the clipboard watcher will fail to start — the daemon still runs and is reachable for `fluxctl push`, but you won't sync the system clipboard. Most desktop Linux setups are fine.
+
+### 🛠️ Build from source (any platform)
 Requires Rust ≥ 1.75 (`rustup` recommended).
 ```sh
 git clone https://github.com/flowerpower584/fluxsync.git
