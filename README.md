@@ -34,6 +34,16 @@ Official stable release. No more 40s latency. Instant P2P pairing.
    ```
 4. Launch FluxSync — a tray icon appears in the menu bar. Approve the macOS prompt for **Local Network** access (required for mDNS peer discovery on UDP/41889).
 
+### 🍺 Homebrew (macOS / Linux CLI + daemon)
+The fastest way to get `fluxsyncd` and `fluxctl` on your `$PATH`. Builds from source the first time (~1–2 min on Apple Silicon, pulls Rust as a build dep).
+```sh
+brew tap flowerpower584/fluxsync
+brew install fluxsync
+brew services start fluxsync   # auto-start daemon at login
+fluxctl status                 # smoke-test
+```
+The tap lives at [`flowerpower584/homebrew-fluxsync`](https://github.com/flowerpower584/homebrew-fluxsync).
+
 ### 🛠️ Build from source
 Requires Rust ≥ 1.75 (`rustup` recommended).
 ```sh
@@ -50,6 +60,8 @@ cargo build --release
 ### 1. Run the daemon
 The macOS tray app and the Android app start the daemon for you — skip to step 2.
 
+For the Homebrew install: `brew services start fluxsync` (already covered above).
+
 If you built from source, run it manually (defaults: `~/.fluxsync/sock` IPC, UDP `0.0.0.0:41889`, identity persisted to `~/.fluxsync/identity.bin`):
 ```sh
 ./target/release/fluxsyncd
@@ -59,11 +71,11 @@ If you built from source, run it manually (defaults: `~/.fluxsync/sock` IPC, UDP
 Open the Android app or click the macOS tray icon → **Pair**. Show the QR on one device and scan it from the other. **Your data never leaves your local network.**
 
 ### 3. Use the CLI (optional)
-The CLI talks to the daemon via the local IPC socket — useful for scripting or running the daemon headless on Linux.
+The CLI talks to the daemon via the local IPC socket — useful for scripting or running the daemon headless on Linux. If you installed via Homebrew, drop the `./target/release/` prefix (binaries are on `$PATH`).
 ```sh
-./target/release/fluxctl status
-./target/release/fluxctl push "Hello from Kaolack! 🇸🇳"
-./target/release/fluxctl pair show-qr   # render this device's pair QR in the terminal
+fluxctl status
+fluxctl push "Hello from Kaolack! 🇸🇳"
+fluxctl pair show-qr   # render this device's pair QR in the terminal
 ```
 
 ## Architecture
