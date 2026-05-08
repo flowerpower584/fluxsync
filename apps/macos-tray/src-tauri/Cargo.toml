@@ -1,6 +1,6 @@
 [package]
 name = "fluxsync-macos-tray"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "FluxSync macOS menu-bar app — Tauri v2 wrapper around fluxsyncd's IPC."
 

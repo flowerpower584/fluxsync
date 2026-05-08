@@ -3,6 +3,37 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [SemVer](https://semver.org/).
 
+## [v0.5.1] — 2026-05-08
+
+**Terminal polish + Linux headless support.**
+
+### Added
+- `fluxctl` styled terminal output: command-aware renderers for
+  `status` (dashboard box), `peers` (table), `tail` (per-level colors),
+  `pull` (highlighted card), `pair show` (structured view); `--json`
+  path is preserved verbatim for scripts.
+- Homebrew tap published at
+  [`flowerpower584/homebrew-fluxsync`](https://github.com/flowerpower584/homebrew-fluxsync).
+  Install with `brew tap flowerpower584/fluxsync && brew install fluxsync`.
+- Linux build path documented (`cargo install --git ...` + sample
+  `~/.config/systemd/user/fluxsync.service`). Cross-compile to
+  `x86_64-unknown-linux-musl` is green; daemon + CLI run headless on
+  Linux desktops with X11/Wayland.
+
+### Changed
+- README install section reorganized: per-platform paths
+  (Android / macOS DMG / Homebrew / Linux / source). Explicit
+  Gatekeeper warning callout for the unsigned `.dmg` plus a macOS
+  Sequoia (15+) note since right-click "Open" no longer offers an
+  unblock there.
+- Platform-status callout now reflects what's actually shipped:
+  macOS tray + Android app are first-class; Linux is headless CLI;
+  Windows is untested.
+
+### Fixed
+- Repository URL across the workspace + brew formula corrected from
+  `dethie/fluxsync` to `flowerpower584/fluxsync`.
+
 ## [v0.5.0] — 2026-05-06
 
 **Beta Test Release. Stabilization & Universal Sync.**
