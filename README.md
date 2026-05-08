@@ -29,7 +29,7 @@ Universal macOS DMG (Apple Silicon + Intel). Styled `fluxctl` terminal output. L
 ## Install
 
 ### 📱 Android
-1. Download [**fluxsync.apk**](https://github.com/flowerpower584/fluxsync/raw/main/fluxsync.apk).
+1. Download [**FluxSync-0.5.1.apk**](https://github.com/flowerpower584/fluxsync/releases/download/v0.5.1/FluxSync-0.5.1.apk) (~24 MB).
 2. On the device, allow installs from the browser/Files app (Settings → Apps → Special access → Install unknown apps).
 3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access.
 
