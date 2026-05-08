@@ -16,41 +16,54 @@ One daemon, four operating systems, zero servers.
 ## ⚡ v0.5.0 Release: Stabilization & Universal Sync
 Official stable release. No more 40s latency. Instant P2P pairing.
 
-### 📥 Download Pre-built Binaries (Easiest)
-Don't want to build from source? Download the latest stable binaries directly:
-- 📱 **Android**: [**Download fluxsync.apk**](https://github.com/flowerpower584/fluxsync/raw/main/fluxsync.apk)
-- 💻 **macOS**: [**Download fluxsync.dmg**](https://github.com/flowerpower584/fluxsync/raw/main/fluxsync.dmg)
+---
+
+## Install
+
+### 📱 Android
+1. Download [**fluxsync.apk**](https://github.com/flowerpower584/fluxsync/raw/main/fluxsync.apk).
+2. On the device, allow installs from the browser/Files app (Settings → Apps → Special access → Install unknown apps).
+3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access.
+
+### 💻 macOS (Apple Silicon)
+1. Download [**fluxsync.dmg**](https://github.com/flowerpower584/fluxsync/raw/main/fluxsync.dmg).
+2. Open the `.dmg` and drag **FluxSync.app** into `/Applications`.
+3. The build is unsigned, so Gatekeeper will block the first launch. Either right‑click the app → **Open** → **Open** in the dialog, or remove the quarantine flag once:
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/FluxSync.app
+   ```
+4. Launch FluxSync — a tray icon appears in the menu bar. Approve the macOS prompt for **Local Network** access (required for mDNS peer discovery on UDP/41889).
+
+### 🛠️ Build from source
+Requires Rust ≥ 1.75 (`rustup` recommended).
+```sh
+git clone https://github.com/flowerpower584/fluxsync.git
+cd fluxsync
+cargo build --release
+# binaries land at ./target/release/fluxsyncd  and  ./target/release/fluxctl
+```
 
 ---
 
 ## Quickstart (v0.5.0)
 
-### 1. Start the Engine
-Run the daemon. This handles the background sync and encryption.
-```sh
-# macOS / Linux
-./fluxsyncd --udp-bind 0.0.0.0
+### 1. Run the daemon
+The macOS tray app and the Android app start the daemon for you — skip to step 2.
 
-# Windows
-# fluxsyncd.exe --udp-bind 0.0.0.0
+If you built from source, run it manually (defaults: `~/.fluxsync/sock` IPC, UDP `0.0.0.0:41889`, identity persisted to `~/.fluxsync/identity.bin`):
+```sh
+./target/release/fluxsyncd
 ```
 
-### 2. Connect your Devices
-Open the Android app or the macOS Tray icon. Scan the QR code to pair. **Your data never leaves your local network.**
+### 2. Pair your devices
+Open the Android app or click the macOS tray icon → **Pair**. Show the QR on one device and scan it from the other. **Your data never leaves your local network.**
 
-### 3. Use the CLI (Optional)
+### 3. Use the CLI (optional)
+The CLI talks to the daemon via the local IPC socket — useful for scripting or running the daemon headless on Linux.
 ```sh
-./fluxctl status
-./fluxctl push "Hello from Kaolack! 🇸🇳"
-```
-
----
-
-## 🛠️ Build from Source
-If you prefer to build it yourself (requires Rust):
-```sh
-git clone https://github.com/flowerpower584/fluxsync && cd fluxsync
-cargo build --release
+./target/release/fluxctl status
+./target/release/fluxctl push "Hello from Kaolack! 🇸🇳"
+./target/release/fluxctl pair show-qr   # render this device's pair QR in the terminal
 ```
 
 ## Architecture
