@@ -4,6 +4,13 @@
 //! Skips the QR/handshake flow by injecting `pair_for_test` sessions
 //! via `DaemonConfig::test_pair`. A regression in this test means the
 //! sync path broke; the pairing path has its own dedicated test.
+//!
+//! Gated on `cfg(unix)` because the IPC client used in this test relies
+//! on `tokio::net::UnixStream`. The Windows IPC path is exercised by
+//! `fluxctl::one_shot` (Named Pipes) directly; we'll add a Windows
+//! variant of this test alongside the v0.1.1 Named Pipe daemon work.
+
+#![cfg(unix)]
 
 use fluxsync_crypto::{test_util::pair_for_test, Identity};
 use fluxsyncd::{
