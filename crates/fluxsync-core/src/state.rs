@@ -109,7 +109,7 @@ impl Default for Config {
         Self {
             peer_name_self: String::from("this device"),
             charge_override: true,
-            version: String::from("0.4.2"),
+            version: String::from(env!("CARGO_PKG_VERSION")),
             cipher: String::from("chacha20-poly1305"),
         }
     }
@@ -173,7 +173,7 @@ mod tests {
         assert!(!s.on);
         assert_eq!(s.battery_threshold, 20);
         assert_eq!(s.status, Status::Inactive);
-        assert_eq!(s.version, "0.4.2");
+        assert_eq!(s.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(s.cipher, "chacha20-poly1305");
     }
 
