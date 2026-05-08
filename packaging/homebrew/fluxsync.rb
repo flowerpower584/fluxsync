@@ -18,8 +18,8 @@
 class Fluxsync < Formula
   desc "Universal clipboard, local-first, peer-to-peer"
   homepage "https://github.com/flowerpower584/fluxsync"
-  url "https://github.com/flowerpower584/fluxsync/archive/refs/tags/v0.5.0.tar.gz"
-  sha256 "a00574c0143a316943f8dddd5c39b94d8e6b594c20b271c2444b6a689ee0280e"
+  url "https://github.com/flowerpower584/fluxsync/archive/refs/tags/v0.5.1.tar.gz"
+  sha256 "b4be58e3948acfdd6ab918b214b39eebbb411edad4472e41d982bc71941c241d"
   license "MIT"
   head "https://github.com/flowerpower584/fluxsync.git", branch: "main"
 
