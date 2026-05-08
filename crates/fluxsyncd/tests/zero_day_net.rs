@@ -70,7 +70,7 @@ async fn test_03_handshake_replay_attack() -> Result<()> {
 async fn test_04_auth_tag_corruption() -> Result<()> {
     let (transport, port) = setup_transport().await;
     let (mut s1, s2) = test_util::pair_for_test(&Identity::generate(), &Identity::generate()).unwrap();
-    transport.install_session(s2).await;
+    transport.install_session([0u8; 32], s2).await;
     let mut ct = s1.encrypt(b"HELLO").unwrap();
     let len = ct.len();
     ct[len - 1] ^= 0xFF; // Corrupt tag
@@ -100,7 +100,7 @@ async fn test_05_session_hijack_attempt() -> Result<()> {
 async fn test_06_invalid_version_frame() -> Result<()> {
     let (transport, port) = setup_transport().await;
     let (mut s1, s2) = test_util::pair_for_test(&Identity::generate(), &Identity::generate()).unwrap();
-    transport.install_session(s2).await;
+    transport.install_session([0u8; 32], s2).await;
     transport.set_peer_addr("127.0.0.1:1111".parse()?).await;
     
     // Encode a VALID frame first
@@ -131,7 +131,7 @@ async fn test_06_invalid_version_frame() -> Result<()> {
 async fn test_07_ip_roaming_legitimacy() -> Result<()> {
     let (transport, port) = setup_transport().await;
     let (mut s1, s2) = test_util::pair_for_test(&Identity::generate(), &Identity::generate()).unwrap();
-    transport.install_session(s2).await;
+    transport.install_session([0u8; 32], s2).await;
     let attacker_addr: SocketAddr = "127.0.0.1:9999".parse()?;
     let attacker = UdpSocket::bind(attacker_addr).await?;
     let ct = s1.encrypt(b"ROAM").unwrap();
@@ -152,7 +152,7 @@ async fn test_07_ip_roaming_legitimacy() -> Result<()> {
 async fn test_11_rapid_ip_roaming() -> Result<()> {
     let (transport, port) = setup_transport().await;
     let (mut s1, s2) = test_util::pair_for_test(&Identity::generate(), &Identity::generate()).unwrap();
-    transport.install_session(s2).await;
+    transport.install_session([0u8; 32], s2).await;
     for i in 0..5 {
         let sender = UdpSocket::bind("127.0.0.1:0").await?;
         let addr = sender.local_addr()?;
@@ -183,7 +183,7 @@ async fn test_12_handshake_racing_initiators() -> Result<()> {
 async fn test_14_double_hello_in_session() -> Result<()> {
     let (transport, port) = setup_transport().await;
     let (mut s1, s2) = test_util::pair_for_test(&Identity::generate(), &Identity::generate()).unwrap();
-    transport.install_session(s2).await;
+    transport.install_session([0u8; 32], s2).await;
     transport.set_peer_addr("127.0.0.1:1234".parse()?).await;
     let frame = Frame { version: PROTOCOL_VERSION, msg: Msg::Hello(Hello { name: "A".into() }) };
     let ct = s1.encrypt(&fluxsync_proto::encode(&frame).unwrap()).unwrap();
@@ -211,7 +211,7 @@ async fn test_15_chunk_overflow_attack() -> Result<()> {
 async fn test_18_malformed_cbor_encrypted() -> Result<()> {
     let (transport, port) = setup_transport().await;
     let (mut s1, s2) = test_util::pair_for_test(&Identity::generate(), &Identity::generate()).unwrap();
-    transport.install_session(s2).await;
+    transport.install_session([0u8; 32], s2).await;
     let ct = s1.encrypt(b"NOT-CBOR").unwrap();
     let mut pkt = vec![TYPE_ENCRYPTED]; pkt.extend_from_slice(&ct);
     UdpSocket::bind("127.0.0.1:0").await?.send_to(&pkt, format!("127.0.0.1:{}", port)).await?;
@@ -226,7 +226,7 @@ async fn test_18_malformed_cbor_encrypted() -> Result<()> {
 async fn test_28_encrypted_frame_replay_protection() -> Result<()> {
     let (transport, port) = setup_transport().await;
     let (mut s1, s2) = test_util::pair_for_test(&Identity::generate(), &Identity::generate()).unwrap();
-    transport.install_session(s2).await;
+    transport.install_session([0u8; 32], s2).await;
     let ct = s1.encrypt(b"SECRET").unwrap();
     let mut pkt = vec![TYPE_ENCRYPTED]; pkt.extend_from_slice(&ct);
     let attacker = UdpSocket::bind("127.0.0.1:0").await?;
@@ -243,7 +243,7 @@ async fn test_28_encrypted_frame_replay_protection() -> Result<()> {
 async fn test_30_simultaneous_handshake_and_encrypted() -> Result<()> {
     let (transport, port) = setup_transport().await;
     let (mut s1, s2) = test_util::pair_for_test(&Identity::generate(), &Identity::generate()).unwrap();
-    transport.install_session(s2).await;
+    transport.install_session([0u8; 32], s2).await;
     let attacker = UdpSocket::bind("127.0.0.1:0").await?;
     attacker.send_to(&[TYPE_HANDSHAKE_INIT, 0x01], format!("127.0.0.1:{}", port)).await?;
     let ct = s1.encrypt(b"HI").unwrap();

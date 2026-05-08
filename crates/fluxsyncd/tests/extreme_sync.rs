@@ -289,7 +289,7 @@ async fn extreme_dual_daemon_stress_test() {
     println!("    Step 1: Opening pairing window...");
     assert!(wait_until(Duration::from_secs(5), || async { ipc_c.exists() && ipc_d.exists() }).await);
     ipc_send_recv(&ipc_c, CmdRequest { id: 10, op: CmdOp::Toggle { on: true } }).await;
-    let r_pair = ipc_send_recv(&ipc_c, CmdRequest { id: 100, op: CmdOp::PairShow }).await;
+    let r_pair = ipc_send_recv(&ipc_c, CmdRequest { id: 100, op: CmdOp::PairShow {} }).await;
     let uri = if let Some(CmdData::PairInfo { uri, .. }) = r_pair.data {
         uri.replace("0.0.0.0", "127.0.0.1") 
     } else { panic!("Failed to get pair URI"); };

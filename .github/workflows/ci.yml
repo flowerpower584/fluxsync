@@ -49,10 +49,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --exclude fluxsync-mobile-ffi --exclude uniffi-bindgen
-      # Run library unit tests only. Integration tests under crates/*/tests/
-      # are tracked separately — some are gated on a daemon being live or
-      # need updating after the recent `Event::sensitive` refactor.
+      # Verify the whole workspace (including the integration test crates)
+      # still compiles. We don't run the integration tests in CI yet —
+      # 7 known logic regressions need fixing first — but compile failures
+      # will block PRs immediately.
+      - run: cargo build --workspace --tests --exclude fluxsync-mobile-ffi --exclude uniffi-bindgen
+      # Run library unit tests on every OS. Integration tests are tracked
+      # for fixup in a follow-up; once green they'll be added here.
       - run: cargo test --workspace --lib --exclude fluxsync-mobile-ffi --exclude uniffi-bindgen
 
   deny:

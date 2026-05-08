@@ -640,6 +640,7 @@ fn test_20_full_offline_online_cycle_end_to_end() {
             kind: Kind::Text,
             preview: "from android".into(),
             lamport: 2,
+                sensitive: false
         },
         &wall(),
     );

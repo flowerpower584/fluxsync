@@ -195,7 +195,8 @@ fn clipboard_local_to_peer_emits_send() {
 fn clipboard_peer_to_local_writes_and_acks() {
     let mut app = linked_app();
     let a = app.handle(Event::FrameReceivedClipboard {
-        hash: h(2), kind: Kind::Text, preview: "Bonjour".into(), lamport: 5
+        hash: h(2), kind: Kind::Text, preview: "Bonjour".into(), lamport: 5,
+                sensitive: false
     }, &wall());
     assert!(a.iter().any(|x| matches!(x, Action::WriteClipboard { preview } if preview == "Bonjour")));
     assert!(a.iter().any(|x| matches!(x, Action::AckItem { hash } if *hash == h(2))));
@@ -222,7 +223,8 @@ fn clipboard_cross_dedup_peer_then_local() {
     let mut app = linked_app();
     // Receive from peer
     app.handle(Event::FrameReceivedClipboard {
-        hash: h(20), kind: Kind::Text, preview: "echo".into(), lamport: 1
+        hash: h(20), kind: Kind::Text, preview: "echo".into(), lamport: 1,
+                sensitive: false
     }, &wall());
     // Now local clipboard fires with same hash (OS echo)
     let a = app.handle(Event::LocalClipboardChange {
@@ -248,7 +250,8 @@ fn clipboard_history_capped_at_50() {
     let mut app = linked_app();
     for i in 0..60u8 {
         app.handle(Event::FrameReceivedClipboard {
-            hash: h(i), kind: Kind::Text, preview: format!("item-{i}"), lamport: u64::from(i)
+            hash: h(i), kind: Kind::Text, preview: format!("item-{i}"), lamport: u64::from(i),
+                sensitive: false
         }, &wall());
     }
     assert_eq!(app.snapshot().history.len(), 50);
@@ -260,7 +263,8 @@ fn clipboard_history_newest_first() {
     let mut app = linked_app();
     for i in 0..5u8 {
         app.handle(Event::FrameReceivedClipboard {
-            hash: h(i), kind: Kind::Text, preview: format!("msg-{i}"), lamport: u64::from(i)
+            hash: h(i), kind: Kind::Text, preview: format!("msg-{i}"), lamport: u64::from(i),
+                sensitive: false
         }, &wall());
     }
     assert_eq!(app.snapshot().history[0].preview, "msg-4");
@@ -352,6 +356,8 @@ fn state_history_item_serializes_snake_case() {
         preview: "https://x.com".into(),
         time: "14:32".into(),
         source: HistorySource::Local,
+        sensitive: false,
+        lamport: 0,
     };
     let j = serde_json::to_value(&item).unwrap();
     assert!(j.get("kind").is_some());
@@ -474,7 +480,8 @@ fn emit_state_on_every_meaningful_event() {
     assert!(a.contains(&Action::EmitState), "battery change must emit");
     
     let a = app.handle(Event::FrameReceivedClipboard {
-        hash: h(99), kind: Kind::Text, preview: "test".into(), lamport: 1
+        hash: h(99), kind: Kind::Text, preview: "test".into(), lamport: 1,
+                sensitive: false
     }, &wall());
     assert!(a.contains(&Action::EmitState), "clipboard receive must emit");
     
@@ -506,7 +513,8 @@ fn stress_interleaved_clipboard_and_battery() {
         } else {
             app.handle(Event::FrameReceivedClipboard {
                 hash, kind: Kind::Text, preview: format!("remote-{i}"),
-                lamport: u64::from(i)
+                lamport: u64::from(i),
+                sensitive: false
             }, &wall());
         }
     }

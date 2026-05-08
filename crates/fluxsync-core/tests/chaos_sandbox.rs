@@ -67,7 +67,8 @@ fn the_time_paradox_test() {
         hash: [1; 32], 
         kind: Kind::Text, 
         preview: "Future".into(), 
-        lamport: 100 
+        lamport: 100 ,
+                sensitive: false
     }, &wall);
     assert_eq!(app.clock.now(), 101);
     
@@ -76,7 +77,8 @@ fn the_time_paradox_test() {
         hash: [2; 32], 
         kind: Kind::Text, 
         preview: "Past".into(), 
-        lamport: 10 
+        lamport: 10 ,
+                sensitive: false
     }, &wall);
     
     // Lamport clock should NOT go backward. observe(10) when at 101 should result in 101 or 102?
@@ -143,6 +145,7 @@ fn history_spam_test() {
             kind: Kind::Text,
             preview: format!("item {}", i),
             lamport: i as u64,
+                sensitive: false
         }, &wall);
     }
     
@@ -184,6 +187,7 @@ fn the_duplicate_history_bug_test() {
         kind: Kind::Text,
         preview: "Duplicate Content".into(),
         lamport: 1,
+                sensitive: false
     }, &wall);
     
     app.handle(Event::FrameReceivedClipboard {
@@ -191,6 +195,7 @@ fn the_duplicate_history_bug_test() {
         kind: Kind::Text,
         preview: "Duplicate Content".into(),
         lamport: 2,
+                sensitive: false
     }, &wall);
     
     // Expected: History should only have 1 entry. 
@@ -211,6 +216,7 @@ fn the_out_of_order_history_test() {
         kind: Kind::Text,
         preview: "Message 2".into(),
         lamport: 10,
+                sensitive: false
     }, &wall);
     
     // Message 1 arrives later
@@ -219,6 +225,7 @@ fn the_out_of_order_history_test() {
         kind: Kind::Text,
         preview: "Message 1".into(),
         lamport: 5,
+                sensitive: false
     }, &wall);
     
     // History currently just prepends. 
@@ -274,6 +281,7 @@ fn memory_and_cpu_stress_test() {
             kind: Kind::Text,
             preview: large_string.clone(),
             lamport: i as u64,
+                sensitive: false
         }, &wall);
     }
     

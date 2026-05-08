@@ -18,7 +18,6 @@ use crate::discovery::{self, DiscoveryEvent};
 use crate::handshake::{self, PairingWindow, TrustedPeer, TrustedSet};
 use crate::ipc::{IpcConn, IpcServer};
 use crate::logs::LogTail;
-use crate::keystore;
 use crate::metrics::{MetricsTracker, DisconnectReason};
 use std::path::{Path, PathBuf};
 use crate::transport::{RecvFrame, Transport};
@@ -51,11 +50,12 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
         udp_port,
         udp_bind,
         ipc_path,
-        trusted_peer_keys,
-        // Plumbed for the upcoming peers.json wire-up; the file already
-        // gets `identity.bin` written by `main.rs` via `keystore::
-        // load_or_create_identity`. Intentionally unused inside the
-        // driver right now.
+        // Plumbed for the upcoming peers.json wire-up. Both fields are
+        // intentionally unused inside the driver right now: `main.rs`
+        // already writes `identity.bin` via `keystore::load_or_create_identity`,
+        // and the trusted-peer set will be persisted in `peers.json`
+        // alongside it once the wire-up lands.
+        trusted_peer_keys: _,
         keystore_dir,
         charge_override,
         wall_clock,

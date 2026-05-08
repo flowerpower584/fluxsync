@@ -104,9 +104,9 @@ fn test_06_duplicate_hash_poisoning() {
     app.handle(Event::HandshakeOk, &wall);
     
     let hash = [0xEE; 32];
-    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Real".into(), lamport: 1 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Real".into(), lamport: 1, sensitive: false }, &wall);
     // Malicious peer sends SAME hash with DIFFERENT content
-    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Fake/Poison".into(), lamport: 2 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Fake/Poison".into(), lamport: 2, sensitive: false }, &wall);
     
     // Dedup ring should drop the second one.
     assert_eq!(app.state.history.len(), 1);
@@ -127,7 +127,7 @@ fn test_07_clipboard_bomb_performance() {
     // 50 items of 1MB each
     let bomb = "X".repeat(1_000_000);
     for i in 0..50 {
-        app.handle(Event::FrameReceivedClipboard { hash: [i as u8; 32], kind: Kind::Text, preview: bomb.clone(), lamport: i as u64 }, &wall);
+        app.handle(Event::FrameReceivedClipboard { hash: [i as u8; 32], kind: Kind::Text, preview: bomb.clone(), lamport: i as u64, sensitive: false }, &wall);
     }
     
     // Measure response time for a trivial event while carrying 50MB of history
@@ -167,7 +167,7 @@ fn test_09_lamport_jump_to_max() {
     app.handle(Event::HandshakeOk, &wall);
     
     // Receive item from "Future" (u64 max)
-    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "End of Time".into(), lamport: u64::MAX - 1 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "End of Time".into(), lamport: u64::MAX - 1, sensitive: false }, &wall);
     // Next local change should still be valid (saturated or handled)
     app.handle(Event::LocalClipboardChange { hash: [2; 32], kind: Kind::Text, preview: "Next".into(), sensitive: false, lamport: 0 }, &wall);
     assert_eq!(app.clock.now(), u64::MAX); 
@@ -180,9 +180,9 @@ fn test_10_negative_lamport_regression() {
     app.handle(Event::PeerSeen { peer_id: [1; 32], name: "Mac".into() }, &wall);
     app.handle(Event::HandshakeOk, &wall);
     
-    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "A".into(), lamport: 1000 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "A".into(), lamport: 1000, sensitive: false }, &wall);
     // Malicious peer tries to reset clock to 0
-    app.handle(Event::FrameReceivedClipboard { hash: [2; 32], kind: Kind::Text, preview: "B".into(), lamport: 0 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [2; 32], kind: Kind::Text, preview: "B".into(), lamport: 0, sensitive: false }, &wall);
     
     assert!(app.clock.now() >= 1000);
 }
@@ -245,7 +245,7 @@ fn test_15_empty_payload_integrity() {
     app.handle(Event::ToggleOn, &wall);
     app.handle(Event::PeerSeen { peer_id: [1; 32], name: "".into() }, &wall); // Empty name
     app.handle(Event::HandshakeOk, &wall);
-    app.handle(Event::FrameReceivedClipboard { hash: [0; 32], kind: Kind::Text, preview: "".into(), lamport: 1 }, &wall); // Empty clipboard
+    app.handle(Event::FrameReceivedClipboard { hash: [0; 32], kind: Kind::Text, preview: "".into(), lamport: 1, sensitive: false }, &wall); // Empty clipboard
     
     assert_eq!(app.state.history.len(), 1);
     assert_eq!(app.state.history[0].preview, "");
@@ -264,13 +264,13 @@ fn test_16_history_rotation_at_limit() {
     
     // Fill history to capacity (50)
     for i in 0..50 {
-        app.handle(Event::FrameReceivedClipboard { hash: [i as u8; 32], kind: Kind::Text, preview: format!("Old {}", i), lamport: i as u64 }, &wall);
+        app.handle(Event::FrameReceivedClipboard { hash: [i as u8; 32], kind: Kind::Text, preview: format!("Old {}", i), lamport: i as u64, sensitive: false }, &wall);
     }
     assert_eq!(app.state.history.len(), 50);
     assert_eq!(app.state.history.last().unwrap().preview, "Old 0");
     
     // Add 1 more item. Should evict "Old 0"
-    app.handle(Event::FrameReceivedClipboard { hash: [99; 32], kind: Kind::Text, preview: "Fresh".into(), lamport: 100 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [99; 32], kind: Kind::Text, preview: "Fresh".into(), lamport: 100, sensitive: false }, &wall);
     assert_eq!(app.state.history.len(), 50);
     assert_eq!(app.state.history[0].preview, "Fresh");
     assert!(app.state.history.iter().all(|x| x.preview != "Old 0"), "Oldest item was NOT evicted!");
@@ -285,8 +285,8 @@ fn test_17_dedup_collision_resistance() {
     
     // Simulate a SHA256 collision (or just same hash provided by malicious peer)
     let hash = [0xDE; 32];
-    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Content A".into(), lamport: 1 }, &wall);
-    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Content B".into(), lamport: 2 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Content A".into(), lamport: 1, sensitive: false }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Content B".into(), lamport: 2, sensitive: false }, &wall);
     
     // If the hash matches, the second one MUST be ignored regardless of content.
     assert_eq!(app.state.history.len(), 1);
@@ -301,9 +301,9 @@ fn test_18_lamport_clock_causality_violation() {
     app.handle(Event::HandshakeOk, &wall);
     
     // Send 3 items with decreasing Lamport clocks (impossible in a real system)
-    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "T3".into(), lamport: 300 }, &wall);
-    app.handle(Event::FrameReceivedClipboard { hash: [2; 32], kind: Kind::Text, preview: "T2".into(), lamport: 200 }, &wall);
-    app.handle(Event::FrameReceivedClipboard { hash: [3; 32], kind: Kind::Text, preview: "T1".into(), lamport: 100 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "T3".into(), lamport: 300, sensitive: false }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [2; 32], kind: Kind::Text, preview: "T2".into(), lamport: 200, sensitive: false }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [3; 32], kind: Kind::Text, preview: "T1".into(), lamport: 100, sensitive: false }, &wall);
     
     // App clock should stay at 301 because T2 and T1 are rejected
     // by the Lamport Replay Guard (stale events don't touch the clock).
@@ -332,7 +332,7 @@ fn test_20_null_byte_in_preview() {
     app.handle(Event::HandshakeOk, &wall);
     
     let malicious = "Hello\0World\0Sadistic".to_string();
-    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: malicious.clone(), lamport: 1 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: malicious.clone(), lamport: 1, sensitive: false }, &wall);
     
     assert_eq!(app.state.history[0].preview, malicious);
 }
@@ -345,7 +345,7 @@ fn test_21_large_history_unpair_repair_cycle() {
     app.handle(Event::HandshakeOk, &wall);
     
     for i in 0..10 {
-        app.handle(Event::FrameReceivedClipboard { hash: [i; 32], kind: Kind::Text, preview: format!("P1-{}", i), lamport: i as u64 }, &wall);
+        app.handle(Event::FrameReceivedClipboard { hash: [i; 32], kind: Kind::Text, preview: format!("P1-{}", i), lamport: i as u64, sensitive: false }, &wall);
     }
     
     // Cycle peer
@@ -405,7 +405,7 @@ fn test_25_local_clipboard_same_as_peer_ack_loop_prevention() {
     
     let hash = [0x77; 32];
     // 1. Receive from peer
-    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Shared".into(), lamport: 1 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Shared".into(), lamport: 1, sensitive: false }, &wall);
     
     // 2. Local system detects SAME change (echo)
     let actions = app.handle(Event::LocalClipboardChange { hash, kind: Kind::Text, preview: "Shared".into(), sensitive: false, lamport: 2 }, &wall);
@@ -473,7 +473,7 @@ fn test_30_simulated_sha256_poisoning_in_history() {
     app.handle(Event::LocalClipboardChange { hash, kind: Kind::Text, preview: "Original".into(), sensitive: false, lamport: 1 }, &wall);
     
     // Peer sends same hash with "Poison"
-    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Poison".into(), lamport: 2 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "Poison".into(), lamport: 2, sensitive: false }, &wall);
     
     assert_eq!(app.state.history[0].preview, "Original");
 }
@@ -525,7 +525,7 @@ fn test_34_manual_unpair_resets_lamport_clock() {
     app.handle(Event::PeerSeen { peer_id: [1; 32], name: "Mac".into() }, &wall);
     app.handle(Event::HandshakeOk, &wall);
     
-    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "X".into(), lamport: 5000 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "X".into(), lamport: 5000, sensitive: false }, &wall);
     assert_eq!(app.clock.now(), 5001);
     
     app.handle(Event::ManualUnpair, &wall);
@@ -542,7 +542,7 @@ fn test_35_very_long_preview_truncation() {
     app.handle(Event::HandshakeOk, &wall);
     
     let long_preview = "A".repeat(1_000_000); // 1MB
-    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: long_preview.clone(), lamport: 1 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: long_preview.clone(), lamport: 1, sensitive: false }, &wall);
     
     // If the system doesn't truncate, State clones will be slow.
     assert_eq!(app.state.history[0].preview.len(), 1_000_000);
@@ -561,7 +561,7 @@ fn test_36_malformed_wall_clock_time() {
     app.handle(Event::PeerSeen { peer_id: [1; 32], name: "Mac".into() }, &crazy_wall);
     app.handle(Event::HandshakeOk, &crazy_wall);
     
-    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "X".into(), lamport: 1 }, &crazy_wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "X".into(), lamport: 1, sensitive: false }, &crazy_wall);
     
     assert_eq!(app.state.history[0].time, "99:99-IMPOSSIBLE-TIME-LONG-STRING");
 }
@@ -598,7 +598,7 @@ fn test_39_sensitive_data_then_replay_attack() {
     assert!(app.state.history.is_empty());
     
     // 2. Malicious peer tries to REPLAY the same secret but via FrameReceived (which doesn't check sensitivity!)
-    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "MOCK_STRIPE_KEY_REDACTED".into(), lamport: 2 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash: [1; 32], kind: Kind::Text, preview: "MOCK_STRIPE_KEY_REDACTED".into(), lamport: 2, sensitive: false }, &wall);
     
     // Dedup should catch it because hash is same.
     assert!(app.state.history.is_empty());
@@ -679,15 +679,15 @@ fn test_46_dedup_eviction_and_reentry() {
     app.handle(Event::HandshakeOk, &wall);
     
     let hash = [0x99; 32];
-    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "A".into(), lamport: 1 }, &wall);
+    app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "A".into(), lamport: 1, sensitive: false }, &wall);
     
     // Send 50 other items to evict hash [0x99]
     for i in 0..50 {
-        app.handle(Event::FrameReceivedClipboard { hash: [i as u8; 32], kind: Kind::Text, preview: "B".into(), lamport: (i+10) as u64 }, &wall);
+        app.handle(Event::FrameReceivedClipboard { hash: [i as u8; 32], kind: Kind::Text, preview: "B".into(), lamport: (i+10) as u64, sensitive: false }, &wall);
     }
     
     // Now re-send hash [0x99]. It should be accepted again.
-    let actions = app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "A".into(), lamport: 100 }, &wall);
+    let actions = app.handle(Event::FrameReceivedClipboard { hash, kind: Kind::Text, preview: "A".into(), lamport: 100, sensitive: false }, &wall);
     assert!(!actions.is_empty());
 }
 
@@ -700,7 +700,7 @@ fn test_47_frozen_wall_clock() {
     app.handle(Event::HandshakeOk, &frozen_wall);
     
     for i in 0..10 {
-        app.handle(Event::FrameReceivedClipboard { hash: [i as u8; 32], kind: Kind::Text, preview: "X".into(), lamport: i as u64 }, &frozen_wall);
+        app.handle(Event::FrameReceivedClipboard { hash: [i as u8; 32], kind: Kind::Text, preview: "X".into(), lamport: i as u64, sensitive: false }, &frozen_wall);
     }
     
     // All items have same time "12:00"
