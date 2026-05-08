@@ -80,7 +80,7 @@ separate `.dmg` — install it manually until the cask is published in
 v0.2.
 
 ```sh
-brew tap dethie/fluxsync
+brew tap flowerpower584/fluxsync
 brew install fluxsync
 brew services start fluxsync
 # Then drag FluxSync.app from the .dmg into /Applications.
