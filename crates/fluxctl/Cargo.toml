@@ -27,6 +27,8 @@ anyhow = "1"
 # `default-features = false` drops `image` (PNG/SVG) — we only need the
 # unicode terminal renderer, which keeps the dep small.
 qrcode = { version = "0.14", default-features = false }
+owo-colors = "4"
+comfy-table = "7"
 
 [[bin]]
 name = "fluxctl"

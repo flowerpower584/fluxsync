@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+mod render;
+
 #[derive(Parser, Debug)]
 #[command(name = "fluxctl", version, about = "FluxSync CLI")]
 struct Args {
@@ -101,58 +103,94 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let ipc_path = args.ipc_path.unwrap_or_else(default_ipc_path);
 
-    let value = match args.cmd {
-        Cmd::Status => one_shot(&ipc_path, json!({"id": 1, "op": "status"})).await?,
-        Cmd::Peers => one_shot(&ipc_path, json!({"id": 1, "op": "peers"})).await?,
-        Cmd::Push { text } => {
-            one_shot(&ipc_path, json!({"id": 1, "op": "push", "text": text})).await?
-        }
-        Cmd::Pull => one_shot(&ipc_path, json!({"id": 1, "op": "pull"})).await?,
-        Cmd::Tail { n } => one_shot(&ipc_path, json!({"id": 1, "op": "tail", "n": n})).await?,
-        Cmd::SetThreshold { value } => {
+    enum Kind {
+        Status,
+        Peers,
+        Tail,
+        Pull,
+        PairShow,
+        PairQr,
+        Ack(&'static str),
+    }
+
+    let (value, kind) = match args.cmd {
+        Cmd::Status => (
+            one_shot(&ipc_path, json!({"id": 1, "op": "status"})).await?,
+            Kind::Status,
+        ),
+        Cmd::Peers => (
+            one_shot(&ipc_path, json!({"id": 1, "op": "peers"})).await?,
+            Kind::Peers,
+        ),
+        Cmd::Push { text } => (
+            one_shot(&ipc_path, json!({"id": 1, "op": "push", "text": text})).await?,
+            Kind::Ack("pushed"),
+        ),
+        Cmd::Pull => (
+            one_shot(&ipc_path, json!({"id": 1, "op": "pull"})).await?,
+            Kind::Pull,
+        ),
+        Cmd::Tail { n } => (
+            one_shot(&ipc_path, json!({"id": 1, "op": "tail", "n": n})).await?,
+            Kind::Tail,
+        ),
+        Cmd::SetThreshold { value } => (
             one_shot(
                 &ipc_path,
                 json!({"id": 1, "op": "set_threshold", "value": value}),
             )
-            .await?
-        }
-        Cmd::SetChargeOverride { value } => {
+            .await?,
+            Kind::Ack("threshold updated"),
+        ),
+        Cmd::SetChargeOverride { value } => (
             one_shot(
                 &ipc_path,
                 json!({"id": 1, "op": "set_charge_override", "value": value}),
             )
-            .await?
-        }
-        Cmd::Revoke { peer_id } => {
+            .await?,
+            Kind::Ack("charge override updated"),
+        ),
+        Cmd::Revoke { peer_id } => (
             one_shot(
                 &ipc_path,
                 json!({"id": 1, "op": "revoke", "peer_id": peer_id}),
             )
-            .await?
-        }
-        Cmd::Reconnect => one_shot(&ipc_path, json!({"id": 1, "op": "reconnect"})).await?,
-        Cmd::DebugCapture => one_shot(&ipc_path, json!({"id": 1, "op": "debug_capture"})).await?,
-        Cmd::On => one_shot(&ipc_path, json!({"id": 1, "op": "toggle", "on": true})).await?,
-        Cmd::Off => one_shot(&ipc_path, json!({"id": 1, "op": "toggle", "on": false})).await?,
+            .await?,
+            Kind::Ack("peer revoked"),
+        ),
+        Cmd::Reconnect => (
+            one_shot(&ipc_path, json!({"id": 1, "op": "reconnect"})).await?,
+            Kind::Ack("reconnect requested"),
+        ),
+        Cmd::DebugCapture => (
+            one_shot(&ipc_path, json!({"id": 1, "op": "debug_capture"})).await?,
+            Kind::Ack("debug capture written"),
+        ),
+        Cmd::On => (
+            one_shot(&ipc_path, json!({"id": 1, "op": "toggle", "on": true})).await?,
+            Kind::Ack("daemon ON"),
+        ),
+        Cmd::Off => (
+            one_shot(&ipc_path, json!({"id": 1, "op": "toggle", "on": false})).await?,
+            Kind::Ack("daemon OFF"),
+        ),
         Cmd::Pair { sub } => match sub {
-            PairSub::Show => one_shot(&ipc_path, json!({"id": 1, "op": "pair_show"})).await?,
-            PairSub::ShowQr => {
-                let resp = one_shot(&ipc_path, json!({"id": 1, "op": "pair_show"})).await?;
-                if args.json {
-                    resp
-                } else {
-                    // Custom rendering replaces the default JSON dump.
-                    render_pair_qr(&resp)?;
-                    return Ok(());
-                }
-            }
-            PairSub::FromUri { uri, name } => {
+            PairSub::Show => (
+                one_shot(&ipc_path, json!({"id": 1, "op": "pair_show"})).await?,
+                Kind::PairShow,
+            ),
+            PairSub::ShowQr => (
+                one_shot(&ipc_path, json!({"id": 1, "op": "pair_show"})).await?,
+                Kind::PairQr,
+            ),
+            PairSub::FromUri { uri, name } => (
                 one_shot(
                     &ipc_path,
                     json!({"id": 1, "op": "pair_from_uri", "uri": uri, "name": name}),
                 )
-                .await?
-            }
+                .await?,
+                Kind::Ack("pairing accepted"),
+            ),
             PairSub::Accept { pubkey, name, addr } => {
                 let mut req = json!({
                     "id": 1,
@@ -163,12 +201,27 @@ async fn main() -> Result<()> {
                 if let Some(a) = addr {
                     req["addr"] = json!(a);
                 }
-                one_shot(&ipc_path, req).await?
+                (one_shot(&ipc_path, req).await?, Kind::Ack("peer trusted"))
             }
         },
     };
 
-    print(&value, args.json);
+    if args.json {
+        if let Ok(s) = serde_json::to_string_pretty(&value) {
+            println!("{s}");
+        }
+        return Ok(());
+    }
+
+    match kind {
+        Kind::Status => render::render_status(&value),
+        Kind::Peers => render::render_peers(&value),
+        Kind::Tail => render::render_tail(&value),
+        Kind::Pull => render::render_pull(&value),
+        Kind::PairShow => render::render_pair_show(&value)?,
+        Kind::PairQr => render_pair_qr(&value)?,
+        Kind::Ack(action) => render::render_ack(&value, action),
+    }
     Ok(())
 }
 
@@ -254,20 +307,6 @@ async fn one_shot(path: &Path, request: Value) -> Result<Value> {
     Ok(v)
 }
 
-fn print(v: &Value, json: bool) {
-    if json {
-        match serde_json::to_string_pretty(v) {
-            Ok(s) => println!("{s}"),
-            Err(e) => eprintln!("json render error: {e}"),
-        }
-        return;
-    }
-    // Human-readable fallback: just pretty-print the response. The shape
-    // is small enough that JSON is already readable.
-    if let Ok(s) = serde_json::to_string_pretty(v) {
-        println!("{s}");
-    }
-}
 
 fn default_ipc_path() -> PathBuf {
     if cfg!(windows) {
