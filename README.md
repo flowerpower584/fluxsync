@@ -155,7 +155,16 @@ flowchart LR
 | Designed for clipboard (not file sync)   |   yes       |          yes              |   no      |   **yes**    |
 | Battery-aware auto-pause                 |   no        |          partial          |   no      |   **yes**    |
 | One Rust daemon, no GUI dep              |   no        |          —                |   yes     |   **yes**    |
-| Open source, MIT                         |   yes (GPL) |          no               |   yes (MPL) | **yes**     |
+| Open source, permissive                  |   yes (GPL) |          no               |   yes (MPL) | **yes (MIT OR Apache-2.0)**     |
+
+## License
+
+FluxSync is dual-licensed under either of:
+
+- [MIT License](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option. This is the standard Rust ecosystem dual-license — pick whichever fits your downstream project. Apache 2.0 adds an explicit patent grant; MIT keeps things short and GPL-compatible.
 
 ---
 Crafted in Kaolack, Senegal 🇸🇳
