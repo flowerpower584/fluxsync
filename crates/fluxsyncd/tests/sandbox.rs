@@ -1,5 +1,5 @@
 use anyhow::Result;
-use fluxsync_crypto::{test_util::pair_for_test, Identity, Session};
+use fluxsync_crypto::Identity;
 use fluxsyncd::transport::Transport;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -17,8 +17,8 @@ async fn test_aggressive_probing_architecture() -> Result<()> {
     println!("🚀 Démarrage du Sandbox Architecture...");
 
     // 1. Simulation de deux identités
-    let id_a = Identity::generate();
-    let id_b = Identity::generate();
+    let _id_a = Identity::generate();
+    let _id_b = Identity::generate();
 
     // 2. Simulation d'un "Last Known Address" (LKA)
     let lka_addr: SocketAddr = "192.168.1.13:60116".parse()?;
@@ -68,7 +68,7 @@ async fn test_chaos_monkey_ip_jumper() -> Result<()> {
     println!("🌪️ Lancement du Chaos Monkey: IP Jumper...");
 
     let mut current_ip = Ipv4Addr::new(192, 168, 1, 10);
-    let peer_id = [0u8; 32];
+    let _peer_id = [0u8; 32];
 
     println!("📱 Le téléphone commence sur {}", current_ip);
 
@@ -119,7 +119,7 @@ async fn test_sadistic_handshake_interruption() -> Result<()> {
     // 3. Le transport doit quand même réussir à répondre sur la nouvelle IP
     //    grâce au mécanisme de Roaming et à l'intelligence de probing.
 
-    let mut session_established = false;
+    let session_established;
     let start = Instant::now();
 
     println!("📡 Envoi du msg1 (HandshakeInit)...");

@@ -10,9 +10,7 @@
 //! background sync to fail silently until the user opens the app to pair again.
 
 use anyhow::Result;
-use fluxsync_core::{Action, App, Config, Event, Phase};
-use fluxsync_crypto::Identity;
-use fluxsyncd::{keystore, DaemonConfig};
+use fluxsyncd::keystore;
 use tempfile::tempdir;
 
 #[test]

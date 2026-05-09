@@ -127,7 +127,7 @@ async fn extreme_dual_daemon_stress_test() {
     let shutdown_a = Arc::new(Notify::new());
     let shutdown_b = Arc::new(Notify::new());
 
-    let h_a = tokio::spawn(run(cfg_a, shutdown_a.clone()));
+    let _h_a = tokio::spawn(run(cfg_a, shutdown_a.clone()));
     let h_b = tokio::spawn(run(cfg_b, shutdown_b.clone()));
 
     // Wait for IPC sockets to appear
@@ -318,7 +318,7 @@ async fn extreme_dual_daemon_stress_test() {
 
     // 1. Send from a NEW port to A
     let new_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let new_addr = new_socket.local_addr().unwrap();
+    let _new_addr = new_socket.local_addr().unwrap();
 
     // Create a message using B's session
     let item = fluxsync_proto::ClipboardItem {
@@ -333,7 +333,7 @@ async fn extreme_dual_daemon_stress_test() {
         version: fluxsync_proto::PROTOCOL_VERSION,
         msg: fluxsync_proto::Msg::ClipboardItem(item),
     };
-    let plaintext = fluxsync_proto::encode(&frame).unwrap();
+    let _plaintext = fluxsync_proto::encode(&frame).unwrap();
 
     // We need Peer B's session to encrypt.
     // In this test, we can just use sess_b (which we still have).
