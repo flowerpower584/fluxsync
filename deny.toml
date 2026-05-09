@@ -34,6 +34,8 @@ ignore = [
 # stricter than Apache 2.0 should leak in.
 # ─────────────────────────────────────────────────────────────────
 [licenses]
+# Trimmed to licenses actually encountered in the dep tree. If a future
+# transitive dep brings a new license, CI will fail and we'll add it here.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -41,34 +43,13 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
-    "ISC",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
-    "OpenSSL",
-    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 exceptions = []
-
-# ring's license is bespoke (mix of OpenSSL/ISC/MIT). Whitelist the crate
-# explicitly so cargo-deny stops flagging it. Same convention as `rustls`
-# and most Rust crypto consumers.
-[[licenses.clarify]]
-name = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [
-    { path = "LICENSE", hash = 0xbd0eed23 },
-]
-
-[[licenses.clarify]]
-name = "webpki"
-expression = "ISC"
-license-files = [
-    { path = "LICENSE", hash = 0x001c7e6c },
-]
 
 # ─────────────────────────────────────────────────────────────────
 # Banned crates / version constraints
@@ -77,18 +58,15 @@ license-files = [
 # our deps is dragging in a stale version of a common crate.
 # ─────────────────────────────────────────────────────────────────
 [bans]
-multiple-versions = "warn"
-# Wildcards downgraded to warn because every crate in this workspace
-# uses `path = "../foo"` deps, which cargo-deny records as wildcard
-# versions. `allow-wildcard-paths = true` doesn't help here — the
-# crates have a `description` and `repository`, so cargo-deny treats
-# them as "public" and refuses to apply the wildcard-paths exception
-# (since crates.io rejects published crates with path-only deps).
-# We're not actually publishing yet, so the public-crate concern
-# doesn't apply — surface the warning, don't block CI on it. When we
-# do publish, we'll add `version = "0.5.1"` next to each `path = ...`
-# and flip this back to "deny".
-wildcards = "warn"
+# Duplicates are inherent in the Rust ecosystem (windows-sys, thiserror,
+# socket2, etc. routinely ship multiple major versions through transitive
+# deps). Allow them — we'd never finish chasing the long tail.
+multiple-versions = "allow"
+# Internal workspace crates use `path = "../foo"` which cargo-deny logs
+# as wildcard. We're not publishing to crates.io yet, so allow them.
+# When we publish, set this to "deny" and add `version = "0.5.1"` next
+# to each `path = ...` entry.
+wildcards = "allow"
 highlight = "all"
 deny = []
 skip = []
