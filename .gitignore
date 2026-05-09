@@ -10,9 +10,17 @@ proptest-regressions/
 # Build artifacts
 build/
 .gradle/
+.kotlin/
 local.properties
 gradle_output.txt
 *.class
+
+# Release binaries — go to GitHub releases, not repo
+*.apk
+*.dmg
+
+# Dev scratch
+crates/fluxsyncd/scratch/
 
 design/chats/
 PROMPT-BACKEND-CLAUDE-CODE.md
