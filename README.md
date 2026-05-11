@@ -172,5 +172,17 @@ FluxSync is dual-licensed under either of:
 
 at your option. This is the standard Rust ecosystem dual-license — pick whichever fits your downstream project. Apache 2.0 adds an explicit patent grant; MIT keeps things short and GPL-compatible.
 
+## 🔒 Security & Known Issues (v0.5.0)
+
+- **End-to-End Encryption**: All traffic is encrypted using the **Noise IK** handshake (Curve25519, ChaCha20, Poly1305).
+- **No Servers**: Peer discovery happens via mDNS (local network only). 
+- **Known Bugs (v0.5.0)**:
+    - **Handshake Deadlock**: If a handshake packet is lost, the sync can hang. Restart or manual toggle required.
+    - **Clipboard Ping-Pong**: Trailing spaces in text can cause infinite sync loops.
+    - **Persistence**: Peer pairing is NOT persistent across restarts in this version.
+- **Roadmap (v0.6.0)**:
+    - **Key Storage**: Secure OS Keychain integration (currently stored in plain text).
+    - **Windows IPC**: Native Named Pipes (currently using Unix Socket emulation).
+
 ---
 Crafted in Kaolack, Senegal 🇸🇳

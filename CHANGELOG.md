@@ -46,6 +46,12 @@ Versions follow [SemVer](https://semver.org/).
 - True universal clipboard (macOS, Windows, Android, Linux).
 - Automated test cleanup and strict mock secret redaction for GitHub Push Protection.
 
+### Known Issues (v0.5.0)
+- **Handshake Deadlock**: Rare race conditions during handshake can lead to a stuck state.
+- **Clipboard Ping-Pong**: Trailing whitespace in text can trigger infinite synchronization loops.
+- **Persistence**: Device pairing information is not saved; re-pairing is required after daemon restart.
+- **Windows Support**: Native Named Pipes for IPC are pending; currently using Unix Socket emulation.
+
 ## [v0.1.0] — 2026-04-29
 
 **Backend foundation. No real cross-device sync yet.**

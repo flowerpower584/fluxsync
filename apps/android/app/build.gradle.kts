@@ -23,6 +23,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -113,7 +114,7 @@ tasks.register<Exec>("buildRustFfi") {
     // GUI context like Android Studio.
     commandLine = listOf(
         "bash", "-lc",
-        "cargo ndk -t arm64-v8a -o '${jniLibsDir.absolutePath}' build --release -p fluxsync-mobile-ffi",
+        "PATH=\"\$HOME/.cargo/bin:\$PATH\" cargo ndk -t arm64-v8a -o '${jniLibsDir.absolutePath}' build --release -p fluxsync-mobile-ffi",
     )
     inputs.dir("${workspaceRoot}/crates/fluxsync-mobile-ffi/src")
     outputs.file(ffiSoPath)
@@ -126,7 +127,7 @@ tasks.register<Exec>("genUniffiBindings") {
     workingDir = workspaceRoot
     commandLine = listOf(
         "bash", "-lc",
-        "cargo run -p uniffi-bindgen -- generate " +
+        "PATH=\"\$HOME/.cargo/bin:\$PATH\" cargo run -p uniffi-bindgen -- generate " +
             "--library '${ffiSoPath.absolutePath}' " +
             "--language kotlin " +
             "--out-dir '${javaSrcDir.absolutePath}'",

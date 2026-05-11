@@ -44,6 +44,12 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _guard = sentry::init(("https://9c9d519251cf44cc9149f318b383f4f5@o4511345219600384.ingest.de.sentry.io/4511345258659920", sentry::ClientOptions {
+        release: sentry::release_name!(),
+        send_default_pii: true,
+        ..Default::default()
+    }));
+
     let args = Args::parse();
     init_tracing(args.verbose);
 

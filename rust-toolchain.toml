@@ -2,3 +2,4 @@
 channel = "stable"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
+targets = ["aarch64-linux-android"]

@@ -37,6 +37,7 @@ thiserror = { workspace = true }
 mdns-sd = "0.13"
 base32 = "0.5"
 hex = "0.4"
+sentry = { version = "0.48.1", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["fs", "hostname"] }
