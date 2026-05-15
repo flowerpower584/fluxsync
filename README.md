@@ -17,12 +17,14 @@
 **Universal clipboard. Local-first. Peer-to-peer. End-to-end encrypted.**
 One Rust daemon, dedicated apps for macOS + Android, zero servers.
 
-> **Platform status (v0.5.1):** macOS tray app (universal — Apple Silicon + Intel) + Android app are the two first-class clients. The daemon + CLI also build cleanly on Linux (cross-compile to `x86_64-unknown-linux-musl` is green) so headless Linux use is supported. Windows daemon/CLI is not tested yet. No GUI on Linux/Windows — contributions welcome.
+> **Platform status (v0.5.1):** Android app is the first-class GUI client. macOS ships via Homebrew (CLI + daemon — no tray app until Apple Dev ID is funded). The daemon + CLI also build cleanly on Linux (cross-compile to `x86_64-unknown-linux-musl` is green) so headless Linux use is supported. Windows daemon/CLI is not tested yet. No GUI on Linux/Windows — contributions welcome.
 
 ---
 
-## ⚡ v0.5.1 Release: Terminal Polish + Universal macOS Binary
-Universal macOS DMG (Apple Silicon + Intel). Styled `fluxctl` terminal output. Linux headless cross-compile green. Daemon version now tied to `CARGO_PKG_VERSION` automatically.
+## ⚡ v0.5.1 Release: Terminal Polish + Linux Headless
+Styled `fluxctl` terminal output. Linux headless cross-compile green. Daemon version now tied to `CARGO_PKG_VERSION` automatically.
+
+> **No macOS DMG for now.** Apple Developer ID signing costs $99/year and isn't funded yet, so the unsigned DMG was pulled from releases to avoid the Gatekeeper detour. macOS users: install via **Homebrew** (below) — it builds locally, no signing required.
 
 ---
 
@@ -33,33 +35,17 @@ Universal macOS DMG (Apple Silicon + Intel). Styled `fluxctl` terminal output. L
 2. On the device, allow installs from the browser/Files app (Settings → Apps → Special access → Install unknown apps).
 3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access.
 
-### 💻 macOS (Apple Silicon + Intel) — recommended
+### 🍺 macOS — Homebrew (recommended)
+The DMG is gone for now (no Apple Developer ID — $99/year, not in the budget yet), so Homebrew is the supported macOS path. Builds the daemon + CLI from source (~1–2 min on Apple Silicon, pulls Rust as a build dep). **No tray icon, no QR popup** — pair via `fluxctl pair show-qr` (renders the QR as Unicode in your terminal) and scan from the phone. Linuxbrew may work too — same formula — but isn't tested.
 
-> **Heads up — Gatekeeper.** The build is **unsigned** (no Apple Developer ID — that subscription costs $99/year and isn't funded yet). Running it is safe but macOS will block the first launch with a *"FluxSync.app cannot be opened because Apple cannot check it for malicious software"* dialog. **Run the `xattr` command in step 3 BEFORE you double‑click the app** and you'll never see that dialog. Without it, you'll have to detour through System Settings → Privacy & Security to approve the app.
-
-The DMG is a universal binary (`x86_64 + arm64` lipo'd together) — same file works on Intel Macs and Apple Silicon (M1/M2/M3).
-
-1. Download [**FluxSync_0.5.1_universal.dmg**](https://github.com/flowerpower584/fluxsync/releases/download/v0.5.1/FluxSync_0.5.1_universal.dmg) (~8 MB).
-2. Open the `.dmg` and drag **FluxSync.app** into `/Applications`. (You can eject the disk image now.)
-3. **Open Terminal** and run this once — it strips the Safari quarantine flag so Gatekeeper lets the app start:
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/FluxSync.app
-   ```
-   (If you already double-clicked the app and got the warning dialog, click **Cancel**, run the command above, then launch again.)
-4. Launch **FluxSync** from Launchpad / Spotlight / `/Applications`. A tray icon appears in the menu bar (top-right).
-5. macOS will prompt for **Local Network** access — approve it. This is required for mDNS peer discovery on UDP/41889; without it the app cannot find your phone.
-
-**Stuck on macOS Sequoia (15+)?** Apple removed the right-click → Open shortcut. The `xattr` step above is now the easiest unblock. The other route is *System Settings → Privacy & Security → scroll to the bottom → "Open Anyway"* after the warning dialog, then click *"Open"* on the second confirmation.
-
-### 🍺 Homebrew (macOS — terminal users)
-A second-class option for people who already live in the terminal. Builds the daemon + CLI from source (~1–2 min on Apple Silicon, pulls Rust as a build dep). **No tray icon, no QR popup** — pair via `fluxctl pair show-qr` (renders the QR as Unicode in your terminal) and scan from the phone. Linuxbrew may work too — same formula — but isn't tested.
 ```sh
 brew tap flowerpower584/fluxsync
 brew install fluxsync
 brew services start fluxsync   # auto-start daemon at login
 fluxctl status                 # smoke-test
 ```
-The tap lives at [`flowerpower584/homebrew-fluxsync`](https://github.com/flowerpower584/homebrew-fluxsync). **Don't run brew + the `.dmg` together** — both ship a daemon and they'll fight over UDP 41889 and `~/.fluxsync/sock`. Pick one path per machine.
+
+The tap lives at [`flowerpower584/homebrew-fluxsync`](https://github.com/flowerpower584/homebrew-fluxsync). Want a signed `.app` with a real tray + QR popup? Sponsor the Apple Dev ID and the DMG comes back.
 
 ### 🐧 Linux (terminal — headless)
 The daemon and CLI cross-compile cleanly to Linux (`x86_64-unknown-linux-musl` checked from this machine). No tray app yet, so this is a CLI / systemd-unit setup — fine for servers and power-users. Two ways to install:
@@ -107,7 +93,7 @@ cargo build --release
 ## Quickstart (v0.5.1)
 
 ### 1. Run the daemon
-The macOS tray app and the Android app start the daemon for you — skip to step 2.
+The Android app starts the daemon for itself — skip to step 2 if you're only using a phone.
 
 For the Homebrew install: `brew services start fluxsync` (already covered above).
 
@@ -117,7 +103,7 @@ If you built from source, run it manually (defaults: `~/.fluxsync/sock` IPC, UDP
 ```
 
 ### 2. Pair your devices
-Open the Android app or click the macOS tray icon → **Pair**. Show the QR on one device and scan it from the other. **Your data never leaves your local network.**
+On macOS / Linux: `fluxctl pair show-qr` renders the QR in the terminal — scan it from the Android app. From the Android app, tap **Pair** and scan the QR shown by the other device. **Your data never leaves your local network.**
 
 ### 3. Use the CLI (optional)
 The CLI talks to the daemon via the local IPC socket — useful for scripting headless setups. If you installed via Homebrew, drop the `./target/release/` prefix (binaries are on `$PATH`).
