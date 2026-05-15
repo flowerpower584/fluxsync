@@ -73,15 +73,13 @@ mixing it in fights workspace `cargo check` invariants).
 
 ## Distribution
 
-The intended path is via `brew install fluxsync`, which builds + 
-installs `fluxsyncd` and `fluxctl` (see `packaging/homebrew/fluxsync.rb`)
-and sets up `brew services` for auto-start. The tray app itself is a
-separate `.dmg` — install it manually until the cask is published in
-v0.2.
+Build from source — there's no signed DMG yet (no Apple Developer ID).
+`npm run tauri build` produces `FluxSync.app` under
+`src-tauri/target/release/bundle/macos/`; drag it into `/Applications`.
+The app bundles and manages the `fluxsyncd` daemon itself.
 
 ```sh
-brew tap flowerpower584/fluxsync
-brew install fluxsync
-brew services start fluxsync
-# Then drag FluxSync.app from the .dmg into /Applications.
+npm install
+npm run tauri build
+# → src-tauri/target/release/bundle/macos/FluxSync.app
 ```

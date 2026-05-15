@@ -4,8 +4,7 @@
 //!
 //! Also owns daemon-lifecycle helpers used at app boot: probe the
 //! socket, spawn `fluxsyncd` detached if absent, wait for the socket to
-//! appear. Lets the tray be the only thing the user has to launch — no
-//! `brew services start` step required.
+//! appear. Lets the tray be the only thing the user has to launch.
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
@@ -34,7 +33,7 @@ fn ipc_path() -> Result<PathBuf> {
 ///
 /// Failures are logged but never fatal — the tray must still open even
 /// if the daemon is missing, so the user can see an actionable error in
-/// the popup ("daemon not reachable, run `brew services start fluxsync`").
+/// the popup ("daemon not reachable").
 pub fn ensure_daemon_running() {
     if is_daemon_alive() {
         return;
@@ -124,8 +123,8 @@ fn open_daemon_log() -> Result<std::fs::File> {
 
 /// Search order for the daemon binary:
 ///   1. `FLUXSYNC_DAEMON_BIN` env var (dev override).
-///   2. Sibling to the running tray binary (DMG bundle layout).
-///   3. Homebrew prefixes (`/opt/homebrew`, `/usr/local`).
+///   2. Sibling to the running tray binary (`.app` bundle layout).
+///   3. System bin prefixes (`/opt/homebrew/bin`, `/usr/local/bin`).
 ///   4. `~/.cargo/bin/fluxsyncd` (developer `cargo install`).
 ///   5. The repo's `target/{release,debug}/fluxsyncd` when running from
 ///      a workspace checkout (`cargo run` / `tauri dev`).
@@ -189,8 +188,8 @@ fn locate_daemon() -> Result<PathBuf> {
     }
 
     Err(anyhow!(
-        "fluxsyncd binary not found. Install with `brew install fluxsync`, `cargo install \
-         --path crates/fluxsyncd`, or set `FLUXSYNC_DAEMON_BIN` to an explicit path."
+        "fluxsyncd binary not found. Build it with `cargo build --release -p fluxsyncd`, \
+         `cargo install --path crates/fluxsyncd`, or set `FLUXSYNC_DAEMON_BIN` to an explicit path."
     ))
 }
 

@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FluxSync — Android spec (Home / Devices / Logs / Settings)</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0A0A0A; min-height: 100vh; }
+  body {
+    font-family: 'Inter Tight', -apple-system, sans-serif;
+    color: #FAFAFA;
+    padding: 32px 0 64px;
+  }
+  .stage {
+    display: flex;
+    gap: 28px;
+    justify-content: center;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    max-width: 1700px;
+    margin: 0 auto;
+    padding: 0 32px;
+  }
+  .frame {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+  .frame-label {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #71717A;
+  }
+  .device-bezel {
+    width: 360px;
+    height: 760px;
+    border-radius: 28px;
+    overflow: hidden;
+    border: 1px solid #2a2a2e;
+    background: #000;
+  }
+  .header {
+    text-align: center;
+    margin-bottom: 28px;
+    padding: 0 32px;
+  }
+  .header h1 {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0 0 6px;
+  }
+  .header p {
+    color: #A1A1AA;
+    font-size: 14px;
+    margin: 0;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  .header .meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #D43F3F;
+    margin-bottom: 10px;
+  }
+  .note {
+    max-width: 1100px;
+    margin: 56px auto 0;
+    padding: 24px 28px;
+    border: 1px solid #1F1F22;
+    background: #131316;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #A1A1AA;
+  }
+  .note h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #D43F3F;
+    margin: 0 0 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 500;
+  }
+  .note ul { margin: 8px 0 0; padding-left: 18px; }
+  .note li { margin-bottom: 6px; }
+  .note code {
+    font-family: 'JetBrains Mono', monospace;
+    background: #0B0B0C;
+    padding: 1px 5px;
+    border-radius: 2px;
+    color: #FAFAFA;
+    font-size: 12px;
+  }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+
+<div class="header">
+  <div class="meta">● FluxSync v0.5.0-hardened · android spec</div>
+  <h1>4 écrans, 1 nav, 0 bullshit</h1>
+  <p>Home, Devices, Logs, Settings — tous opérationnels. La barre du bas switche entre les écrans. Cette spec est la vérité ; l'APK actuel doit s'aligner dessus.</p>
+</div>
+
+<div id="root"></div>
+
+<div class="note">
+  <h2>Pour l'agent Antigravity — checklist d'intégration</h2>
+  <ul>
+    <li><strong>Bottom navigation rail</strong> — 4 onglets : Home, Devices, Logs, Settings. Tous cliquables, tous routés. Indicateur actif = couleur <code>#D43F3F</code> (rouge sénégalais).</li>
+    <li><strong>Home</strong> — status hero, master toggle, peer device card, conditions panel (slider battery threshold), recent clipboard (4 derniers items).</li>
+    <li><strong>Devices</strong> — liste des peers connus (nom, OS, IP locale, last seen, battery), bouton "Pair new device" → flow QR/code. État empty si 0 peers.</li>
+    <li><strong>Logs</strong> — JSON stream rendu en plain English par défaut, toggle "Show raw" pour vue ingénieur. Filtres par level (OK/INFO/WARN/ERR).</li>
+    <li><strong>Settings</strong> — sections : General (battery threshold, resume on charge), Security (fingerprint pubkey, rotate keys, unpair all), Network (port, prefer LAN, relay fallback), About (version, build hash, license, "Crafted in Kaolack 🇸🇳").</li>
+    <li><strong>Tokens</strong> — fonts <code>Inter Tight</code> + <code>JetBrains Mono</code>, palette dark only sur mobile, accent <code>#D43F3F</code> exclusivement pour critique + brand.</li>
+    <li><strong>Pas de gradient, pas d'emoji décoratif, pas de modal "What's new", pas d'animation gratuite.</strong> Densité d'info > bling.</li>
+  </ul>
+</div>
+
+<script type="text/babel">
+
+// ── Tokens ────────────────────────────────────────────────────
+const FS = {
+  light: {
+    bg: '#FAFAF9', surface: '#FFFFFF', fg: '#0A0A0A',
+    muted: '#71717A', subtle: '#A1A1AA', border: '#E4E4E7',
+    borderStrong: '#D4D4D8', hover: '#F4F4F5',
+  },
+  dark: {
+    bg: '#0B0B0C', surface: '#131316', fg: '#FAFAFA',
+    muted: '#A1A1AA', subtle: '#71717A', border: '#1F1F22',
+    borderStrong: '#2A2A2E', hover: '#1A1A1D',
+  },
+  ok: '#3FAE5A', okSoft: 'rgba(63,174,90,0.12)',
+  warn: '#D9A441', warnSoft: 'rgba(217,164,65,0.14)',
+  crit: '#D43F3F', critSoft: 'rgba(212,63,63,0.12)',
+  info: '#5B7FBF',
+  ui: "'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+  mono: "'JetBrains Mono', 'SF Mono', ui-monospace, monospace",
+};
+
+// Inject font import + base styles
+(function(){
+  if (document.getElementById('fs-styles')) return;
+  const s = document.createElement('style');
+  s.id = 'fs-styles';
+  s.textContent = `
+    @import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+    .fs-frame, .fs-frame *{box-sizing:border-box;font-family:${FS.ui};-webkit-font-smoothing:antialiased;}
+    .fs-frame .mono{font-family:${FS.mono};}
+    .fs-frame button{font-family:inherit;cursor:pointer;border:0;background:none;padding:0;color:inherit;}
+    .fs-frame [data-uppercase]{text-transform:uppercase;letter-spacing:0.06em;}
+    @keyframes fs-pulse{0%,100%{opacity:1}50%{opacity:.45}}
+    .fs-pulse{animation:fs-pulse 1.6s ease-in-out infinite;}
+  `;
+  document.head.appendChild(s);
+})();
+
+// ── Primitives ────────────────────────────────────────────────
+function Dot({ status='ok', size=6, pulse=false, style }) {
+  const colors = { ok: FS.ok, warn: FS.warn, crit: FS.crit, off: '#52525B', info: FS.info };
+  return <span className={pulse?'fs-pulse':''} style={{
+    display:'inline-block', width:size, height:size, borderRadius:'50%',
+    background:colors[status],
+    boxShadow:status!=='off'?`0 0 0 3px ${colors[status]}22`:'none',
+    flexShrink:0, ...style,
+  }} />;
+}
+
+function Toggle({ on, onChange, size='md', theme='dark', disabled }) {
+  const t = theme==='dark'?FS.dark:FS.light;
+  const dims = size==='sm'?{w:28,h:16,k:12}:{w:36,h:20,k:16};
+  return <button onClick={()=>!disabled&&onChange?.(!on)} style={{
+    width:dims.w, height:dims.h,
+    border:`1px solid ${on?FS.crit:t.borderStrong}`,
+    background:on?FS.crit:'transparent',
+    borderRadius:2, position:'relative', transition:'all .15s ease',
+    opacity:disabled?0.4:1, cursor:disabled?'not-allowed':'pointer',
+  }}>
+    <span style={{
+      position:'absolute', top:1,
+      left:on?dims.w-dims.k-3:1,
+      width:dims.k, height:dims.k,
+      background:on?'#fff':t.muted,
+      borderRadius:1, transition:'left .15s ease, background .15s ease',
+    }} />
+  </button>;
+}
+
+function Battery({ level=80, charging=false, threshold=15, theme='dark', width=28 }) {
+  const t = theme==='dark'?FS.dark:FS.light;
+  const below = level<=threshold;
+  const critical = level<=5;
+  const color = critical?FS.crit:below?FS.warn:FS.ok;
+  const h = width*0.45;
+  return <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
+    <span style={{ position:'relative', width, height:h, border:`1px solid ${t.borderStrong}`, borderRadius:2 }}>
+      <span style={{
+        position:'absolute', top:1, left:1, bottom:1,
+        width:`calc(${Math.max(0,level)}% - 2px)`,
+        background:color, transition:'all .3s',
+      }} />
+      {charging && <span style={{
+        position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center',
+        fontSize:9, color:'#fff', fontWeight:600, mixBlendMode:'difference',
+      }}>⚡</span>}
+      <span style={{
+        position:'absolute', right:-3, top:'25%', bottom:'25%', width:2,
+        background:t.borderStrong, borderRadius:'0 1px 1px 0',
+      }} />
+    </span>
+  </span>;
+}
+
+function SectionLabel({ children, theme='dark', right }) {
+  const t = theme==='dark'?FS.dark:FS.light;
+  return <div style={{
+    display:'flex', justifyContent:'space-between', alignItems:'center',
+    padding:'6px 0', borderBottom:`1px solid ${t.border}`, marginBottom:6,
+  }}>
+    <span className="mono" data-uppercase style={{ color:t.subtle, fontSize:9 }}>{children}</span>
+    {right && <span className="mono" style={{ color:t.subtle, fontSize:9 }}>{right}</span>}
+  </div>;
+}
+
+function Slider({ value, onChange, min=5, max=50, theme='dark' }) {
+  const t = theme==='dark'?FS.dark:FS.light;
+  const pct = ((value-min)/(max-min))*100;
+  const trackRef = React.useRef(null);
+  const drag = (e) => {
+    const r = trackRef.current.getBoundingClientRect();
+    const x = (e.touches?e.touches[0].clientX:e.clientX) - r.left;
+    const v = Math.round(min + (Math.max(0, Math.min(r.width, x))/r.width)*(max-min));
+    onChange?.(v);
+  };
+  return <div ref={trackRef} onMouseDown={(e)=>{
+    drag(e);
+    const m = (ev)=>drag(ev);
+    const u = ()=>{ window.removeEventListener('mousemove', m); window.removeEventListener('mouseup', u); };
+    window.addEventListener('mousemove', m); window.addEventListener('mouseup', u);
+  }} style={{ position:'relative', height:24, cursor:'pointer', display:'flex', alignItems:'center' }}>
+    <div style={{ position:'absolute', left:0, right:0, height:2, background:t.border }} />
+    <div style={{ position:'absolute', left:0, width:`${pct}%`, height:2, background:FS.crit }} />
+    <div style={{ position:'absolute', left:`calc(${pct}% - 6px)`, width:12, height:12,
+      background:t.surface, border:`1px solid ${FS.crit}`, borderRadius:1 }} />
+  </div>;
+}
+
+function E2EBadge({ theme='dark', compact=false }) {
+  const t = theme==='dark'?FS.dark:FS.light;
+  return <span style={{
+    display:'inline-flex', alignItems:'center', gap:5,
+    padding:compact?'2px 5px':'3px 7px',
+    border:`1px solid ${t.border}`, borderRadius:2, fontSize:9,
+  }}>
+    <svg width="9" height="10" viewBox="0 0 9 10" fill="none">
+      <rect x="1" y="4" width="7" height="5" stroke={FS.ok} strokeWidth="1" />
+      <path d="M2.5 4V2.5a2 2 0 014 0V4" stroke={FS.ok} strokeWidth="1" fill="none" />
+    </svg>
+    <span className="mono" data-uppercase style={{ color:t.muted, letterSpacing:'0.08em' }}>E2E · X25519</span>
+  </span>;
+}
+
+function TrayGlyph({ active=true, theme='dark', size=18 }) {
+  const t = theme==='dark'?FS.dark:FS.light;
+  const c = active?FS.crit:t.muted;
+  return <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+    <rect x="2.5" y="3" width="8" height="9" stroke={c} strokeWidth="1.3" />
+    <rect x="5.5" y="6" width="8" height="9" stroke={c} strokeWidth="1.3" fill={theme==='dark'?'#0B0B0C':'#fff'} />
+    {active && <circle cx="13.5" cy="3" r="1.5" fill={FS.ok} />}
+  </svg>;
+}
+
+// ── Status bar ────────────────────────────────────────────────
+function AndroidStatusBar({ active }) {
+  return <div style={{
+    height:28, background:'#0B0B0C', color:'#fff',
+    display:'flex', alignItems:'center', justifyContent:'space-between',
+    padding:'0 14px', fontSize:11,
+  }} className="mono">
+    <span>14:32</span>
+    <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:10 }}>
+      {active && <span style={{ color:FS.ok }}>●</span>}
+      <span>4G</span><span>📶</span><span>87%</span>
+    </div>
+  </div>;
+}
+
+// ── App bar ───────────────────────────────────────────────────
+function AppBar({ title='FluxSync', subtitle, on }) {
+  const t = FS.dark;
+  return <div style={{
+    padding:'18px 20px 14px',
+    display:'flex', justifyContent:'space-between', alignItems:'center',
+    borderBottom:`1px solid ${t.border}`,
+  }}>
+    <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+      <TrayGlyph active={on} theme="dark" size={18} />
+      <div>
+        <div style={{ fontWeight:600, fontSize:16, letterSpacing:'-0.01em' }}>{title}</div>
+        <div className="mono" style={{ color:t.subtle, fontSize:10, marginTop:1 }} data-uppercase>{subtitle||'v0.5.0 · android'}</div>
+      </div>
+    </div>
+    <button style={{ width:32, height:32, border:`1px solid ${t.border}`, borderRadius:4, color:t.muted, fontSize:16 }}>≡</button>
+  </div>;
+}
+
+// ── Bottom nav ────────────────────────────────────────────────
+function BottomNav({ active, onChange }) {
+  const t = FS.dark;
+  const items = [
+    { id:'home', label:'Home' },
+    { id:'devices', label:'Devices' },
+    { id:'logs', label:'Logs' },
+    { id:'settings', label:'Settings' },
+  ];
+  const Icon = ({ id, color }) => {
+    const sw = 1.4;
+    if (id==='home') return <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M3 8L9 3l6 5v6.5a.5.5 0 01-.5.5H3.5a.5.5 0 01-.5-.5V8z" stroke={color} strokeWidth={sw} strokeLinejoin="round"/></svg>;
+    if (id==='devices') return <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="2" y="4" width="9" height="11" rx="1" stroke={color} strokeWidth={sw}/><rect x="12" y="7" width="4" height="8" rx="0.8" stroke={color} strokeWidth={sw}/></svg>;
+    if (id==='logs') return <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M3 4h12M3 9h12M3 14h8" stroke={color} strokeWidth={sw} strokeLinecap="round"/></svg>;
+    if (id==='settings') return <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="2" stroke={color} strokeWidth={sw}/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4 4l1.4 1.4M12.6 12.6L14 14M4 14l1.4-1.4M12.6 5.4L14 4" stroke={color} strokeWidth={sw} strokeLinecap="round"/></svg>;
+  };
+  return <div style={{
+    borderTop:`1px solid ${t.border}`, background:t.surface,
+    padding:'8px 20px 14px',
+    display:'flex', justifyContent:'space-around', fontSize:10,
+  }}>
+    {items.map(n => {
+      const a = active===n.id;
+      const color = a?FS.crit:t.muted;
+      return <button key={n.id} onClick={()=>onChange(n.id)} style={{
+        display:'flex', flexDirection:'column', alignItems:'center', gap:4,
+        color, padding:'2px 4px',
+      }}>
+        <Icon id={n.id} color={color} />
+        <span className="mono" data-uppercase style={{ fontSize:9 }}>{n.label}</span>
+      </button>;
+    })}
+  </div>;
+}
+
+// ── Screen: HOME ──────────────────────────────────────────────
+function ScreenHome({ state, setState }) {
+  const t = FS.dark;
+  const { on, batteryLevel, batteryThreshold, charging, peerName, peerBattery, peerCharging, history } = state;
+  const myBelow = batteryLevel<=batteryThreshold;
+  const myCritical = batteryLevel<=5;
+  const syncPaused = on && myBelow && !charging;
+  const effectiveStatus = !on?'off':myCritical?'crit':syncPaused?'warn':'ok';
+  const statusLabel = !on?'INACTIVE':myCritical?'CRITICAL':syncPaused?'PAUSED':'SYNCHRONIZING';
+
+  return <div style={{ flex:1, overflowY:'auto', padding:'16px 20px 20px' }}>
+    {/* Hero status */}
+    <div style={{
+      padding:18,
+      border:`1px solid ${effectiveStatus==='ok'?FS.ok:effectiveStatus==='warn'?FS.warn:effectiveStatus==='crit'?FS.crit:t.border}`,
+      borderRadius:4,
+      background:effectiveStatus==='crit'?FS.critSoft:effectiveStatus==='warn'?FS.warnSoft:t.surface,
+      marginBottom:14,
+    }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
+        <div>
+          <div className="mono" style={{ color:t.muted, fontSize:10 }} data-uppercase>
+            <Dot status={effectiveStatus} pulse={effectiveStatus==='ok'} style={{ marginRight:6 }} />
+            {statusLabel}
+          </div>
+          <div style={{ fontSize:24, fontWeight:600, letterSpacing:'-0.02em', marginTop:8 }}>
+            {on?(syncPaused?'On hold':myCritical?'Halted':'Live'):'Offline'}
+          </div>
+          <div style={{ color:t.muted, fontSize:12, marginTop:4 }}>
+            {!on?'Tap the switch to start sharing your clipboard.':syncPaused?`Battery below ${batteryThreshold}%. Resumes when you charge.`:myCritical?'Battery critical. All sync stopped.':`Linked with ${peerName}.`}
+          </div>
+        </div>
+        <Toggle on={on} onChange={(v)=>setState({...state, on:v})} theme="dark" size="md" />
+      </div>
+    </div>
+
+    {/* Hardware row */}
+    <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:14 }}>
+      {[
+        { label:'This device', name:'Galaxy S21 Ultra', batt:batteryLevel, charging },
+        { label:'Peer', name:peerName, batt:peerBattery, charging:peerCharging },
+      ].map((d,i)=>{
+        const below = d.batt<=batteryThreshold;
+        const critical = d.batt<=5;
+        return <div key={i} style={{
+          padding:'10px 12px', border:`1px solid ${t.border}`,
+          borderRadius:4, background:t.surface,
+        }}>
+          <div className="mono" style={{ color:t.subtle, fontSize:9 }} data-uppercase>{d.label}</div>
+          <div style={{ marginTop:4, fontSize:12, fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{d.name}</div>
+          <div style={{ display:'flex', alignItems:'center', gap:6, marginTop:8 }}>
+            <Battery level={d.batt} charging={d.charging} threshold={batteryThreshold} theme="dark" width={24} />
+            <span className="mono" style={{
+              fontSize:11, color:critical?FS.crit:below?FS.warn:t.fg,
+            }}>{d.batt}%{d.charging?'⚡':''}</span>
+          </div>
+        </div>;
+      })}
+    </div>
+
+    {/* Conditions */}
+    <div style={{ marginBottom:14 }}>
+      <SectionLabel theme="dark" right={<E2EBadge theme="dark" compact />}>Conditions</SectionLabel>
+      <div style={{ padding:'14px 14px 16px', border:`1px solid ${t.border}`, borderRadius:4, background:t.surface }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline' }}>
+          <div>
+            <div className="mono" style={{ color:t.muted, fontSize:10 }} data-uppercase>Pause sync below</div>
+            <div style={{ fontSize:22, fontWeight:600, marginTop:2, letterSpacing:'-0.02em' }}>
+              {batteryThreshold}<span style={{ color:t.muted, fontWeight:400 }}>%</span>
+            </div>
+          </div>
+          <div style={{ textAlign:'right' }}>
+            <div className="mono" style={{ fontSize:10, color:t.subtle }} data-uppercase>Status</div>
+            <div className="mono" style={{ fontSize:11, color:myBelow?FS.warn:FS.ok, marginTop:2 }}>
+              {myBelow?`${batteryLevel-batteryThreshold}% below`:`${batteryLevel-batteryThreshold}% above`}
+            </div>
+          </div>
+        </div>
+        <div style={{ marginTop:12 }}>
+          <Slider value={batteryThreshold} onChange={(v)=>setState({...state, batteryThreshold:v})} min={5} max={50} theme="dark" />
+          <div className="mono" style={{ display:'flex', justifyContent:'space-between', fontSize:9, color:t.subtle, marginTop:4 }}>
+            <span>5%</span><span>20%</span><span>35%</span><span>50%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {/* Recent */}
+    <div>
+      <SectionLabel theme="dark" right={<span className="mono">{history.length} ITEMS</span>}>Recent</SectionLabel>
+      <div style={{ border:`1px solid ${t.border}`, borderRadius:4, background:t.surface }}>
+        {history.slice(0,4).map((h,i)=>(
+          <div key={i} style={{
+            padding:'10px 12px', borderBottom:i<3?`1px solid ${t.border}`:'none',
+            display:'flex', alignItems:'center', gap:10,
+          }}>
+            <span className="mono" style={{ color:t.subtle, fontSize:9, width:28 }} data-uppercase>{h.kind}</span>
+            <span style={{ flex:1, fontSize:12, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{h.preview}</span>
+            <span className="mono" style={{ color:t.subtle, fontSize:9 }}>{h.time}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>;
+}
+
+// ── Screen: DEVICES ───────────────────────────────────────────
+function ScreenDevices({ state }) {
+  const t = FS.dark;
+  const devices = [
+    { name:'MacBook Pro M1', os:'macOS 14.4', ip:'192.168.1.18', last:'now', batt:82, charging:true, linked:true, mine:false },
+    { name:'Galaxy S21 Ultra', os:'Android 14', ip:'192.168.1.42', last:'now', batt:state.batteryLevel, charging:state.charging, linked:true, mine:true },
+    { name:'Arch · ThinkPad X1', os:'Linux 6.8', ip:'192.168.1.31', last:'2h ago', batt:null, linked:false, mine:false },
+  ];
+
+  return <div style={{ flex:1, overflowY:'auto', padding:'16px 20px 20px' }}>
+    <SectionLabel theme="dark" right={<span className="mono">{devices.filter(d=>d.linked).length}/{devices.length} LINKED</span>}>
+      Paired devices
+    </SectionLabel>
+    <div style={{ display:'flex', flexDirection:'column', gap:8, marginBottom:18 }}>
+      {devices.map((d,i)=>(
+        <div key={i} style={{
+          padding:'12px 14px', border:`1px solid ${t.border}`,
+          borderRadius:4, background:t.surface,
+        }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                <Dot status={d.linked?'ok':'off'} size={5} />
+                <span style={{ fontWeight:500, fontSize:13 }}>{d.name}</span>
+                {d.mine && <span className="mono" style={{ fontSize:9, color:FS.crit, padding:'1px 4px', border:`1px solid ${FS.crit}`, borderRadius:2 }} data-uppercase>this</span>}
+              </div>
+              <div className="mono" style={{ fontSize:10, color:t.subtle, marginTop:4 }}>{d.os} · {d.ip}</div>
+              <div className="mono" style={{ fontSize:10, color:t.muted, marginTop:2 }} data-uppercase>last seen · {d.last}</div>
+            </div>
+            <div style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', gap:4 }}>
+              {d.batt !== null && <Battery level={d.batt} charging={d.charging} threshold={state.batteryThreshold} theme="dark" width={24} />}
+              {d.batt !== null && <span className="mono" style={{ fontSize:10, color:t.muted }}>{d.batt}%</span>}
+            </div>
+          </div>
+          {d.linked && !d.mine && (
+            <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${t.border}`, display:'flex', gap:6 }}>
+              <button style={{ flex:1, padding:'6px 10px', border:`1px solid ${t.border}`, borderRadius:2, fontSize:11, color:t.fg }} className="mono" data-uppercase>Disable</button>
+              <button style={{ flex:1, padding:'6px 10px', border:`1px solid ${FS.crit}`, color:FS.crit, borderRadius:2, fontSize:11 }} className="mono" data-uppercase>Unpair</button>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+
+    <button style={{
+      width:'100%', padding:'14px',
+      border:`1px dashed ${t.borderStrong}`,
+      borderRadius:4, color:t.fg, background:'transparent',
+      fontSize:13, fontWeight:500,
+    }}>
+      <span style={{ marginRight:8, color:FS.crit }}>+</span>
+      Pair new device
+    </button>
+    <div className="mono" style={{ fontSize:10, color:t.subtle, marginTop:8, textAlign:'center' }} data-uppercase>
+      via QR code · 6-digit fallback
+    </div>
+  </div>;
+}
+
+// ── Screen: LOGS ──────────────────────────────────────────────
+function ScreenLogs() {
+  const t = FS.dark;
+  const [raw, setRaw] = React.useState(false);
+  const [filter, setFilter] = React.useState('all');
+
+  const entries = [
+    { time:'14:32:08', level:'OK',   msg:'Clipboard sync established with MacBook Pro M1', raw:'session.established peer=m1.local cipher=chacha20-poly1305' },
+    { time:'14:32:05', level:'INFO', msg:'Discovered peer on local network', raw:'mdns.peer_found _fluxsync._tcp.local 192.168.1.18:7841' },
+    { time:'14:31:58', level:'OK',   msg:'X25519 handshake completed', raw:'handshake.complete pubkey=ed25519:1A4F...8D2C tt=384ms' },
+    { time:'14:30:14', level:'WARN', msg:'Peer Galaxy S21 below battery threshold', raw:'battery.below_threshold peer=s21 level=12 threshold=15' },
+    { time:'14:28:40', level:'INFO', msg:'Clipboard item synced (text, 47 bytes)', raw:'clipboard.tx kind=text size=47 dst=m1.local' },
+    { time:'14:25:11', level:'ERR',  msg:'Connection dropped, retrying in 2s', raw:'transport.drop reason=timeout retry_in=2000ms' },
+    { time:'14:24:55', level:'OK',   msg:'Daemon started', raw:'fluxsyncd.start version=0.5.0-hardened pid=14821' },
+  ];
+  const filtered = filter==='all'?entries:entries.filter(e=>e.level===filter);
+
+  return <div style={{ flex:1, display:'flex', flexDirection:'column' }}>
+    {/* Toolbar */}
+    <div style={{
+      padding:'12px 20px', borderBottom:`1px solid ${t.border}`,
+      display:'flex', justifyContent:'space-between', alignItems:'center', gap:10,
+    }}>
+      <div style={{ display:'flex', gap:4 }}>
+        {['all','OK','INFO','WARN','ERR'].map(f => (
+          <button key={f} onClick={()=>setFilter(f)} className="mono" data-uppercase style={{
+            padding:'4px 8px', fontSize:9,
+            border:`1px solid ${filter===f?FS.crit:t.border}`,
+            color:filter===f?FS.crit:t.muted,
+            borderRadius:2,
+          }}>{f}</button>
+        ))}
+      </div>
+      <button onClick={()=>setRaw(!raw)} className="mono" data-uppercase style={{
+        fontSize:9, color:raw?FS.crit:t.muted,
+        padding:'4px 8px', border:`1px solid ${raw?FS.crit:t.border}`, borderRadius:2,
+      }}>raw</button>
+    </div>
+
+    {/* Stream */}
+    <div style={{ flex:1, overflowY:'auto', padding:'12px 20px 20px' }}>
+      {filtered.map((e,i)=>{
+        const levelColor = { OK:FS.ok, INFO:FS.info, WARN:FS.warn, ERR:FS.crit }[e.level];
+        return <div key={i} className="mono" style={{
+          padding:'8px 0', borderBottom:i<filtered.length-1?`1px solid ${t.border}`:'none',
+          fontSize:11, lineHeight:1.5,
+        }}>
+          <div style={{ display:'flex', gap:8, alignItems:'baseline' }}>
+            <span style={{ color:t.subtle, fontSize:10 }}>{e.time}</span>
+            <span style={{ color:levelColor, fontWeight:500 }} data-uppercase>[{e.level}]</span>
+          </div>
+          <div style={{ color:raw?t.subtle:t.fg, marginTop:3, fontSize:11, fontFamily:raw?FS.mono:FS.ui }}>
+            {raw?e.raw:e.msg}
+          </div>
+        </div>;
+      })}
+    </div>
+  </div>;
+}
+
+// ── Screen: SETTINGS ──────────────────────────────────────────
+function ScreenSettings({ state, setState }) {
+  const t = FS.dark;
+  const [resumeOnCharge, setResumeOnCharge] = React.useState(true);
+  const [preferLan, setPreferLan] = React.useState(true);
+  const [relayFallback, setRelayFallback] = React.useState(false);
+  const [notifyOnPair, setNotifyOnPair] = React.useState(true);
+
+  const Group = ({ title, children }) => (
+    <div style={{ marginBottom:18 }}>
+      <SectionLabel theme="dark">{title}</SectionLabel>
+      <div style={{ border:`1px solid ${t.border}`, borderRadius:4, background:t.surface }}>
+        {children}
+      </div>
+    </div>
+  );
+  const Item = ({ label, hint, right, last }) => (
+    <div style={{
+      padding:'12px 14px',
+      borderBottom:last?'none':`1px solid ${t.border}`,
+      display:'flex', justifyContent:'space-between', alignItems:'center', gap:10,
+    }}>
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ fontSize:13 }}>{label}</div>
+        {hint && <div style={{ color:t.muted, fontSize:11, marginTop:2 }}>{hint}</div>}
+      </div>
+      <div>{right}</div>
+    </div>
+  );
+
+  return <div style={{ flex:1, overflowY:'auto', padding:'16px 20px 20px' }}>
+    <Group title="General">
+      <Item label="Battery threshold" hint={`Pause sync below ${state.batteryThreshold}%`} right={
+        <span className="mono" style={{ fontSize:11, color:t.muted }}>{state.batteryThreshold}% ›</span>
+      } />
+      <Item label="Resume on charge" hint="Override threshold when plugged in" right={
+        <Toggle on={resumeOnCharge} onChange={setResumeOnCharge} theme="dark" size="sm" />
+      } last />
+    </Group>
+
+    <Group title="Security">
+      <Item label="Device fingerprint" hint="Your public key — share for verification" right={
+        <span className="mono" style={{ fontSize:10, color:t.muted }}>1A4F·8D2C ›</span>
+      } />
+      <Item label="Rotate keys" hint="Re-generate identity, requires re-pair" right={
+        <span style={{ color:FS.warn, fontSize:11 }} className="mono" data-uppercase>action ›</span>
+      } />
+      <Item label="Unpair all devices" hint="Remove every linked peer" right={
+        <span style={{ color:FS.crit, fontSize:11 }} className="mono" data-uppercase>action ›</span>
+      } last />
+    </Group>
+
+    <Group title="Network">
+      <Item label="Listen port" right={<span className="mono" style={{ fontSize:11, color:t.muted }}>7841 ›</span>} />
+      <Item label="Prefer LAN" hint="Direct local connection when available" right={
+        <Toggle on={preferLan} onChange={setPreferLan} theme="dark" size="sm" />
+      } />
+      <Item label="Relay fallback" hint="Use STUN relay if LAN fails (v0.8)" right={
+        <Toggle on={relayFallback} onChange={setRelayFallback} theme="dark" size="sm" disabled />
+      } last />
+    </Group>
+
+    <Group title="Notifications">
+      <Item label="On new pair request" right={
+        <Toggle on={notifyOnPair} onChange={setNotifyOnPair} theme="dark" size="sm" />
+      } last />
+    </Group>
+
+    <Group title="About">
+      <Item label="Version" right={<span className="mono" style={{ fontSize:11, color:t.muted }}>0.5.0-hardened</span>} />
+      <Item label="Build" right={<span className="mono" style={{ fontSize:11, color:t.muted }}>a7f3c2e</span>} />
+      <Item label="License" right={<span className="mono" style={{ fontSize:11, color:t.muted }}>MIT ›</span>} />
+      <Item label="Source" right={<span className="mono" style={{ fontSize:11, color:t.muted }}>github ›</span>} last />
+    </Group>
+
+    <div style={{
+      textAlign:'center', marginTop:24, padding:'16px 0',
+      color:t.subtle, fontSize:11,
+    }}>
+      <div className="mono" data-uppercase style={{ fontSize:9, marginBottom:4 }}>fluxsync</div>
+      <div>Crafted in Kaolack 🇸🇳</div>
+    </div>
+  </div>;
+}
+
+// ── Frame wrapper ─────────────────────────────────────────────
+function AndroidFrame({ initialScreen, label, state, setState }) {
+  const [screen, setScreen] = React.useState(initialScreen);
+  const t = FS.dark;
+  const titles = {
+    home:{ t:'FluxSync', s:'v0.5.0 · android' },
+    devices:{ t:'Devices', s:'paired peers' },
+    logs:{ t:'Activity', s:'live stream' },
+    settings:{ t:'Settings', s:'preferences' },
+  };
+
+  return <div className="frame">
+    <div className="device-bezel">
+      <div className="fs-frame" style={{
+        width:360, height:760,
+        background:t.bg, color:t.fg,
+        display:'flex', flexDirection:'column', fontSize:13,
+      }}>
+        <AndroidStatusBar active={state.on} />
+        <AppBar title={titles[screen].t} subtitle={titles[screen].s} on={state.on} />
+        {screen==='home' && <ScreenHome state={state} setState={setState} />}
+        {screen==='devices' && <ScreenDevices state={state} />}
+        {screen==='logs' && <ScreenLogs />}
+        {screen==='settings' && <ScreenSettings state={state} setState={setState} />}
+        <BottomNav active={screen} onChange={setScreen} />
+      </div>
+    </div>
+    <div className="frame-label">{label}</div>
+  </div>;
+}
+
+// ── App ───────────────────────────────────────────────────────
+const initialHistory = [
+  { kind:'url',  preview:'github.com/torvalds/linux/pull/4821', time:'14:32' },
+  { kind:'text', preview:'Merci frère, je vois ça ce soir inshallah.', time:'14:18' },
+  { kind:'code', preview:'cargo build --release --target aarch64-linux-android', time:'13:55' },
+  { kind:'text', preview:'Kaolack — 14.1518° N, 16.0726° W', time:'13:42' },
+  { kind:'url',  preview:'tailscale.com/blog/how-tailscale-works', time:'12:09' },
+];
+
+function App() {
+  const [state, setState] = React.useState({
+    on:true, batteryLevel:87, batteryThreshold:15, charging:false,
+    peerName:'MacBook Pro M1', peerBattery:82, peerCharging:true,
+    history:initialHistory,
+  });
+
+  return <div className="stage">
+    <AndroidFrame initialScreen="home"     label="01 · Home"     state={state} setState={setState} />
+    <AndroidFrame initialScreen="devices"  label="02 · Devices"  state={state} setState={setState} />
+    <AndroidFrame initialScreen="logs"     label="03 · Logs"     state={state} setState={setState} />
+    <AndroidFrame initialScreen="settings" label="04 · Settings" state={state} setState={setState} />
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+
+</body>
+</html>

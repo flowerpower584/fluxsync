@@ -17,14 +17,14 @@
 **Universal clipboard. Local-first. Peer-to-peer. End-to-end encrypted.**
 One Rust daemon, dedicated apps for macOS + Android, zero servers.
 
-> **Platform status (v0.5.1):** Android app is the first-class GUI client. macOS ships via Homebrew (CLI + daemon — no tray app until Apple Dev ID is funded). The daemon + CLI also build cleanly on Linux (cross-compile to `x86_64-unknown-linux-musl` is green) so headless Linux use is supported. Windows daemon/CLI is not tested yet. No GUI on Linux/Windows — contributions welcome.
+> **Platform status (v0.5.1):** Android app is the first-class GUI client. macOS ships a menu-bar tray app (Tauri v2) built from source — no signed DMG until an Apple Dev ID is funded. The daemon + CLI also build cleanly on Linux (cross-compile to `x86_64-unknown-linux-musl` is green) so headless Linux use is supported. Windows daemon/CLI is not tested yet. No GUI on Linux/Windows — contributions welcome.
 
 ---
 
 ## ⚡ v0.5.1 Release: Terminal Polish + Linux Headless
 Styled `fluxctl` terminal output. Linux headless cross-compile green. Daemon version now tied to `CARGO_PKG_VERSION` automatically.
 
-> **No macOS DMG for now.** Apple Developer ID signing costs $99/year and isn't funded yet, so the unsigned DMG was pulled from releases to avoid the Gatekeeper detour. macOS users: install via **Homebrew** (below) — it builds locally, no signing required.
+> **No macOS DMG for now.** Apple Developer ID signing costs $99/year and isn't funded yet, so there's no prebuilt DMG. macOS users: build the menu-bar tray app from source (below) — it builds locally, no signing required.
 
 ---
 
@@ -35,17 +35,18 @@ Styled `fluxctl` terminal output. Linux headless cross-compile green. Daemon ver
 2. On the device, allow installs from the browser/Files app (Settings → Apps → Special access → Install unknown apps).
 3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access.
 
-### 🍺 macOS — Homebrew (recommended)
-The DMG is gone for now (no Apple Developer ID — $99/year, not in the budget yet), so Homebrew is the supported macOS path. Builds the daemon + CLI from source (~1–2 min on Apple Silicon, pulls Rust as a build dep). **No tray icon, no QR popup** — pair via `fluxctl pair show-qr` (renders the QR as Unicode in your terminal) and scan from the phone. Linuxbrew may work too — same formula — but isn't tested.
+### 🍎 macOS — menu-bar app (build from source)
+No prebuilt DMG yet (no Apple Developer ID — $99/year, not in the budget). Build the Tauri v2 tray app yourself — it's a local build, no signing required. Needs Rust (`rustup`) and Node.js.
 
 ```sh
-brew tap flowerpower584/fluxsync
-brew install fluxsync
-brew services start fluxsync   # auto-start daemon at login
-fluxctl status                 # smoke-test
+git clone https://github.com/flowerpower584/fluxsync.git
+cd fluxsync/apps/macos-tray
+npm install                    # installs the Tauri CLI
+npm run tauri dev              # run with hot-reload, or:
+npm run tauri build            # → src-tauri/target/release/bundle/macos/FluxSync.app
 ```
 
-The tap lives at [`flowerpower584/homebrew-fluxsync`](https://github.com/flowerpower584/homebrew-fluxsync). Want a signed `.app` with a real tray + QR popup? Sponsor the Apple Dev ID and the DMG comes back.
+The tray app gives you the menu-bar icon, the master toggle, the peer + battery card, and the QR pairing popup. Want a signed `.app` shipped on releases? Sponsor the Apple Dev ID.
 
 ### 🐧 Linux (terminal — headless)
 The daemon and CLI cross-compile cleanly to Linux (`x86_64-unknown-linux-musl` checked from this machine). No tray app yet, so this is a CLI / systemd-unit setup — fine for servers and power-users. Two ways to install:
@@ -93,11 +94,9 @@ cargo build --release
 ## Quickstart (v0.5.1)
 
 ### 1. Run the daemon
-The Android app starts the daemon for itself — skip to step 2 if you're only using a phone.
+The Android app starts the daemon for itself — skip to step 2 if you're only using a phone. The macOS tray app also manages the daemon for you.
 
-For the Homebrew install: `brew services start fluxsync` (already covered above).
-
-If you built from source, run it manually (defaults: `~/.fluxsync/sock` IPC, UDP `0.0.0.0:41889`, identity persisted to `~/.fluxsync/identity.bin`):
+If you built the CLI from source, run it manually (defaults: `~/.fluxsync/sock` IPC, UDP `0.0.0.0:41889`, identity persisted to `~/.fluxsync/identity.bin`):
 ```sh
 ./target/release/fluxsyncd
 ```
@@ -106,7 +105,7 @@ If you built from source, run it manually (defaults: `~/.fluxsync/sock` IPC, UDP
 On macOS / Linux: `fluxctl pair show-qr` renders the QR in the terminal — scan it from the Android app. From the Android app, tap **Pair** and scan the QR shown by the other device. **Your data never leaves your local network.**
 
 ### 3. Use the CLI (optional)
-The CLI talks to the daemon via the local IPC socket — useful for scripting headless setups. If you installed via Homebrew, drop the `./target/release/` prefix (binaries are on `$PATH`).
+The CLI talks to the daemon via the local IPC socket — useful for scripting headless setups. If you've put `./target/release/` on your `$PATH`, drop the prefix.
 ```sh
 fluxctl status
 fluxctl push "Hello from Kaolack! 🇸🇳"

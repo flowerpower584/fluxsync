@@ -44,8 +44,8 @@ async function refreshState() {
     applyState(s);
   } catch (e) {
     // Daemon unreachable — distinguish from a daemon that is up but
-    // toggled off, so the user knows whether to start `brew services`
-    // or just hit the toggle.
+    // toggled off, so the user knows whether the daemon failed to spawn
+    // or they just need to hit the toggle.
     daemonReachable = false;
     syncOn = false;
     setHero('off', 'DAEMON OFFLINE');

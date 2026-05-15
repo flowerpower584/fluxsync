@@ -131,36 +131,39 @@ impl App {
             } => {
                 // On nettoie le texte (espaces inutiles aux extrémités)
                 let preview = preview.trim();
+
+                // Replay guard: a frame whose Lamport stamp sits far in the
+                // past relative to our clock is a stale retransmit or a
+                // replay attack. Reject it — never write it to the clipboard,
+                // never advance our clock from attacker-controlled data.
+                const REPLAY_WINDOW: u64 = 100;
+                if self.clock.now().saturating_sub(*lamport) > REPLAY_WINDOW {
+                    return vec![Action::EmitLog(LogEntry::warn(format!(
+                        "Rejected stale item (lamport {}, clock {})",
+                        lamport,
+                        self.clock.now()
+                    )))];
+                }
+
                 // On synchronise notre horloge logique (Lamport) avec celle de l'Android
                 self.clock.observe(*lamport);
 
-                // [FIX] Anti-écho : On ne bloque que si c'est EXACTEMENT le même texte que le dernier item.
-                // Le DedupRing global était trop sévère et bloquait les tests manuels répétitifs.
-                let is_echo = self
-                    .state
-                    .history
-                    .first()
-                    .map(|item| item.preview == preview)
-                    .unwrap_or(false);
-
-                if is_echo {
-                    // C'est un doublon immédiat (écho), on ignore l'écriture mais on envoie un ACK (accusé de réception)
+                // Dedup by content hash. `observe` returns false when this
+                // hash was already seen — that covers three cases at once:
+                // an echo of our own local copy, a duplicate retransmit, and
+                // a malicious peer reusing a hash to poison history. In every
+                // case we drop the frame and only send an Ack.
+                if !self.dedup.observe(*hash) {
                     suppress_action = true;
-                } else {
-                    // On met à jour le ring de dédoublonnage pour éviter de renvoyer ce même texte à l'Android
-                    self.dedup.observe(*hash);
-
-                    if !sensitive {
-                        // Si ce n'est pas une donnée sensible (mot de passe), on l'ajoute à l'historique Mac
-                        self.push_history(HistoryItem {
-                            kind: *kind,
-                            preview: preview.to_string(),
-                            time: wall.hhmm(),
-                            source: crate::state::HistorySource::Remote,
-                            sensitive: *sensitive,
-                            lamport: *lamport,
-                        });
-                    }
+                } else if !sensitive {
+                    self.push_history(HistoryItem {
+                        kind: *kind,
+                        preview: preview.to_string(),
+                        time: wall.hhmm(),
+                        source: crate::state::HistorySource::Remote,
+                        sensitive: *sensitive,
+                        lamport: *lamport,
+                    });
                 }
             }
             Event::PeerLost => {

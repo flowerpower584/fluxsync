@@ -7,10 +7,9 @@
 //! a `#[tauri::command]` function declared here, which forwards JSON
 //! to `fluxsyncd` over its UNIX socket and returns the response.
 //!
-//! The daemon is **not** linked into this binary — it is launched
-//! separately by Homebrew's service block (`brew services start
-//! fluxsync`) or by a manual `fluxsyncd` invocation. The tray app is
-//! a pure client.
+//! The daemon is **not** linked into this binary — the tray spawns
+//! `fluxsyncd` detached at boot (see `ipc::ensure_daemon_running`), or
+//! it can be launched manually. The tray app is a pure client.
 
 mod ipc;
 
@@ -197,8 +196,8 @@ pub fn run() {
             // without this the WebView has no way to know the Noise
             // handshake completed (the daemon runs in a separate process).
             //
-            // Reconnect loop: the daemon can disappear (brew restart, manual
-            // kill, crash) and `subscribe_state` returns when the socket
+            // Reconnect loop: the daemon can disappear (manual kill, crash)
+            // and `subscribe_state` returns when the socket
             // closes. A short backoff keeps the bridge alive without spinning
             // when the daemon is genuinely gone. `last_name` lives across
             // reconnects so a stale snapshot replayed on the new connection

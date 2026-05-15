@@ -23,6 +23,7 @@ fn ffi_roundtrip_push_text_observes_state() {
     let handle = FluxsyncHandle::start(
         "host-test".into(),
         ipc.to_string_lossy().into_owned(),
+        String::new(), // keystore_dir empty = ephemeral
         port,
         String::new(), // empty = generate fresh keypair
     )
@@ -57,6 +58,7 @@ fn ffi_rejects_invalid_threshold() {
     let handle = FluxsyncHandle::start(
         "host-test".into(),
         ipc.to_string_lossy().into_owned(),
+        String::new(), // keystore_dir empty = ephemeral
         port,
         String::new(),
     )
@@ -79,6 +81,7 @@ fn ffi_rejects_bad_identity_b64() {
     let res = FluxsyncHandle::start(
         "host-test".into(),
         ipc.to_string_lossy().into_owned(),
+        String::new(), // keystore_dir empty = ephemeral
         port,
         "not-base64-!!".into(),
     );
