@@ -1,21 +1,34 @@
+@file:OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
+
 package sn.kaolack.fluxsync.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import sn.kaolack.fluxsync.R
 
-// Design system asks for Inter Tight + JetBrains Mono. We use the
-// system sans-serif (Roboto on most Android builds; close enough to
-// Inter visually for v0.1.1) and `FontFamily.Monospace` (defaults to
-// Droid Sans Mono / JetBrains Mono on newer devices). When we ship
-// proper ttf bundles or wire up `androidx.compose.ui:ui-text-google-
-// fonts`, replace `FontFamily.SansSerif` and `FsMono` here — every
-// callsite already routes through these aliases.
-val FsSans: FontFamily = FontFamily.SansSerif
-val FsMono: FontFamily = FontFamily.Monospace
+// Inter Tight + JetBrains Mono, bundled as variable ttf in res/font.
+private fun interTight(w: FontWeight) =
+    Font(R.font.inter_tight, weight = w, variationSettings = FontVariation.Settings(FontVariation.weight(w.weight)))
+
+private fun jetBrainsMono(w: FontWeight) =
+    Font(R.font.jetbrains_mono, weight = w, variationSettings = FontVariation.Settings(FontVariation.weight(w.weight)))
+
+val FsSans: FontFamily = FontFamily(
+    interTight(FontWeight.Normal),
+    interTight(FontWeight.Medium),
+    interTight(FontWeight.SemiBold),
+)
+val FsMono: FontFamily = FontFamily(
+    jetBrainsMono(FontWeight.Normal),
+    jetBrainsMono(FontWeight.Medium),
+    jetBrainsMono(FontWeight.SemiBold),
+)
 
 // All sizes/weights are taken verbatim from `frame-android.jsx` and the
 // "Typography" section of the design tokens artboard. Letter spacing

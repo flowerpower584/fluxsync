@@ -9,7 +9,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -18,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
+import sn.kaolack.fluxsync.BuildConfig
 import sn.kaolack.fluxsync.ui.components.FluxToggle
 import sn.kaolack.fluxsync.ui.components.FluxToggleSize
 import sn.kaolack.fluxsync.ui.components.SectionLabel
@@ -151,6 +155,41 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
                         )
                     },
                     isLast = true,
+                )
+            }
+        }
+
+        item {
+            var notifyOnPair by remember { mutableStateOf(true) }
+            SettingsGroup(title = "Notifications") {
+                SettingsItem(
+                    label = "On new pair request",
+                    right = {
+                        FluxToggle(on = notifyOnPair, onChange = { notifyOnPair = it }, size = FluxToggleSize.Sm)
+                    },
+                    isLast = true
+                )
+            }
+        }
+
+        item {
+            SettingsGroup(title = "About") {
+                SettingsItem(
+                    label = "Version",
+                    right = { Text(s.version.ifEmpty { "0.5.0" }, color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) }
+                )
+                SettingsItem(
+                    label = "Build",
+                    right = { Text(BuildConfig.GIT_SHA, color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) }
+                )
+                SettingsItem(
+                    label = "License",
+                    right = { Text("MIT ›", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) }
+                )
+                SettingsItem(
+                    label = "Source",
+                    right = { Text("github ›", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) },
+                    isLast = true
                 )
             }
         }

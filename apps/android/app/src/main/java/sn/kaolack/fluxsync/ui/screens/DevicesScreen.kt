@@ -1,5 +1,6 @@
 package sn.kaolack.fluxsync.ui.screens
 
+import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -50,11 +51,19 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
                 title = "Paired devices",
                 right = {
                     Text(
-                        "${devices.size}/1 LINKED",
+                        "${devices.size + 1}/${devices.size + 1} LINKED",
                         color = FsDarkSubtle,
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
+            )
+        }
+
+        item {
+            OwnDeviceCard(
+                battery = s.selfBattery,
+                charging = s.selfCharging,
+                threshold = s.threshold,
             )
         }
 
@@ -179,6 +188,40 @@ private fun DeviceItem(
                 contentAlignment = Alignment.Center
             ) {
                 Text("UNPAIR", color = FsCrit, style = MaterialTheme.typography.labelSmall, fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun OwnDeviceCard(battery: Int, charging: Boolean, threshold: Int) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(width = 1.dp, color = FsDarkBorder, shape = RoundedCornerShape(4.dp))
+            .background(FsDarkSurface, RoundedCornerShape(4.dp))
+            .padding(14.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusDot(color = FsOk)
+                    Spacer(Modifier.width(6.dp))
+                    Text(Build.MODEL, color = FsDarkFg, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(6.dp))
+                    Box(
+                        Modifier
+                            .border(1.dp, FsCrit, RoundedCornerShape(2.dp))
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                    ) {
+                        Text("THIS", color = FsCrit, style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
+                    }
+                }
+                Text("THIS DEVICE", color = FsDarkSubtle, style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                BatteryGlyph(level = battery, charging = charging, threshold = threshold, width = 24.dp)
+                Text("$battery%", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
             }
         }
     }

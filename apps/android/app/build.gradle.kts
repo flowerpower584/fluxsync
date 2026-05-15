@@ -4,6 +4,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val gitSha: String = runCatching {
+    providers.exec {
+        commandLine("git", "rev-parse", "--short", "HEAD")
+    }.standardOutput.asText.get().trim()
+}.getOrDefault("unknown")
+
 android {
     namespace = "sn.kaolack.fluxsync"
     compileSdk = 34
@@ -14,6 +20,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.5.0"
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
         ndk {
             // v0.1 supports modern 64-bit ARM only.
             abiFilters += setOf("arm64-v8a")
