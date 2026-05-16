@@ -19,7 +19,7 @@ use fluxsync_crypto::{Identity, Initiator, Responder};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::transport::{Transport, TYPE_HANDSHAKE_INIT, TYPE_HANDSHAKE_RESP};
@@ -48,12 +48,18 @@ pub fn tofu_trusted_peer(remote_static: [u8; 32]) -> TrustedPeer {
     }
 }
 
+/// How long the TOFU pairing window stays open after `CmdOp::PairShow`.
+/// Kept short so a stale QR or a drive-by LAN handshake has only a narrow
+/// window to land in the trusted set (FS-032). The real fix — explicit
+/// safe-word confirmation before trust — is tracked as FS-052.
+pub const PAIRING_WINDOW: Duration = Duration::from_secs(90);
+
 /// Time-bounded "trust on first use" window. While the contained
 /// `Instant` is in the future, the responder accepts handshakes from
 /// previously-unknown peers and adds them to [`TrustedSet`] on success.
-/// Set by `CmdOp::PairShow` to `now + 5min` so the user has a finite
-/// pairing window after they generate their QR code; otherwise stays
-/// `None` and the responder enforces strict trust.
+/// Set by `CmdOp::PairShow` to `now + PAIRING_WINDOW` so the user has a
+/// finite pairing window after they generate their QR code; otherwise
+/// stays `None` and the responder enforces strict trust.
 pub type PairingWindow = Arc<Mutex<Option<Instant>>>;
 
 /// Run the initiator side. Sends msg1, then awaits one msg2 on the
@@ -208,7 +214,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{tofu_trusted_peer, TOFU_PLACEHOLDER_NAME};
+    use super::{tofu_trusted_peer, Duration, PAIRING_WINDOW, TOFU_PLACEHOLDER_NAME};
 
     /// FS-030: the TOFU placeholder name has one source. The in-memory
     /// `TrustedPeer` and the on-disk `StoredPeer` (which copies
@@ -224,5 +230,20 @@ mod tests {
         // mirror that here to lock the structural single-source invariant.
         let disk_name = peer.name.clone();
         assert_eq!(disk_name, peer.name);
+    }
+
+    /// FS-032: the TOFU pairing window must stay short so a drive-by LAN
+    /// handshake has only a narrow window to land in the trusted set.
+    /// Guards against a regression back to the old 5-minute window.
+    #[test]
+    fn fs032_pairing_window_is_short() {
+        assert!(
+            PAIRING_WINDOW <= Duration::from_secs(90),
+            "pairing window must not exceed 90s"
+        );
+        assert!(
+            PAIRING_WINDOW >= Duration::from_secs(30),
+            "pairing window must stay usable for a QR scan"
+        );
     }
 }

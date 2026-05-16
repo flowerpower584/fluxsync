@@ -335,8 +335,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                     let mut g = pairing_window.lock().await;
                     let is_active = g.map(|d| Instant::now() < d).unwrap_or(false);
                     if !is_active {
-                        tracing::info!("Pairing Watchdog: opening pairing window (5 min)");
-                        *g = Some(Instant::now() + Duration::from_secs(300));
+                        tracing::info!("Pairing Watchdog: opening pairing window (90s)");
+                        *g = Some(Instant::now() + handshake::PAIRING_WINDOW);
                     }
                 }
 
@@ -954,11 +954,10 @@ async fn handle_driver_cmd(
             let uri = build_pair_uri(&pubkey_b32, &addr_hint, &words_vec);
             // Open the TOFU window so the peer that scans this QR is
             // accepted on first handshake even though we don't know its
-            // pubkey yet. 5 minutes is long enough to walk over to the
-            // other device but short enough that a stale QR can't be
-            // exploited later.
-            *pairing_window.lock().await = Some(Instant::now() + Duration::from_secs(300));
-            tracing::info!("pairing window opened (5 min)");
+            // pubkey yet. Kept short (see `handshake::PAIRING_WINDOW`) so
+            // a stale QR or a drive-by LAN handshake can't be exploited.
+            *pairing_window.lock().await = Some(Instant::now() + handshake::PAIRING_WINDOW);
+            tracing::info!("pairing window opened (90s)");
             // Showing the QR is implicit "I want to sync" — bump the
             // FSM out of Idle so when the responder fires HandshakeOk
             // the (Handshaking → Linked) transition can fire. Without
