@@ -38,6 +38,18 @@ use tokio_util::sync::CancellationToken;
 
 const LOG_BUFFER_CAP: usize = 200;
 
+/// FS-015: reconnect backoff bounds for the state/logs subscriber loops.
+/// First retry waits `RECONNECT_MIN_MS`; each further failure doubles the
+/// delay up to `RECONNECT_MAX_MS` so an unreachable daemon settles at one
+/// attempt per minute instead of 7200 per hour.
+const RECONNECT_MIN_MS: u64 = 500;
+const RECONNECT_MAX_MS: u64 = 60_000;
+
+/// Next backoff delay: double the current one, capped at `RECONNECT_MAX_MS`.
+fn next_reconnect_delay(current_ms: u64) -> u64 {
+    current_ms.saturating_mul(2).min(RECONNECT_MAX_MS)
+}
+
 /// All FFI errors funnel here. `flat_error` flattens the variants into
 /// a single Kotlin `FluxException` class — UniFFI 0.27's per-variant
 /// codegen is buggy when variants carry field data. Kotlin still gets
@@ -455,14 +467,19 @@ async fn state_subscriber_loop(
     last_state: Arc<Mutex<Option<String>>>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
+    let mut delay_ms = RECONNECT_MIN_MS;
     loop {
-        if let Err(e) = state_subscribe_once(&path, &last_state, &shutdown).await {
-            tracing::warn!(error = %e, "state subscribe loop error; reconnecting in 500ms");
+        match state_subscribe_once(&path, &last_state, &shutdown).await {
+            Ok(()) => delay_ms = RECONNECT_MIN_MS,
+            Err(e) => {
+                tracing::warn!(error = %e, delay_ms, "state subscribe loop error; reconnecting");
+            }
         }
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
-            () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            () = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
         }
+        delay_ms = next_reconnect_delay(delay_ms);
     }
 }
 
@@ -502,14 +519,19 @@ async fn logs_subscriber_loop(
     log_seq: Arc<AtomicU64>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
+    let mut delay_ms = RECONNECT_MIN_MS;
     loop {
-        if let Err(e) = logs_subscribe_once(&path, &last_logs, &log_seq, &shutdown).await {
-            tracing::warn!(error = %e, "logs subscribe loop error; reconnecting in 500ms");
+        match logs_subscribe_once(&path, &last_logs, &log_seq, &shutdown).await {
+            Ok(()) => delay_ms = RECONNECT_MIN_MS,
+            Err(e) => {
+                tracing::warn!(error = %e, delay_ms, "logs subscribe loop error; reconnecting");
+            }
         }
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
-            () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            () = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
         }
+        delay_ms = next_reconnect_delay(delay_ms);
     }
 }
 
@@ -576,4 +598,31 @@ fn format_utc_hms() -> String {
     let m = (secs % 3600) / 60;
     let s = secs % 60;
     format!("{h:02}:{m:02}:{s:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_reconnect_delay, RECONNECT_MAX_MS, RECONNECT_MIN_MS};
+
+    /// FS-015: the reconnect delay must double each step until it caps,
+    /// instead of staying at a flat 500ms forever.
+    #[test]
+    fn backoff_doubles_then_caps() {
+        let mut d = RECONNECT_MIN_MS;
+        let curve: Vec<u64> = (0..10)
+            .map(|_| {
+                d = next_reconnect_delay(d);
+                d
+            })
+            .collect();
+        assert_eq!(
+            curve,
+            vec![1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000, 60_000],
+        );
+    }
+
+    #[test]
+    fn backoff_never_overflows() {
+        assert_eq!(next_reconnect_delay(u64::MAX), RECONNECT_MAX_MS);
+    }
 }
