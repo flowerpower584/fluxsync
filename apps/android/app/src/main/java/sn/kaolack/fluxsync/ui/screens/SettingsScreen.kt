@@ -2,6 +2,7 @@ package sn.kaolack.fluxsync.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -58,7 +59,14 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
                         FluxToggle(on = s.chargeOverride, onChange = {
                             scope.launch { vm.setChargeOverride(it) }
                         }, size = FluxToggleSize.Sm)
-                    },
+                    }
+                )
+                // FS-024: dark-only is intentional; surface it explicitly so
+                // the absence of a theme toggle reads as a decision, not a gap.
+                SettingsItem(
+                    label = "Theme",
+                    hint = themeAppearanceHint(isSystemInDarkTheme()),
+                    right = { Text("DARK", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) },
                     isLast = true
                 )
             }
@@ -208,6 +216,18 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
         }
     }
 }
+
+/**
+ * FS-024: hint text for the Settings "Theme" row. FluxSync is dark-only
+ * by design; the hint names the user's current system setting so the
+ * locked theme reads as a deliberate choice rather than a missing toggle.
+ */
+internal fun themeAppearanceHint(systemInDark: Boolean): String =
+    if (systemInDark) {
+        "Locked to dark — matches your system setting"
+    } else {
+        "Locked to dark — your system is set to light"
+    }
 
 @Composable
 private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
