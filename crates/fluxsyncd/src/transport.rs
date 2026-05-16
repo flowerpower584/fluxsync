@@ -217,17 +217,22 @@ impl Transport {
                 msg: body.to_vec(),
             }),
             TYPE_ENCRYPTED => {
-                let pt = {
+                // Decrypt under the `session` lock, then release it before
+                // touching `metrics` — acquiring `metrics` while holding
+                // `session` would pin a session→metrics lock order and
+                // deadlock any future metrics→session path (FS-033).
+                let result = {
                     let mut g = self.session.lock().await;
                     let s = g
                         .as_mut()
                         .ok_or_else(|| anyhow!("encrypted frame but no session"))?;
-                    match s.decrypt(body) {
-                        Ok(pt) => pt,
-                        Err(e) => {
-                            self.metrics.lock().await.on_decrypt_failure();
-                            return Err(e.into());
-                        }
+                    s.decrypt(body)
+                };
+                let pt = match result {
+                    Ok(pt) => pt,
+                    Err(e) => {
+                        self.metrics.lock().await.on_decrypt_failure();
+                        return Err(e.into());
                     }
                 };
 
