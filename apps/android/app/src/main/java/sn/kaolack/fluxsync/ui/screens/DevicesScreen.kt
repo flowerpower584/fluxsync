@@ -26,7 +26,16 @@ import sn.kaolack.fluxsync.ui.components.LoadingState
 import sn.kaolack.fluxsync.ui.components.SectionLabel
 import sn.kaolack.fluxsync.ui.components.StatusDot
 import sn.kaolack.fluxsync.ui.theme.*
+import sn.kaolack.fluxsync.vm.DaemonState
 import sn.kaolack.fluxsync.vm.FluxsyncViewModel
+
+/**
+ * Number of paired peers the daemon currently reports. The daemon
+ * tracks at most one peer, so this is 0 or 1 — never counts "this
+ * device", which is not a peer that can be linked or unlinked.
+ */
+internal fun pairedPeerCount(state: DaemonState): Int =
+    if (state.peerName.isNotEmpty()) 1 else 0
 
 /**
  * Screen 02: Devices
@@ -51,24 +60,28 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item {
-            SectionLabel(
-                title = "Paired devices",
-                right = {
-                    Text(
-                        "${devices.size + 1}/${devices.size + 1} LINKED",
-                        color = FsDarkSubtle,
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                }
-            )
-        }
+        item { SectionLabel(title = "This device") }
 
         item {
             OwnDeviceCard(
                 battery = s.selfBattery,
                 charging = s.selfCharging,
                 threshold = s.threshold,
+            )
+        }
+
+        item { Spacer(Modifier.height(16.dp)) }
+
+        item {
+            SectionLabel(
+                title = "Paired peers",
+                right = {
+                    Text(
+                        "${devices.size} LINKED",
+                        color = FsDarkSubtle,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
             )
         }
 
@@ -80,7 +93,7 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
                         .padding(vertical = 32.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("No devices paired yet.", color = FsDarkMuted, style = MaterialTheme.typography.bodySmall)
+                    Text("No peers paired yet.", color = FsDarkMuted, style = MaterialTheme.typography.bodySmall)
                 }
             }
         } else {
