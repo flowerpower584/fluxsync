@@ -32,10 +32,11 @@ object Routes {
 }
 
 /**
- * Top-level app composable. Picks the initial route based on whether
- * the daemon already reports a peer (`state.peerName` non-empty), so a
- * relaunch after a previous successful pair lands directly on the
- * Linked screen instead of bouncing through pair-entry.
+ * Top-level app composable. Always starts on the Linked screen so the
+ * bottom-nav tabs (Home/Devices/Logs/Settings) stay reachable even
+ * with no peer paired. When a peer appears the UI auto-advances to
+ * Linked; a peer dropping never forces navigation, so the user's
+ * current screen survives WiFi hiccups and daemon restarts.
  */
 @Composable
 fun FluxsyncApp(vm: FluxsyncViewModel) {
@@ -67,27 +68,17 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
         return
     }
 
-    val hasPeer = state?.peerName?.isNotEmpty() == true
-    val start = if (hasPeer) Routes.LINKED else Routes.PAIR_DASHBOARD
+    val start = Routes.LINKED
 
-    // Anticipate link drops: if we are on LINKED screen but peer is gone, pop to PAIR_ENTRY.
+    // Auto-advance to the Linked screen when a peer appears. A peer
+    // dropping never triggers navigation — the user keeps their screen.
     androidx.compose.runtime.LaunchedEffect(state?.peerName) {
         val s = state ?: return@LaunchedEffect
-        val name = s.peerName
-        
-        if (name.isEmpty()) {
-            // Force return to pairing immediately on drop, as requested by user
-            if (nav.currentBackStackEntry?.destination?.route == Routes.LINKED) {
-                nav.navigate(Routes.PAIR_DASHBOARD) {
-                    popUpTo(Routes.LINKED) { inclusive = true }
-                }
-            }
-        } else {
-            // Auto-advance to linked if a peer is found
-            if (nav.currentBackStackEntry?.destination?.route != Routes.LINKED) {
-                nav.navigate(Routes.LINKED) {
-                    popUpTo(Routes.PAIR_DASHBOARD) { inclusive = true }
-                }
+        if (s.peerName.isNotEmpty() &&
+            nav.currentBackStackEntry?.destination?.route != Routes.LINKED
+        ) {
+            nav.navigate(Routes.LINKED) {
+                popUpTo(Routes.PAIR_DASHBOARD) { inclusive = true }
             }
         }
     }
