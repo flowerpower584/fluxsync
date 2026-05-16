@@ -78,6 +78,16 @@ class FluxsyncAccessibilityService : AccessibilityService() {
 
         // Register battery monitor
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+
+        // FS-022: restore the persisted Lamport cursor so a process
+        // restart doesn't re-sync the daemon's whole history.
+        lastSeenLamport = try {
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getLong(KEY_LAST_SEEN_LAMPORT, 0L)
+        } catch (e: Exception) {
+            android.util.Log.w("FluxSync", "Failed to restore lamport cursor: ${e.message}")
+            0L
+        }
     }
 
     /**
@@ -154,23 +164,18 @@ class FluxsyncAccessibilityService : AccessibilityService() {
 
                                 // Sync incoming clipboard items to system clipboard
                                 if (parsed.history.isNotEmpty()) {
-                                    // Find all items since lastSeenLamport
-                                    val newItems = mutableListOf<sn.kaolack.fluxsync.vm.HistoryItem>()
-                                    for (item in parsed.history) {
-                                        if (item.lamport <= lastSeenLamport) break
-                                        newItems.add(item)
+                                    // Process from oldest to newest to preserve order.
+                                    for (item in newRemoteItemsSince(parsed.history, lastSeenLamport)) {
+                                        syncToSystemClipboard(item.preview)
                                     }
-
-                                    // Process from oldest to newest (bottom up) to preserve order
-                                    for (item in newItems.reversed()) {
-                                        // Sync every remote item, including the first
-                                        // after a restart. Dedup is handled by
-                                        // lastPeerClipText + MainActivity's clipListener.
-                                        if (item.source == "remote") {
-                                            syncToSystemClipboard(item.preview)
-                                        }
+                                    // FS-022: advance + persist the cursor only when it
+                                    // actually moves, so the tight poll doesn't write
+                                    // SharedPreferences several times a second.
+                                    val newest = parsed.history[0].lamport
+                                    if (newest != lastSeenLamport) {
+                                        lastSeenLamport = newest
+                                        persistLastSeenLamport(newest)
                                     }
-                                    lastSeenLamport = parsed.history[0].lamport
                                 }
                             }
                         }
@@ -203,6 +208,18 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                 }
                 delay(pollIntervalMs(linked))
             }
+        }
+    }
+
+    /** FS-022: persist the Lamport cursor across process restarts. */
+    private fun persistLastSeenLamport(value: Long) {
+        try {
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(KEY_LAST_SEEN_LAMPORT, value)
+                .apply()
+        } catch (e: Exception) {
+            android.util.Log.w("FluxSync", "Failed to persist lamport cursor: ${e.message}")
         }
     }
 
@@ -311,6 +328,30 @@ class FluxsyncAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
 
     companion object {
+        /** FS-022: SharedPreferences store for the persisted Lamport cursor. */
+        private const val PREFS_NAME = "fluxsync_prefs"
+        private const val KEY_LAST_SEEN_LAMPORT = "last_seen_lamport"
+
+        /**
+         * FS-022: remote history items newer than [lastSeen], oldest-first.
+         * [history] is the daemon snapshot, newest-first. When [lastSeen] is
+         * 0 (a process restart that lost the in-memory cursor) this returns
+         * every remote item — the bug the persisted cursor prevents.
+         */
+        @JvmStatic
+        fun newRemoteItemsSince(
+            history: List<sn.kaolack.fluxsync.vm.HistoryItem>,
+            lastSeen: Long,
+        ): List<sn.kaolack.fluxsync.vm.HistoryItem> {
+            val fresh = ArrayList<sn.kaolack.fluxsync.vm.HistoryItem>()
+            for (item in history) {
+                if (item.lamport <= lastSeen) break
+                fresh.add(item)
+            }
+            fresh.reverse()
+            return fresh.filter { it.source == "remote" }
+        }
+
         /**
          * Adaptive FFI poll cadence (FS-011). Tight 200ms while a peer is
          * linked — clipboard latency is user-visible — but relaxed to 2s when

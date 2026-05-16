@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import sn.kaolack.fluxsync.vm.HistoryItem
 
 /**
  * FS-011: the FFI poll loop must back off when no peer is linked so a
@@ -53,6 +54,54 @@ class FluxsyncAccessibilityServiceTest {
         assertEquals("Android", FluxsyncAccessibilityService.formatPeerName(null, null))
         assertEquals("Android", FluxsyncAccessibilityService.formatPeerName("", "  "))
         assertEquals("Pixel 8", FluxsyncAccessibilityService.formatPeerName("", "Pixel 8"))
+    }
+
+    // FS-022: the Lamport cursor must be persisted so a process restart
+    // doesn't re-sync the daemon's whole history to the clipboard.
+
+    private fun histItem(lamport: Long, source: String) = HistoryItem(
+        hash = "h$lamport",
+        kind = "text",
+        preview = "p$lamport",
+        time = "",
+        source = source,
+        sensitive = false,
+        lamport = lamport,
+    )
+
+    @Test
+    fun newRemoteItemsFloodsWhenCursorIsZero() {
+        val history = listOf(
+            histItem(5, "remote"),
+            histItem(4, "local"),
+            histItem(3, "remote"),
+            histItem(2, "remote"),
+        )
+        // A restart loses the in-memory cursor → every remote item resynced.
+        val fresh = FluxsyncAccessibilityService.newRemoteItemsSince(history, 0L)
+        assertEquals(listOf(2L, 3L, 5L), fresh.map { it.lamport })
+    }
+
+    @Test
+    fun newRemoteItemsEmptyWhenCursorRestoredAtHead() {
+        val history = listOf(
+            histItem(5, "remote"),
+            histItem(4, "local"),
+            histItem(3, "remote"),
+        )
+        val fresh = FluxsyncAccessibilityService.newRemoteItemsSince(history, 5L)
+        assertTrue("a restored cursor must suppress the restart flood", fresh.isEmpty())
+    }
+
+    @Test
+    fun newRemoteItemsExcludesLocalAndKeepsOldestFirst() {
+        val history = listOf(
+            histItem(9, "remote"),
+            histItem(8, "remote"),
+            histItem(7, "local"),
+        )
+        val fresh = FluxsyncAccessibilityService.newRemoteItemsSince(history, 6L)
+        assertEquals(listOf(8L, 9L), fresh.map { it.lamport })
     }
 
     @Test
