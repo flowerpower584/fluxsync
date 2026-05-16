@@ -44,6 +44,12 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        // android.jar ships stubs (org.json, android.util.Log) that
+        // throw at runtime; return defaults so plain JVM tests run.
+        unitTests.isReturnDefaultValues = true
+    }
+
     sourceSets {
         getByName("main") {
             // Generated UniFFI bindings live alongside the .so; the
@@ -192,4 +198,9 @@ dependencies {
     // Tooling.
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    // JVM unit tests — no device, no Compose runtime.
+    testImplementation("junit:junit:4.13.2")
+    // Real org.json: the android.jar copy is a stub that throws.
+    testImplementation("org.json:json:20240303")
 }
