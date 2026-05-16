@@ -17,12 +17,9 @@ import sn.kaolack.fluxsync.vm.DaemonState
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 
 class FluxsyncService : Service() {
     private val job = SupervisorJob()
@@ -69,28 +66,31 @@ class FluxsyncService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Daemon is now booted by AccessibilityService (survives swipe).
         // This service only maintains the foreground notification.
-        scope.launch {
-            startStateObserver()
-        }
+        startStateObserver()
         return START_STICKY
     }
 
     private var lastNotifText: String = ""
+    private var observerJob: Job? = null
 
+    /**
+     * Drive the notification straight off `FluxsyncManager.state` instead of
+     * polling it on a timer. A StateFlow is already reactive, so a 1s poll
+     * loop only wasted wake-ups. `collect` re-emits on every state change and
+     * suspends in between. Guarded so START_STICKY redelivery can't stack
+     * multiple collectors.
+     */
     private fun startStateObserver() {
-        scope.launch {
-            while (isActive) {
-                try {
-                    val state = FluxsyncManager.state.value
-                    if (state != null) {
-                        val text = if (state.active) "Linked: ${state.peerName}" else "Searching for peers..."
-                        if (text != lastNotifText) {
-                            lastNotifText = text
-                            updateNotification(text)
-                        }
+        if (observerJob?.isActive == true) return
+        observerJob = scope.launch {
+            FluxsyncManager.state.collect { state ->
+                if (state != null) {
+                    val text = if (state.active) "Linked: ${state.peerName}" else "Searching for peers..."
+                    if (text != lastNotifText) {
+                        lastNotifText = text
+                        updateNotification(text)
                     }
-                } catch (_: Exception) {}
-                delay(1000)
+                }
             }
         }
     }

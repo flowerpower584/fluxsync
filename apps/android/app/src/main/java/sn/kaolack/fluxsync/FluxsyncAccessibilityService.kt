@@ -136,12 +136,14 @@ class FluxsyncAccessibilityService : AccessibilityService() {
         }
         pollingJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
+                var linked = false
                 try {
                     FluxsyncManager.withHandle { h ->
                         val raw = h.pollState()
                         if (raw.isNotEmpty()) {
                             val parsed = sn.kaolack.fluxsync.vm.DaemonState.parse(raw)
                             if (parsed != null) {
+                                linked = parsed.active
                                 FluxsyncManager.updateState(parsed)
 
                                 // Reset the echo guard on disconnect so a
@@ -199,7 +201,7 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                 } catch (e: Exception) {
                     android.util.Log.w("FluxSync", "Poll error: ${e.message}")
                 }
-                delay(200)
+                delay(pollIntervalMs(linked))
             }
         }
     }
@@ -306,6 +308,17 @@ class FluxsyncAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+
+    companion object {
+        /**
+         * Adaptive FFI poll cadence (FS-011). Tight 200ms while a peer is
+         * linked — clipboard latency is user-visible — but relaxed to 2s when
+         * idle so a backgrounded, disconnected app stops burning battery on
+         * 10 FFI reads per second.
+         */
+        @JvmStatic
+        fun pollIntervalMs(active: Boolean): Long = if (active) 200L else 2000L
+    }
 
     override fun onDestroy() {
         // AccessibilityService should NEVER be destroyed by the system
