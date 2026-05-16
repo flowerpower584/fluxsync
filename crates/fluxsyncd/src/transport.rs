@@ -37,6 +37,16 @@ pub const TYPE_HANDSHAKE_INIT: u8 = 0x01;
 pub const TYPE_HANDSHAKE_RESP: u8 = 0x02;
 pub const TYPE_ENCRYPTED: u8 = 0x03;
 
+/// Minimum interval between accepted peer-address roams.
+pub const ROAM_MIN_INTERVAL_MS: u64 = 30_000;
+
+/// True when a roam may be accepted: at least `ROAM_MIN_INTERVAL_MS`
+/// has elapsed since the last accepted roam.
+#[must_use]
+pub fn roam_allowed(now_ms: u64, last_roam_ms: u64) -> bool {
+    now_ms.saturating_sub(last_roam_ms) >= ROAM_MIN_INTERVAL_MS
+}
+
 pub struct Transport {
     pub socket: Arc<UdpSocket>,
     pub peer_addr: Arc<Mutex<Option<SocketAddr>>>,
@@ -53,6 +63,10 @@ pub struct Transport {
     session_generation: Arc<AtomicU64>,
     pub(crate) roaming_history: Arc<Mutex<Vec<SocketAddr>>>,
     pub last_rx_ms: Arc<AtomicU64>,
+    /// Epoch-ms of the last accepted roam. Rate-limits peer-address
+    /// re-pinning so a LAN attacker replaying authentic ciphertext
+    /// cannot continuously redirect outbound traffic (FS-034).
+    last_roam_ms: Arc<AtomicU64>,
     pub session_established_at_ms: Arc<AtomicU64>,
     pub metrics: Arc<Mutex<crate::metrics::MetricsTracker>>,
 }
@@ -101,6 +115,7 @@ impl Transport {
                 session_generation: Arc::new(AtomicU64::new(0)),
                 roaming_history: Arc::new(Mutex::new(Vec::new())),
                 last_rx_ms: Arc::new(AtomicU64::new(now_ms())),
+                last_roam_ms: Arc::new(AtomicU64::new(0)),
                 session_established_at_ms: Arc::new(AtomicU64::new(0)),
                 metrics: Arc::new(Mutex::new(crate::metrics::MetricsTracker::new())),
             },
@@ -236,22 +251,37 @@ impl Transport {
                     }
                 };
 
-                // ROAMING: If decryption succeeds, this packet is authentic.
-                // Update the peer address to the one we just received from.
+                // ROAMING: decryption success proves the packet is authentic,
+                // but a LAN attacker can replay/relay authentic ciphertext to
+                // hijack `peer_addr`. Rate-limit re-pinning so at most one roam
+                // is accepted per ROAM_MIN_INTERVAL_MS (FS-034).
                 {
                     let mut p = self.peer_addr.lock().await;
                     if Some(from) != *p {
-                        tracing::info!(old = ?*p, new = ?from, "roaming: updating peer address");
-                        *p = Some(from);
-                        *self.last_peer_addr.lock().await = Some(from);
-                        {
-                            let mut h = self.roaming_history.lock().await;
-                            if !h.contains(&from) {
-                                h.insert(0, from);
-                                h.truncate(5); // Keep last 5 IPs
+                        let now = now_ms();
+                        let last_roam = self.last_roam_ms.load(Ordering::Relaxed);
+                        if roam_allowed(now, last_roam) {
+                            tracing::warn!(
+                                old = ?*p, new = ?from,
+                                "roaming: updating peer address"
+                            );
+                            *p = Some(from);
+                            *self.last_peer_addr.lock().await = Some(from);
+                            self.last_roam_ms.store(now, Ordering::Relaxed);
+                            {
+                                let mut h = self.roaming_history.lock().await;
+                                if !h.contains(&from) {
+                                    h.insert(0, from);
+                                    h.truncate(5); // Keep last 5 IPs
+                                }
                             }
+                            // last_peer_id is already set when the session was installed.
+                        } else {
+                            tracing::warn!(
+                                current = ?*p, rejected = ?from,
+                                "roaming: rejecting peer-address change (rate-limited)"
+                            );
                         }
-                        // last_peer_id is already set when the session was installed.
                     }
                 }
                 self.last_rx_ms.store(now_ms(), Ordering::Relaxed);
@@ -265,5 +295,23 @@ impl Transport {
                 type_byte: other,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{roam_allowed, ROAM_MIN_INTERVAL_MS};
+
+    #[test]
+    fn fs034_roam_rate_limit() {
+        assert_eq!(ROAM_MIN_INTERVAL_MS, 30_000);
+        // No prior roam (last_roam_ms == 0): always allowed.
+        assert!(roam_allowed(100_000, 0));
+        // 20s since last roam: too soon, rejected.
+        assert!(!roam_allowed(100_000, 80_000));
+        // 30s exactly: boundary, allowed.
+        assert!(roam_allowed(100_000, 70_000));
+        // 10s since last roam: rejected.
+        assert!(!roam_allowed(100_000, 90_000));
     }
 }
