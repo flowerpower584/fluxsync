@@ -74,8 +74,17 @@ data class DaemonState(
                 raw = o,
             )
         } catch (e: Exception) {
+            android.util.Log.w("FluxSync", parseFailureMessage(e, json))
             null
         }
+
+        /**
+         * FS-017: diagnostic line for a failed [parse] call. Includes the
+         * exception message and a bounded head of the offending JSON so a
+         * silent empty screen becomes a traceable logcat entry.
+         */
+        internal fun parseFailureMessage(e: Throwable, json: String): String =
+            "DaemonState.parse failed: ${e.message} (raw head: ${json.take(120)})"
 
         private fun parseHistory(arr: JSONArray?): List<HistoryItem> {
             if (arr == null) return emptyList()

@@ -79,4 +79,17 @@ class DaemonStateTest {
         assertNull(DaemonState.parse(""))
         assertNull(DaemonState.parse("[]"))
     }
+
+    // FS-017: a parse failure must be traceable, not silent. The catch
+    // logs parseFailureMessage — assert it carries the exception text and
+    // a bounded head of the offending payload.
+    @Test
+    fun parseFailureMessageCarriesExceptionAndBoundedRawHead() {
+        val long = "x".repeat(500)
+        val msg = DaemonState.parseFailureMessage(IllegalStateException("boom"), long)
+        assertTrue("must name the failure", msg.contains("DaemonState.parse failed"))
+        assertTrue("must include the exception text", msg.contains("boom"))
+        assertTrue("must include the raw head", msg.contains("x".repeat(120)))
+        assertFalse("raw head must be bounded", msg.contains("x".repeat(121)))
+    }
 }
