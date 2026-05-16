@@ -146,9 +146,13 @@ pub fn load_peers(dir: &Path) -> Result<Vec<StoredPeer>> {
     Ok(pf.peers)
 }
 
-/// Persist the trusted-peer registry. Atomic via `*.tmp` + rename so
-/// a crash mid-write can't leave the file unparseable.
+/// Persist the trusted-peer registry. Atomic via `*.tmp` + rename, and
+/// the tmp file is fsynced before the rename so a crash mid-write can't
+/// leave the registry empty or unparseable — same durability guarantee
+/// as `write_secret_atomic`.
 pub fn save_peers(dir: &Path, peers: &[StoredPeer]) -> Result<()> {
+    use std::io::Write;
+
     ensure_dir(dir)?;
     let path = dir.join(PEERS_FILE);
     let pf = PeersFile {
@@ -156,8 +160,53 @@ pub fn save_peers(dir: &Path, peers: &[StoredPeer]) -> Result<()> {
     };
     let s = serde_json::to_string_pretty(&pf)?;
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, &s).with_context(|| format!("write {}", tmp.display()))?;
+    {
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)
+            .with_context(|| format!("create {}", tmp.display()))?;
+        f.write_all(s.as_bytes())
+            .with_context(|| format!("write {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
+    }
     fs::rename(&tmp, &path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_peers, save_peers, StoredPeer, PEERS_FILE};
+
+    fn peer(name: &str) -> StoredPeer {
+        StoredPeer {
+            peer_id_hex: "aa".repeat(32),
+            static_pub_hex: "bb".repeat(32),
+            name: name.to_owned(),
+            last_addr: None,
+        }
+    }
+
+    /// FS-028: `save_peers` must round-trip through `load_peers` and leave
+    /// no stale `*.tmp` behind. The fsync durability itself has no
+    /// observable effect without a crash; it is verified by inspection
+    /// against `write_secret_atomic`.
+    #[test]
+    fn fs028_save_peers_round_trips_and_cleans_tmp() {
+        let dir = tempfile::tempdir().expect("create temp keystore dir");
+
+        save_peers(dir.path(), &[peer("Galaxy S21"), peer("MacBook")])
+            .expect("save_peers must succeed");
+
+        let loaded = load_peers(dir.path()).expect("load_peers must succeed");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].name, "Galaxy S21");
+        assert_eq!(loaded[1].name, "MacBook");
+
+        let tmp = dir.path().join(PEERS_FILE).with_extension("json.tmp");
+        assert!(!tmp.exists(), "the .tmp file must not survive the rename");
+    }
 }
