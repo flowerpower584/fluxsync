@@ -42,10 +42,15 @@ fun LogsScreen(vm: FluxsyncViewModel) {
         if (filter == "ALL") ordered else ordered.filter { it.level.equals(filter, ignoreCase = true) }
     }
 
-    // Auto-scroll to the top as new entries land — only if the user is
-    // already near the top, so manual scrolling isn't yanked back.
+    // Auto-scroll to the top as new entries land — only while the user is
+    // pinned at the very top. Scrolling away even slightly pauses it until
+    // they return to the top, so reading older entries isn't interrupted.
     LaunchedEffect(visible.size) {
-        if (listState.firstVisibleItemIndex <= 1) {
+        if (shouldAutoScrollLogs(
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+            )
+        ) {
             listState.animateScrollToItem(0)
         }
     }
@@ -94,6 +99,17 @@ fun LogsScreen(vm: FluxsyncViewModel) {
         }
     }
 }
+
+/**
+ * FS-023: the log list auto-scrolls to the newest entry only while the
+ * user is pinned at the exact top (index 0, no pixel offset). Any scroll
+ * away pauses it — the old `firstVisibleItemIndex <= 1` threshold yanked
+ * a user who was deliberately reading the second entry.
+ */
+internal fun shouldAutoScrollLogs(
+    firstVisibleItemIndex: Int,
+    firstVisibleItemScrollOffset: Int,
+): Boolean = firstVisibleItemIndex == 0 && firstVisibleItemScrollOffset == 0
 
 @Composable
 private fun LogFilterChip(label: String, active: Boolean, onClick: () -> Unit) {
