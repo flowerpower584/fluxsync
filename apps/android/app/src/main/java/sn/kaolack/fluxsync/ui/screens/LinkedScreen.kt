@@ -2,7 +2,6 @@ package sn.kaolack.fluxsync.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -59,13 +58,6 @@ fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
                     else -> "v0.5.0 · android"
                 },
                 on = s.active,
-                onNavigate = { route ->
-                    innerNav.navigate(route) {
-                        popUpTo(Routes.HOME) { saveState = true }
-                        launchSingleTop = true
-                        restoreState = true
-                    }
-                }
             )
         },
         bottomBar = {
@@ -93,7 +85,7 @@ fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
 }
 
 @Composable
-private fun AppBar(title: String, subtitle: String, on: Boolean, onNavigate: (String) -> Unit) {
+private fun AppBar(title: String, subtitle: String, on: Boolean) {
     Column {
         Row(
             modifier = Modifier
@@ -123,15 +115,6 @@ private fun AppBar(title: String, subtitle: String, on: Boolean, onNavigate: (St
                     Text(title, color = FsDarkFg, style = MaterialTheme.typography.titleMedium)
                     Text(subtitle.uppercase(), color = FsDarkSubtle, style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
                 }
-            }
-            Box(
-                Modifier
-                    .size(32.dp)
-                    .border(width = 1.dp, color = FsDarkBorder, shape = RoundedCornerShape(2.dp))
-                    .clickable { onNavigate(Routes.SETTINGS) },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("≡", color = FsDarkMuted, fontSize = 16.sp)
             }
         }
         HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
