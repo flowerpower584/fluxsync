@@ -8,9 +8,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use fluxsyncd::{keystore, run, DaemonConfig};
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::signal;
-use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser, Debug)]
@@ -112,14 +111,14 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "failed to load peers.json; starting unpaired"),
     }
 
-    let shutdown = Arc::new(Notify::new());
+    let shutdown = CancellationToken::new();
     let s2 = shutdown.clone();
 
     tokio::spawn(async move {
         match signal::ctrl_c().await {
             Ok(()) => {
                 tracing::info!("ctrl-c received; shutting down");
-                s2.notify_waiters();
+                s2.cancel();
             }
             Err(e) => tracing::error!(error = %e, "ctrl-c handler failed"),
         }

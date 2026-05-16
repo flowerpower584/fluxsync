@@ -21,12 +21,11 @@ use serde_json::json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UdpSocket, UnixStream};
-use tokio::sync::Notify;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 static PANIC_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
@@ -127,8 +126,8 @@ async fn two_daemons_exchange_one_item_and_shutdown_cleanly() {
         peer_id: peer_id_a,
     });
 
-    let shutdown_a = Arc::new(Notify::new());
-    let shutdown_b = Arc::new(Notify::new());
+    let shutdown_a = CancellationToken::new();
+    let shutdown_b = CancellationToken::new();
     let s_a = shutdown_a.clone();
     let s_b = shutdown_b.clone();
 
@@ -211,10 +210,10 @@ async fn two_daemons_exchange_one_item_and_shutdown_cleanly() {
         "push from A did not appear in B's history within 2s"
     );
 
-    // ── 3. shutdown via Notify, both tasks join within 500ms ──
+    // ── 3. shutdown via CancellationToken, both tasks join within 500ms ──
     let t_shutdown = std::time::Instant::now();
-    shutdown_a.notify_waiters();
-    shutdown_b.notify_waiters();
+    shutdown_a.cancel();
+    shutdown_b.cancel();
     timeout(Duration::from_millis(500), h_a)
         .await
         .expect("daemon A did not shut down in 500ms")
@@ -258,7 +257,7 @@ async fn daemon_starts_unpaired_and_responds_to_status() {
     cfg.disable_mdns = true;
     // No test_pair — simulates a fresh first-run with no peer.
 
-    let shutdown = Arc::new(Notify::new());
+    let shutdown = CancellationToken::new();
     let s = shutdown.clone();
     let h = tokio::spawn(async move { run(cfg, s).await });
 
@@ -282,7 +281,7 @@ async fn daemon_starts_unpaired_and_responds_to_status() {
         "unpaired daemon did not respond to status within 2s"
     );
 
-    shutdown.notify_waiters();
+    shutdown.cancel();
     timeout(Duration::from_millis(500), h)
         .await
         .expect("solo daemon did not shut down in 500ms")

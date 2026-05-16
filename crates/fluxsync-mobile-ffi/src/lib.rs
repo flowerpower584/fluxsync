@@ -34,7 +34,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::runtime::Runtime;
-use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 const LOG_BUFFER_CAP: usize = 200;
 
@@ -76,7 +76,7 @@ pub struct FfiLogEntry {
 #[derive(uniffi::Object)]
 pub struct FluxsyncHandle {
     runtime: Arc<Runtime>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
     ipc_path: PathBuf,
     daemon_thread: Mutex<Option<JoinHandle<()>>>,
     /// Latest state JSON line as published by the daemon. The
@@ -144,7 +144,7 @@ impl FluxsyncHandle {
                 .build()
                 .map_err(|e| FluxError::Daemon(format!("runtime: {e}")))?,
         );
-        let shutdown = Arc::new(Notify::new());
+        let shutdown = CancellationToken::new();
 
         // Spawn the daemon on a dedicated OS thread so dropping the
         // runtime there is straightforward.
@@ -216,7 +216,7 @@ impl FluxsyncHandle {
     /// Fire the shutdown notify and join the daemon thread. Returns
     /// once the daemon has exited (≤ 500ms in practice).
     pub fn stop(&self) {
-        self.shutdown.notify_waiters();
+        self.shutdown.cancel();
         if let Some(handle) = self.daemon_thread.lock().ok().and_then(|mut g| g.take()) {
             let _ = handle.join();
         }
@@ -225,7 +225,7 @@ impl FluxsyncHandle {
 
 impl Drop for FluxsyncHandle {
     fn drop(&mut self) {
-        self.shutdown.notify_waiters();
+        self.shutdown.cancel();
     }
 }
 
@@ -453,14 +453,14 @@ async fn send_cmd(path: &PathBuf, request: serde_json::Value) -> anyhow::Result<
 async fn state_subscriber_loop(
     path: PathBuf,
     last_state: Arc<Mutex<Option<String>>>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     loop {
         if let Err(e) = state_subscribe_once(&path, &last_state, &shutdown).await {
             tracing::warn!(error = %e, "state subscribe loop error; reconnecting in 500ms");
         }
         tokio::select! {
-            () = shutdown.notified() => return Ok(()),
+            () = shutdown.cancelled() => return Ok(()),
             () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
         }
     }
@@ -469,7 +469,7 @@ async fn state_subscriber_loop(
 async fn state_subscribe_once(
     path: &PathBuf,
     last_state: &Arc<Mutex<Option<String>>>,
-    shutdown: &Arc<Notify>,
+    shutdown: &CancellationToken,
 ) -> anyhow::Result<()> {
     let stream = UnixStream::connect(path).await?;
     let (read, mut write) = stream.into_split();
@@ -480,7 +480,7 @@ async fn state_subscribe_once(
     loop {
         buf.clear();
         tokio::select! {
-            () = shutdown.notified() => return Ok(()),
+            () = shutdown.cancelled() => return Ok(()),
             res = reader.read_line(&mut buf) => {
                 let n = res?;
                 if n == 0 { return Ok(()); }
@@ -500,14 +500,14 @@ async fn logs_subscriber_loop(
     path: PathBuf,
     last_logs: Arc<Mutex<VecDeque<FfiLogEntry>>>,
     log_seq: Arc<AtomicU64>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     loop {
         if let Err(e) = logs_subscribe_once(&path, &last_logs, &log_seq, &shutdown).await {
             tracing::warn!(error = %e, "logs subscribe loop error; reconnecting in 500ms");
         }
         tokio::select! {
-            () = shutdown.notified() => return Ok(()),
+            () = shutdown.cancelled() => return Ok(()),
             () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
         }
     }
@@ -517,7 +517,7 @@ async fn logs_subscribe_once(
     path: &PathBuf,
     last_logs: &Arc<Mutex<VecDeque<FfiLogEntry>>>,
     log_seq: &Arc<AtomicU64>,
-    shutdown: &Arc<Notify>,
+    shutdown: &CancellationToken,
 ) -> anyhow::Result<()> {
     let stream = UnixStream::connect(path).await?;
     let (read, mut write) = stream.into_split();
@@ -528,7 +528,7 @@ async fn logs_subscribe_once(
     loop {
         buf.clear();
         tokio::select! {
-            () = shutdown.notified() => return Ok(()),
+            () = shutdown.cancelled() => return Ok(()),
             res = reader.read_line(&mut buf) => {
                 let n = res?;
                 if n == 0 { return Ok(()); }

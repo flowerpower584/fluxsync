@@ -1,13 +1,13 @@
 use fluxsync_core::events::Event;
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Polls macOS battery status via `pmset -g batt`.
 pub async fn battery_watcher_loop(
     event_tx: mpsc::UnboundedSender<Event>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::info!("macOS battery watcher started");
     loop {
@@ -16,7 +16,7 @@ pub async fn battery_watcher_loop(
         }
 
         tokio::select! {
-            () = shutdown.notified() => break,
+            () = shutdown.cancelled() => break,
             () = tokio::time::sleep(Duration::from_secs(60)) => {}
         }
     }

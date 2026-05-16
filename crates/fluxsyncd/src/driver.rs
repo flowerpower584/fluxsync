@@ -7,10 +7,13 @@
 //! * mDNS discovery dispatcher (skipped in test mode or when disabled)
 //! * the central event loop that owns the `App`
 //!
-//! Shutdown: a single `tokio::sync::Notify`. Every loop selects on
-//! `notify.notified()` and exits. The driver returns once all
-//! background tasks have joined, so callers (test harness, `main.rs`)
-//! get a deterministic shutdown deadline.
+//! Shutdown: a single `tokio_util::sync::CancellationToken`. Every loop
+//! selects on `token.cancelled()` and exits. Cancellation is sticky —
+//! a task that is not parked on `cancelled()` at the instant of
+//! `cancel()` still observes it on its next poll, so no task can miss
+//! the signal. The driver returns once all background tasks have
+//! joined, so callers (test harness, `main.rs`) get a deterministic
+//! shutdown deadline.
 
 use crate::cmd::{Channel, CmdData, CmdOp, CmdRequest, CmdResponse, PeerEntry, Subscribe};
 use crate::config::{DaemonConfig, TestPair};
@@ -38,14 +41,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 const BASE32_ALPHA: Alphabet = Alphabet::Rfc4648 { padding: false };
 
 /// Drive a daemon to completion, returning once `shutdown` fires and
 /// every background task has joined.
-pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
+pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     let DaemonConfig {
         identity,
         peer_name_self,
@@ -353,7 +357,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
 
                 let loop_start = Instant::now();
                 tokio::select! {
-                    () = shutdown.notified() => break,
+                    () = shutdown.cancelled() => break,
                     _ = rx.changed() => {},
                     () = tokio::time::sleep(Duration::from_secs(5)) => {}
                 }
@@ -385,7 +389,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
     loop {
         tokio::select! {
             biased;
-            () = shutdown.notified() => break,
+            () = shutdown.cancelled() => break,
             Some(event) = event_rx.recv() => {
                 if let Event::HandshakeOk = event {
                     metrics.lock().await.on_handshake_ok();
@@ -1171,7 +1175,7 @@ async fn transport_recv_loop(
     pairing_window: PairingWindow,
     pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
     event_tx: mpsc::UnboundedSender<Event>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
     keystore_dir: Option<PathBuf>,
     metrics: Arc<Mutex<MetricsTracker>>,
 ) -> Result<()> {
@@ -1183,7 +1187,7 @@ async fn transport_recv_loop(
     loop {
         tokio::select! {
             biased;
-            () = shutdown.notified() => return Ok(()),
+            () = shutdown.cancelled() => return Ok(()),
             _ = cleanup_interval.tick() => {
                 let mut map = reassembly.lock().await;
                 map.retain(|hash, r| {
@@ -1307,7 +1311,7 @@ async fn clipboard_watcher_loop(
     transport: Arc<Transport>,
     cmd_tx: mpsc::UnboundedSender<DriverCmd>,
     last_written_hashes: Arc<Mutex<VecDeque<[u8; 32]>>>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     let mut last_seen_hash: Option<[u8; 32]> = None;
     let mut interval = tokio::time::interval(Duration::from_millis(200));
@@ -1315,7 +1319,7 @@ async fn clipboard_watcher_loop(
     loop {
         tokio::select! {
             biased;
-            () = shutdown.notified() => return Ok(()),
+            () = shutdown.cancelled() => return Ok(()),
             _ = interval.tick() => {
                 let est = transport.session_established_at_ms.load(std::sync::atomic::Ordering::SeqCst);
                 let session_active = transport.session.lock().await.is_some();
@@ -1380,7 +1384,7 @@ async fn clipboard_watcher_loop(
 async fn heartbeat_loop(
     transport: Arc<Transport>,
     event_tx: mpsc::UnboundedSender<Event>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
     metrics: Arc<Mutex<MetricsTracker>>,
 ) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -1389,7 +1393,7 @@ async fn heartbeat_loop(
     loop {
         tokio::select! {
             biased;
-            () = shutdown.notified() => return Ok(()),
+            () = shutdown.cancelled() => return Ok(()),
             _ = interval.tick() => {
                 let session_active = transport.session.lock().await.is_some();
 
@@ -1639,13 +1643,13 @@ async fn discovery_dispatcher(
     transport: Arc<Transport>,
     pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
     event_tx: mpsc::UnboundedSender<Event>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(10));
     loop {
         tokio::select! {
             biased;
-            () = shutdown.notified() => return Ok(()),
+            () = shutdown.cancelled() => return Ok(()),
             _ = interval.tick() => {
                 // PROACTIVE PROBE: If no session, try the last known peer
                 let has_session = transport.session.lock().await.is_some();
@@ -1892,13 +1896,13 @@ async fn ipc_accept_loop(
     state_rx: watch::Receiver<State>,
     logs_bcast_tx: broadcast::Sender<LogEntry>,
     log_tail: Arc<LogTail>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     let mut clients = JoinSet::new();
     loop {
         tokio::select! {
             biased;
-            () = shutdown.notified() => break,
+            () = shutdown.cancelled() => break,
             accept = server.accept() => {
                 let conn = match accept {
                     Ok(c) => c,
@@ -1927,7 +1931,7 @@ async fn handle_ipc_client(
     mut state_rx: watch::Receiver<State>,
     mut logs_bcast_rx: broadcast::Receiver<LogEntry>,
     _log_tail: Arc<LogTail>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     let (read_half, mut write_half) = conn.split();
     let mut reader = BufReader::new(read_half);
@@ -1943,7 +1947,7 @@ async fn handle_ipc_client(
             loop {
                 line.clear();
                 tokio::select! {
-                    () = shutdown.notified() => return Ok(()),
+                    () = shutdown.cancelled() => return Ok(()),
                     res = reader.read_line(&mut line) => {
                         let n = res?;
                         if n == 0 { return Ok(()); }
@@ -1969,7 +1973,7 @@ async fn handle_ipc_client(
             write_json_line(&mut write_half, &snap).await?;
             loop {
                 tokio::select! {
-                    () = shutdown.notified() => return Ok(()),
+                    () = shutdown.cancelled() => return Ok(()),
                     changed = state_rx.changed() => {
                         if changed.is_err() { return Ok(()); }
                         let snap = state_rx.borrow().clone();
@@ -1980,7 +1984,7 @@ async fn handle_ipc_client(
         }
         Channel::Logs => loop {
             tokio::select! {
-                () = shutdown.notified() => return Ok(()),
+                () = shutdown.cancelled() => return Ok(()),
                 entry = logs_bcast_rx.recv() => {
                     match entry {
                         Ok(e) => write_json_line(&mut write_half, &e).await?,

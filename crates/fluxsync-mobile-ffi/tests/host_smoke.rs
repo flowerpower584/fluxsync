@@ -87,3 +87,49 @@ fn ffi_rejects_bad_identity_b64() {
     );
     assert!(res.is_err(), "expected InvalidIdentity error");
 }
+
+/// FS-051 regression: `stop()` must always return.
+///
+/// The original shutdown signal was a `tokio::sync::Notify`; `stop()`
+/// fired `notify_waiters()`, which only wakes tasks *currently* parked
+/// on `notified()` and stores no permit. Any daemon task momentarily
+/// between `select!` awaits missed the signal, looped forever, and
+/// `run()`'s task-drain never finished — so `stop()`'s `join()` blocked
+/// for good. The race is intermittent, so we cycle start/stop and guard
+/// with a watchdog: on the buggy code one cycle eventually wedges.
+#[test]
+fn ffi_stop_is_prompt_under_repeated_cycles() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        for i in 0..30 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ipc = dir.path().join(format!("ffi-cycle-{i}.sock"));
+            let port = pick_free_udp_port();
+            let handle = FluxsyncHandle::start(
+                "host-test".into(),
+                ipc.to_string_lossy().into_owned(),
+                String::new(),
+                port,
+                String::new(),
+            )
+            .expect("start");
+            // Exercise the IPC path so a handler task is in flight near
+            // stop() — widens the shutdown-race window.
+            handle.push_text(format!("cycle-{i}")).ok();
+            handle.stop();
+        }
+        tx.send(()).expect("done signal");
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+        Ok(()) => worker.join().expect("worker panicked"),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("FS-051: stop() hung — 30 start/stop cycles did not finish in 60s")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            worker
+                .join()
+                .expect("worker thread panicked during start/stop cycles");
+            unreachable!("worker dropped the channel without signalling completion");
+        }
+    }
+}

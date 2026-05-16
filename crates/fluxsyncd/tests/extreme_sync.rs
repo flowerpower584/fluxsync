@@ -12,12 +12,11 @@ use fluxsyncd::{
 };
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UdpSocket, UnixStream};
-use tokio::sync::Notify;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 static PANIC_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
@@ -124,8 +123,8 @@ async fn extreme_dual_daemon_stress_test() {
         peer_id: id_a_peer,
     });
 
-    let shutdown_a = Arc::new(Notify::new());
-    let shutdown_b = Arc::new(Notify::new());
+    let shutdown_a = CancellationToken::new();
+    let shutdown_b = CancellationToken::new();
 
     let _h_a = tokio::spawn(run(cfg_a, shutdown_a.clone()));
     let h_b = tokio::spawn(run(cfg_b, shutdown_b.clone()));
@@ -244,7 +243,7 @@ async fn extreme_dual_daemon_stress_test() {
     // ── SCENARIO 4: Network Bounce (Kill B, wait for A to detect, restart B) ──
     println!(">>> Scenario 4: Network Bounce");
     tracing::info!("Starting Scenario 4: Network Bounce");
-    shutdown_b.notify_waiters();
+    shutdown_b.cancel();
     let _ = timeout(Duration::from_secs(2), h_b).await;
 
     // Wait for A to see "Peer offline" (heartbeat takes ~15s now)
@@ -397,8 +396,8 @@ async fn extreme_dual_daemon_stress_test() {
     cfg_d.disable_mdns = true;
     cfg_d.peer_name_self = "phone-d".into();
 
-    let shutdown_c = Arc::new(Notify::new());
-    let shutdown_d = Arc::new(Notify::new());
+    let shutdown_c = CancellationToken::new();
+    let shutdown_d = CancellationToken::new();
     let h_c = tokio::spawn(run(cfg_c, shutdown_c.clone()));
     let h_d = tokio::spawn(run(cfg_d, shutdown_d.clone()));
 
@@ -458,7 +457,7 @@ async fn extreme_dual_daemon_stress_test() {
 
     // 4. Kill Mac C
     println!("    Step 4: Killing Mac C...");
-    shutdown_c.notify_waiters();
+    shutdown_c.cancel();
     let _ = timeout(Duration::from_secs(5), h_c)
         .await
         .expect("Mac C shutdown hung");
@@ -479,7 +478,7 @@ async fn extreme_dual_daemon_stress_test() {
     }
     cfg_c_v2.start_on = true;
 
-    let shutdown_c_v2 = Arc::new(Notify::new());
+    let shutdown_c_v2 = CancellationToken::new();
     let h_c_v2 = tokio::spawn(run(cfg_c_v2, shutdown_c_v2.clone()));
 
     // 6. Verify Mac C v2 is linked or at least ready
@@ -490,8 +489,8 @@ async fn extreme_dual_daemon_stress_test() {
     }).await, "Mac C failed to resume after restart");
 
     println!(">>> Scenario 10 SUCCESS");
-    shutdown_c_v2.notify_waiters();
-    shutdown_d.notify_waiters();
+    shutdown_c_v2.cancel();
+    shutdown_d.cancel();
     let _ = h_c_v2.await;
     let _ = h_d.await;
 

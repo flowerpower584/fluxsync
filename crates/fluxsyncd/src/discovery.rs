@@ -16,8 +16,8 @@ use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 pub const SERVICE_TYPE: &str = "_fluxsync._udp.local.";
 
@@ -46,7 +46,7 @@ pub fn start(
     bind_ip: IpAddr,
     udp_port: u16,
     tx: mpsc::UnboundedSender<DiscoveryEvent>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
 ) -> Result<ServiceDaemon> {
     let daemon = ServiceDaemon::new().context("create mdns daemon")?;
 
@@ -83,12 +83,12 @@ async fn browse_loop(
     receiver: mdns_sd::Receiver<ServiceEvent>,
     self_peer_id: String,
     tx: mpsc::UnboundedSender<DiscoveryEvent>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     loop {
         tokio::select! {
             biased;
-            () = shutdown.notified() => return Ok(()),
+            () = shutdown.cancelled() => return Ok(()),
             evt = receiver.recv_async() => {
                 let Ok(e) = evt else { return Ok(()) };
                 match e {
