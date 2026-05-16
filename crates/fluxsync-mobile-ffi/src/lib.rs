@@ -587,22 +587,27 @@ async fn logs_subscribe_once(
     }
 }
 
-/// UTC HH:MM:SS without pulling in `chrono`. Lossy at midnight UTC but
-/// fine for a log timestamp; the user-perceptible drift between this
-/// and "log entry actually emitted by the daemon" is sub-second.
+/// `HH:MM:SS UTC` for a Unix epoch, without pulling in `chrono`. The
+/// explicit "UTC" suffix tells users outside GMT+0 why the log clock
+/// differs from their wall clock (local time would need a tz database).
+fn hms_utc_label(epoch_secs: u64) -> String {
+    let h = (epoch_secs % 86400) / 3600;
+    let m = (epoch_secs % 3600) / 60;
+    let s = epoch_secs % 60;
+    format!("{h:02}:{m:02}:{s:02} UTC")
+}
+
+/// Current time as `HH:MM:SS UTC` for a log entry.
 fn format_utc_hms() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let h = (secs % 86400) / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    format!("{h:02}:{m:02}:{s:02}")
+    hms_utc_label(secs)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{next_reconnect_delay, RECONNECT_MAX_MS, RECONNECT_MIN_MS};
+    use super::{hms_utc_label, next_reconnect_delay, RECONNECT_MAX_MS, RECONNECT_MIN_MS};
 
     /// FS-015: the reconnect delay must double each step until it caps,
     /// instead of staying at a flat 500ms forever.
@@ -624,5 +629,14 @@ mod tests {
     #[test]
     fn backoff_never_overflows() {
         assert_eq!(next_reconnect_delay(u64::MAX), RECONNECT_MAX_MS);
+    }
+
+    /// FS-021: the log timestamp must carry an explicit "UTC" label so
+    /// users outside GMT+0 know why it differs from their wall clock.
+    #[test]
+    fn hms_utc_label_formats_with_zone_suffix() {
+        assert_eq!(hms_utc_label(0), "00:00:00 UTC");
+        assert_eq!(hms_utc_label(3_661), "01:01:01 UTC");
+        assert_eq!(hms_utc_label(86_399), "23:59:59 UTC");
     }
 }
