@@ -318,20 +318,51 @@ class FluxsyncAccessibilityService : AccessibilityService() {
          */
         @JvmStatic
         fun pollIntervalMs(active: Boolean): Long = if (active) 200L else 2000L
+
+        /** FS-013: upper bound for the blocking daemon stop in onDestroy. */
+        private const val STOP_TIMEOUT_MS = 2000L
+
+        /**
+         * FS-013: run a blocking daemon stop under a hard deadline so
+         * onDestroy can never ANR. Returns true if [stop] completed within
+         * [timeoutMs], false if it timed out (the runtime is then left to
+         * the dying process to reclaim).
+         */
+        @JvmStatic
+        suspend fun stopWithinTimeout(timeoutMs: Long, stop: suspend () -> Unit): Boolean =
+            withTimeoutOrNull(timeoutMs) {
+                stop()
+                true
+            } ?: false
     }
 
     override fun onDestroy() {
         // AccessibilityService should NEVER be destroyed by the system
         // under normal circumstances. But if it is, clean up.
         android.util.Log.w("FluxSync", "AccessibilityService.onDestroy — BRAIN OFFLINE")
-        
-        // Block until lock is acquired to safely clear handle and stop daemon
-        FluxsyncManager.withHandle { handle ->
-            FluxsyncManager.setHandle(null)
-            try {
-                handle.stop()
-            } catch (e: Exception) {
-                android.util.Log.e("FluxSync", "Error stopping daemon: ${e.message}")
+
+        // FS-013: cancel polling FIRST so no loop iteration is parked inside
+        // withHandle holding handleLock, then stop the daemon OUTSIDE the
+        // lock under a bounded timeout. handle.stop() is a blocking FFI call
+        // and onDestroy runs on the main thread — an unbounded stop ANRs.
+        pollingJob?.cancel()
+        val handle = FluxsyncManager.getHandle()
+        FluxsyncManager.setHandle(null)
+        runBlocking {
+            pollingJob?.join()
+            if (handle != null) {
+                val stopped = stopWithinTimeout(STOP_TIMEOUT_MS) {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            handle.stop()
+                        } catch (e: Exception) {
+                            android.util.Log.e("FluxSync", "Error stopping daemon: ${e.message}")
+                        }
+                    }
+                }
+                if (!stopped) {
+                    android.util.Log.w("FluxSync", "Daemon stop timed out after ${STOP_TIMEOUT_MS}ms")
+                }
             }
         }
 
@@ -339,7 +370,6 @@ class FluxsyncAccessibilityService : AccessibilityService() {
             unregisterReceiver(batteryReceiver)
         } catch (_: Exception) {}
         job.cancel()
-        pollingJob?.cancel()
         super.onDestroy()
     }
 }

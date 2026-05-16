@@ -1,6 +1,9 @@
 package sn.kaolack.fluxsync
 
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -21,5 +24,30 @@ class FluxsyncAccessibilityServiceTest {
         val linked = FluxsyncAccessibilityService.pollIntervalMs(true)
         assertTrue("idle cadence must be slower than linked", idle > linked)
         assertEquals(2000L, idle)
+    }
+
+    // FS-013: onDestroy's daemon stop must be bounded so a wedged
+    // handle.stop() can never ANR the AccessibilityService.
+
+    @Test
+    fun stopWithinTimeoutReturnsTrueWhenStopIsFast() = runBlocking {
+        val ok = FluxsyncAccessibilityService.stopWithinTimeout(1000L) {
+            delay(10L)
+        }
+        assertTrue("a prompt stop must report success", ok)
+    }
+
+    @Test
+    fun stopWithinTimeoutBoundsAWedgedStop() = runBlocking {
+        val started = System.currentTimeMillis()
+        val ok = FluxsyncAccessibilityService.stopWithinTimeout(100L) {
+            delay(5_000L)
+        }
+        val elapsed = System.currentTimeMillis() - started
+        assertFalse("a wedged stop must report timeout", ok)
+        assertTrue(
+            "must return near the deadline ($elapsed ms), not after the full hang",
+            elapsed < 1_000L,
+        )
     }
 }
