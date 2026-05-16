@@ -1609,9 +1609,14 @@ async fn dispatch_inbound_frame(
             tracing::debug!("Heartbeat: received ack (pong)");
             metrics.lock().await.on_ack_received();
         }
-        Msg::Bye | Msg::HandshakeInit(_) | Msg::HandshakeResp(_) => {
-            // Ack (Pong): last_rx_ms is already updated in transport.recv()
-            // Bye/Handshake: handled elsewhere or ignored
+        Msg::Bye => {
+            // Peer announced a clean disconnect: tear down the session and
+            // signal PeerLost so the FSM closes the session and re-discovers.
+            transport.drop_session().await;
+            let _ = event_tx.send(Event::PeerLost);
+        }
+        Msg::HandshakeInit(_) | Msg::HandshakeResp(_) => {
+            // Handshake frames are driven by the handshake task, not here.
         }
         Msg::Hello(h) => {
             // Recover real peer_id from the transport's last known peer id
@@ -2044,5 +2049,39 @@ mod tests {
         assert_eq!(*id, peer_id, "peer_id must round-trip");
         assert_eq!(peer.static_pub, static_pub, "static_pub must round-trip");
         assert_eq!(peer.name, "Galaxy S21", "name must round-trip");
+    }
+
+    /// FS-041: an inbound `Msg::Bye` must emit `Event::PeerLost` so the FSM
+    /// closes the session and re-discovers. On `main` the shared empty match
+    /// arm (`Bye | HandshakeInit | HandshakeResp`) dropped `Bye` silently.
+    #[tokio::test]
+    async fn fs041_bye_frame_emits_peer_lost() {
+        use super::{dispatch_inbound_frame, Event, Reassembly};
+        use crate::metrics::MetricsTracker;
+        use crate::transport::Transport;
+        use fluxsync_proto::{Frame, Msg, PROTOCOL_VERSION};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind loopback transport");
+        let transport = Arc::new(transport);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let metrics = Arc::new(Mutex::new(MetricsTracker::new()));
+
+        let frame = Frame {
+            version: PROTOCOL_VERSION,
+            msg: Msg::Bye,
+        };
+        dispatch_inbound_frame(frame, &event_tx, &transport, &reassembly, &metrics).await;
+
+        assert!(
+            matches!(event_rx.try_recv(), Ok(Event::PeerLost)),
+            "Msg::Bye must emit Event::PeerLost"
+        );
     }
 }
