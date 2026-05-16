@@ -62,7 +62,10 @@ class MainActivity : ComponentActivity() {
         val raw = clip.getItemAt(0).coerceToText(this) ?: return@OnPrimaryClipChangedListener
         val text = raw.toString()
         if (text.isEmpty()) return@OnPrimaryClipChangedListener
-        if (text == FluxsyncManager.lastPeerClipText) return@OnPrimaryClipChangedListener
+        // Compare trimmed: syncToSystemClipboard stores lastPeerClipText
+        // trimmed, so an untrimmed compare would echo back any peer item
+        // with leading/trailing whitespace.
+        if (text.trim() == FluxsyncManager.lastPeerClipText) return@OnPrimaryClipChangedListener
         
         val vm = currentVm ?: return@OnPrimaryClipChangedListener
         lifecycleScope.launch { vm.pushText(text) }

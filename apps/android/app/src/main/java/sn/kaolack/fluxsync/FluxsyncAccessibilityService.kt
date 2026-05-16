@@ -144,6 +144,12 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                             if (parsed != null) {
                                 FluxsyncManager.updateState(parsed)
 
+                                // Reset the echo guard on disconnect so a
+                                // fresh pair doesn't inherit a stale value.
+                                if (parsed.peerName.isEmpty()) {
+                                    FluxsyncManager.lastPeerClipText = ""
+                                }
+
                                 // Sync incoming clipboard items to system clipboard
                                 if (parsed.history.isNotEmpty()) {
                                     // Find all items since lastSeenLamport
