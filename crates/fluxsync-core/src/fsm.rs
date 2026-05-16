@@ -230,6 +230,19 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
         (P::Linked, E::NetworkChanged) => (P::Linked, vec![]), // Handled by socket layer roaming
         (P::Handshaking, E::NetworkChanged) => (P::Discovering, vec![A::StartDiscovery]),
 
+        // Inbound clipboard outside Linked: don't apply it, but still ack so
+        // the sender stops retransmitting. Without this it hit the fallback
+        // below and was dropped silently, causing an infinite resend loop.
+        (phase, E::FrameReceivedClipboard { hash, .. }) => (
+            phase,
+            vec![
+                A::AckItem { hash: *hash },
+                A::EmitLog(LogEntry::warn(
+                    "Clipboard frame received before link established — acked, not applied.",
+                )),
+            ],
+        ),
+
         // Fallback for all other undefined transitions.
         (phase, event) => {
             // Only warn on events that should technically change phase but aren't handled.
@@ -360,6 +373,31 @@ mod tests {
             .iter()
             .any(|x| matches!(x, A::AckItem { hash } if hash == &[2u8; 32])));
         assert!(a.contains(&A::EmitState));
+    }
+
+    /// FS-044: a clipboard frame arriving before the link is established
+    /// (e.g. in Handshaking) must still be acked so the sender stops
+    /// retransmitting. On `main` it hit the empty fallback and was dropped.
+    #[test]
+    fn non_linked_frame_received_still_acks() {
+        let ev = Event::FrameReceivedClipboard {
+            hash: [7; 32],
+            kind: Kind::Text,
+            preview: "early".into(),
+            lamport: 3,
+            sensitive: false,
+        };
+        let (p, a) = transition(Phase::Handshaking, &ev);
+        assert_eq!(p, Phase::Handshaking, "phase must not change");
+        assert!(
+            a.iter()
+                .any(|x| matches!(x, A::AckItem { hash } if hash == &[7u8; 32])),
+            "frame must be acked even outside Linked"
+        );
+        assert!(
+            !a.iter().any(|x| matches!(x, A::WriteClipboard { .. })),
+            "clipboard must not be applied outside Linked"
+        );
     }
 
     #[test]
