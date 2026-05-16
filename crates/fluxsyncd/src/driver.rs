@@ -83,23 +83,20 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DriverCmd>();
     let log_tail = Arc::new(LogTail::new());
 
-    // ── Trusted peers (in-memory; v0.1.2 persists via keychain) ────
+    // ── Trusted peers ─────────────────────────────────────────────
+    // FS-039: persistent pairing. Reload the trusted set from
+    // `peers.json` so a paired peer survives a daemon restart.
     let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
-    {
-        // [FIX] Ephemeral Pairing: By user request, we ignore any saved keys
-        // so that the QR Code pairing is required on EVERY startup.
-        // let mut g = trusted.lock().await;
-        // for static_pub in &trusted_peer_keys {
-        //     let peer_id = handshake::peer_id_for(static_pub);
-        //     g.insert(
-        //         peer_id,
-        //         TrustedPeer {
-        //             static_pub: *static_pub,
-        //             name: String::new(),
-        //         },
-        //     );
-        // }
-        tracing::info!("Persistence disabled: starting with an empty trusted peer list to force QR code pairing");
+    if let Some(dir) = keystore_dir.as_ref() {
+        let loaded = load_trusted_peers(dir);
+        let count = loaded.len();
+        {
+            let mut g = trusted.lock().await;
+            for (peer_id, peer) in loaded {
+                g.insert(peer_id, peer);
+            }
+        }
+        tracing::info!(count, "loaded trusted peers from keystore");
     }
 
     // ── Transport (always bound; session/peer_addr filled later) ───
@@ -1440,14 +1437,54 @@ async fn heartbeat_loop(
     }
 }
 
+/// Load the trusted-peer set from `peers.json` (FS-039); malformed entries are skipped with a warning.
+fn load_trusted_peers(dir: &Path) -> Vec<([u8; 32], TrustedPeer)> {
+    let stored = match crate::keystore::load_peers(dir) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read peers.json; starting with no trusted peers");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::with_capacity(stored.len());
+    for p in stored {
+        let static_pub = match decode_hex32(&p.static_pub_hex) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(error = %e, peer = %p.peer_id_hex, "skipping peers.json entry: bad static_pub");
+                continue;
+            }
+        };
+        let peer_id = handshake::peer_id_for(&static_pub);
+        out.push((
+            peer_id,
+            TrustedPeer {
+                static_pub,
+                name: p.name,
+            },
+        ));
+    }
+    out
+}
+
+/// Persist the current trusted-peer set to `peers.json` (FS-039).
 async fn save_current_peers(
-    _dir: &Path,
-    _trusted: &TrustedSet,
+    dir: &Path,
+    trusted: &TrustedSet,
     _transport: &Transport,
 ) -> Result<()> {
-    // [FIX] Ephemeral Pairing: Never save peers to disk.
-    // The user requested QR code pairing on EVERY startup.
-    Ok(())
+    let stored: Vec<crate::keystore::StoredPeer> = {
+        let g = trusted.lock().await;
+        g.iter()
+            .map(|(peer_id, peer)| crate::keystore::StoredPeer {
+                peer_id_hex: hex::encode(peer_id),
+                static_pub_hex: hex::encode(peer.static_pub),
+                name: peer.name.clone(),
+                last_addr: None,
+            })
+            .collect()
+    };
+    crate::keystore::save_peers(dir, &stored)
 }
 
 async fn dispatch_inbound_frame(
@@ -1965,4 +2002,39 @@ where
     writer.write_all(s.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_trusted_peers;
+    use crate::handshake;
+    use crate::keystore::{save_peers, StoredPeer};
+
+    /// FS-039: a peer persisted to `peers.json` must be back in the
+    /// trusted set after a restart (i.e. via the boot reload path).
+    #[test]
+    fn fs039_trusted_peer_reloads_after_restart() {
+        let dir = tempfile::tempdir().expect("create temp keystore dir");
+
+        let static_pub = [0x42u8; 32];
+        let peer_id = handshake::peer_id_for(&static_pub);
+        save_peers(
+            dir.path(),
+            &[StoredPeer {
+                peer_id_hex: hex::encode(peer_id),
+                static_pub_hex: hex::encode(static_pub),
+                name: "Galaxy S21".to_owned(),
+                last_addr: None,
+            }],
+        )
+        .expect("persist peer to peers.json");
+
+        let loaded = load_trusted_peers(dir.path());
+
+        assert_eq!(loaded.len(), 1, "the persisted peer must reload");
+        let (id, peer) = &loaded[0];
+        assert_eq!(*id, peer_id, "peer_id must round-trip");
+        assert_eq!(peer.static_pub, static_pub, "static_pub must round-trip");
+        assert_eq!(peer.name, "Galaxy S21", "name must round-trip");
+    }
 }
