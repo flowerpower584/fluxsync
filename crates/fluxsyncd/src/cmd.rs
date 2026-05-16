@@ -4,6 +4,14 @@
 use fluxsync_core::{HistoryItem, LogEntry, State};
 use serde::{Deserialize, Serialize};
 
+/// Default entry count for a `tail` request that omits `n`. Mirrors the
+/// `fluxctl tail` CLI default so a bare IPC `{"op":"tail"}` behaves the same.
+pub const DEFAULT_TAIL_N: usize = 20;
+
+fn default_tail_n() -> usize {
+    DEFAULT_TAIL_N
+}
+
 /// Opening line on every IPC connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -38,6 +46,7 @@ pub enum CmdOp {
     },
     Pull,
     Tail {
+        #[serde(default = "default_tail_n")]
         n: usize,
     },
     SetThreshold {
@@ -164,5 +173,27 @@ impl CmdResponse {
             data: None,
             err: Some(msg.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CmdOp, DEFAULT_TAIL_N};
+
+    /// FS-027: a `tail` request that omits `n` must deserialize with the
+    /// default count instead of failing — a bare `{"op":"tail"}` from a
+    /// third-party IPC client should not be a hard error.
+    #[test]
+    fn fs027_tail_op_defaults_n_when_omitted() {
+        let op: CmdOp =
+            serde_json::from_str(r#"{"op":"tail"}"#).expect("tail without n must deserialize");
+        match op {
+            CmdOp::Tail { n } => assert_eq!(n, DEFAULT_TAIL_N),
+            other => panic!("expected Tail, got {other:?}"),
+        }
+
+        let op: CmdOp = serde_json::from_str(r#"{"op":"tail","n":5}"#)
+            .expect("explicit n must still deserialize");
+        assert!(matches!(op, CmdOp::Tail { n: 5 }), "explicit n must win");
     }
 }
