@@ -4,9 +4,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -70,6 +75,17 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
 
     val start = Routes.LINKED
 
+    // FS-018: surface transient FFI/daemon errors as a dismissible
+    // Snackbar. SnackbarDuration.Short auto-dismisses after ~4s; clear the
+    // flow afterwards so the same message can fire again later.
+    val transientError by vm.transientError.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(transientError) {
+        val msg = transientError ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(msg, duration = SnackbarDuration.Short)
+        vm.clearTransientError()
+    }
+
     // Auto-advance to the Linked screen when a peer appears. A peer
     // dropping never triggers navigation — the user keeps their screen.
     androidx.compose.runtime.LaunchedEffect(state?.peerName) {
@@ -83,6 +99,7 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
         }
     }
 
+    Box(Modifier.fillMaxSize()) {
     NavHost(navController = nav, startDestination = start) {
         composable(Routes.PAIR_DASHBOARD) {
             PairingDashboardScreen(
@@ -115,5 +132,10 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
                 }
             )
         }
+    }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
     }
 }

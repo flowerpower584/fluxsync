@@ -62,43 +62,46 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun getHandle(): FluxsyncHandle? = FluxsyncManager.getHandle()
 
-    fun toggle(on: Boolean) {
+    /** Transient FFI/daemon error, surfaced as a Snackbar by FluxsyncApp. */
+    val transientError: StateFlow<String?> = FluxsyncManager.lastError
+
+    fun clearTransientError() = FluxsyncManager.clearError()
+
+    /**
+     * FS-018: run a fire-and-forget FFI call with a user-visible error
+     * path. A missing handle or a thrown exception reports to
+     * [FluxsyncManager.reportError] instead of failing silently.
+     */
+    private fun ffi(action: String, block: (FluxsyncHandle) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
-            getHandle()?.toggle(on)
+            val h = getHandle()
+            if (h == null) {
+                FluxsyncManager.reportError("$action failed: daemon not running")
+                return@launch
+            }
+            try {
+                block(h)
+            } catch (e: Exception) {
+                FluxsyncManager.reportError("$action failed: ${e.message}")
+            }
         }
     }
+
+    fun toggle(on: Boolean) = ffi("Toggle") { it.toggle(on) }
 
     fun toggleSync(on: Boolean) = toggle(on) // Legacy alias
 
-    fun pushText(text: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            getHandle()?.pushText(text)
-        }
-    }
+    fun pushText(text: String) = ffi("Send clipboard") { it.pushText(text) }
 
-    fun setBatteryThreshold(threshold: UByte) {
-        viewModelScope.launch(Dispatchers.IO) {
-            getHandle()?.setBatteryThreshold(threshold.toShort().toUByte())
-        }
-    }
+    fun setBatteryThreshold(threshold: UByte) =
+        ffi("Set battery threshold") { it.setBatteryThreshold(threshold.toShort().toUByte()) }
 
-    fun setSelfBattery(level: UByte, charging: Boolean) {
-        viewModelScope.launch(Dispatchers.IO) {
-            getHandle()?.setSelfBattery(level.toShort().toUByte(), charging)
-        }
-    }
+    fun setSelfBattery(level: UByte, charging: Boolean) =
+        ffi("Battery update") { it.setSelfBattery(level.toShort().toUByte(), charging) }
 
-    fun setChargeOverride(on: Boolean) {
-        viewModelScope.launch(Dispatchers.IO) {
-            getHandle()?.setChargeOverride(on)
-        }
-    }
+    fun setChargeOverride(on: Boolean) = ffi("Set charge override") { it.setChargeOverride(on) }
 
-    fun unpair() {
-        viewModelScope.launch(Dispatchers.IO) {
-            getHandle()?.unpair()
-        }
-    }
+    fun unpair() = ffi("Unpair") { it.unpair() }
 
     suspend fun pairShow(): String? = withContext(Dispatchers.IO) {
         try {
@@ -114,17 +117,11 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun pairFromUri(uri: String, name: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            getHandle()?.pairFromUri(uri, name)
-        }
-    }
+    fun pairFromUri(uri: String, name: String) =
+        ffi("Pair") { it.pairFromUri(uri, name) }
 
-    fun pairAccept(pubkeyB32: String, name: String, addr: String = "") {
-        viewModelScope.launch(Dispatchers.IO) {
-            getHandle()?.pairAccept(pubkeyB32, name, addr)
-        }
-    }
+    fun pairAccept(pubkeyB32: String, name: String, addr: String = "") =
+        ffi("Accept pairing") { it.pairAccept(pubkeyB32, name, addr) }
 
     fun checkAccessibility() {
         val app = getApplication<Application>()

@@ -299,6 +299,7 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                     android.util.Log.i("FluxSync", "Pushed text to daemon: ${text.take(30)}...")
                 } catch (e: Exception) {
                     android.util.Log.e("FluxSync", "FFI push error: ${e.message}")
+                    FluxsyncManager.reportError("Clipboard sync failed: ${e.message}")
                 }
             } ?: run {
                 android.util.Log.w("FluxSync", "Push failed: daemon handle is null")

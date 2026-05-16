@@ -1,6 +1,7 @@
 package sn.kaolack.fluxsync
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import sn.kaolack.fluxsync.vm.LogEntryView
@@ -80,5 +81,27 @@ class FluxsyncManagerTest {
         done.await()
 
         assertEquals(count.toLong(), FluxsyncManager.logCursor)
+    }
+
+    /**
+     * FS-018: reportError publishes a transient error for the Snackbar,
+     * clearError dismisses it, and resetForTesting wipes it.
+     */
+    @Test
+    fun reportAndClearTransientError() {
+        assertNull("starts clean", FluxsyncManager.lastError.value)
+
+        FluxsyncManager.reportError("Toggle failed: daemon not running")
+        assertEquals(
+            "Toggle failed: daemon not running",
+            FluxsyncManager.lastError.value,
+        )
+
+        FluxsyncManager.clearError()
+        assertNull("clearError dismisses", FluxsyncManager.lastError.value)
+
+        FluxsyncManager.reportError("again")
+        FluxsyncManager.resetForTesting()
+        assertNull("resetForTesting wipes", FluxsyncManager.lastError.value)
     }
 }

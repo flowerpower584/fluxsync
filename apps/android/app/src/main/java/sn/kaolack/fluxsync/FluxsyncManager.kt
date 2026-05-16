@@ -35,6 +35,22 @@ object FluxsyncManager {
     @Volatile
     var lastPeerClipText: String = ""
 
+    /**
+     * FS-018: last transient FFI/daemon error, surfaced to the user as a
+     * Snackbar by FluxsyncApp. Distinct from the ViewModel's fatal `error`
+     * flow — this one is dismissible and auto-clears after display.
+     */
+    private val _lastError = MutableStateFlow<String?>(null)
+    val lastError = _lastError.asStateFlow()
+
+    fun reportError(msg: String) {
+        _lastError.value = msg
+    }
+
+    fun clearError() {
+        _lastError.value = null
+    }
+
     fun setHandle(h: FluxsyncHandle?) {
         synchronized(handleLock) {
             handle = h
@@ -82,6 +98,7 @@ object FluxsyncManager {
         _state.value = null
         _logs.value = emptyList()
         _logCursor.set(0L)
+        _lastError.value = null
         lastPeerClipText = ""
     }
 }
