@@ -578,7 +578,7 @@ async fn dispatch(
                 // ping-pong the same item back to the peer. The mark is
                 // also harmless on Android (the watcher isn't spawned
                 // there), so we update it unconditionally.
-                let hash = DedupRing::hash(preview.as_bytes());
+                let hash = clipboard_dedup_hash(&preview);
                 let mut g = last_written_hashes.lock().await;
                 g.push_back(hash);
                 if g.len() > 10 {
@@ -1285,6 +1285,12 @@ async fn transport_recv_loop(
 // Clipboard watcher (read side)
 // ─────────────────────────────────────────────────────────────────
 
+/// Dedup hash over the *trimmed* clipboard text, so the write side and
+/// the watcher (which trims before hashing) agree — see FS-026.
+fn clipboard_dedup_hash(text: &str) -> [u8; 32] {
+    DedupRing::hash(text.trim().as_bytes())
+}
+
 /// Polls the OS clipboard every 200ms and forwards new payloads through
 /// the same `DriverCmd::Run { op: Push }` path the IPC `push` op uses.
 /// Routing through the cmd channel (instead of firing
@@ -1336,7 +1342,7 @@ async fn clipboard_watcher_loop(
                         arboard::Clipboard::new().and_then(|mut cb| cb.get_text())
                     }).await;
                     if let Ok(Ok(raw_text)) = text_res {
-                        last_seen_hash = Some(DedupRing::hash(raw_text.as_bytes()));
+                        last_seen_hash = Some(clipboard_dedup_hash(&raw_text));
                         tracing::debug!("Clipboard watcher seeded for new session");
                     }
                 }
@@ -1349,7 +1355,7 @@ async fn clipboard_watcher_loop(
                 if text.is_empty() {
                     continue;
                 }
-                let hash = DedupRing::hash(text.as_bytes());
+                let hash = clipboard_dedup_hash(&raw_text);
                 if last_seen_hash == Some(hash) {
                     continue;
                 }
@@ -2049,6 +2055,30 @@ mod tests {
         assert_eq!(*id, peer_id, "peer_id must round-trip");
         assert_eq!(peer.static_pub, static_pub, "static_pub must round-trip");
         assert_eq!(peer.name, "Galaxy S21", "name must round-trip");
+    }
+
+    /// FS-026: the write side records `clipboard_dedup_hash(preview)` and
+    /// the watcher looks up `clipboard_dedup_hash(raw_text)`. A payload that
+    /// only differs by surrounding whitespace must hash equal, or a peer
+    /// item with a trailing newline echoes straight back to the sender.
+    #[test]
+    fn fs026_clipboard_dedup_hash_is_trim_symmetric() {
+        use super::clipboard_dedup_hash;
+        assert_eq!(
+            clipboard_dedup_hash("hello\n"),
+            clipboard_dedup_hash("hello"),
+            "trailing newline must not change the dedup hash",
+        );
+        assert_eq!(
+            clipboard_dedup_hash("  hello  "),
+            clipboard_dedup_hash("hello"),
+            "surrounding spaces must not change the dedup hash",
+        );
+        assert_ne!(
+            clipboard_dedup_hash("hello"),
+            clipboard_dedup_hash("world"),
+            "distinct payloads must still hash differently",
+        );
     }
 
     /// FS-041: an inbound `Msg::Bye` must emit `Event::PeerLost` so the FSM
