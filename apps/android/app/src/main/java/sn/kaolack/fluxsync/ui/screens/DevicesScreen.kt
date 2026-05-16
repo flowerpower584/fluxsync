@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import sn.kaolack.fluxsync.ui.components.BatteryGlyph
+import sn.kaolack.fluxsync.ui.components.LoadingState
 import sn.kaolack.fluxsync.ui.components.SectionLabel
 import sn.kaolack.fluxsync.ui.components.StatusDot
 import sn.kaolack.fluxsync.ui.theme.*
@@ -35,7 +36,11 @@ import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    val s = state ?: return
+    val s = state
+    if (s == null) {
+        LoadingState()
+        return
+    }
 
     // Currently the daemon only reports 1 peer. We'll wrap it in a list to match spec.
     val devices = if (s.peerName.isNotEmpty()) listOf(s) else emptyList()

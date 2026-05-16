@@ -19,6 +19,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import sn.kaolack.fluxsync.ui.Routes
+import sn.kaolack.fluxsync.ui.components.LoadingState
 import sn.kaolack.fluxsync.ui.theme.*
 import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
@@ -30,7 +31,11 @@ import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
     val innerNav = rememberNavController()
     val state by vm.state.collectAsStateWithLifecycle()
-    val s = state ?: return
+    val s = state
+    if (s == null) {
+        LoadingState()
+        return
+    }
 
     val navBackStackEntry by innerNav.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route ?: Routes.HOME
