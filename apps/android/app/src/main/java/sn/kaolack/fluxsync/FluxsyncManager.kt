@@ -5,6 +5,7 @@ import sn.kaolack.fluxsync.vm.LogEntryView
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import java.util.concurrent.atomic.AtomicLong
 
 object FluxsyncManager {
     private const val LOG_VIEW_CAP = 200
@@ -19,10 +20,13 @@ object FluxsyncManager {
 
     /**
      * Highest log seq the polling loop has merged so far. Stored as the
-     * cursor for the next `FluxsyncHandle.pollLogs` call.
+     * cursor for the next `FluxsyncHandle.pollLogs` call. Backed by an
+     * AtomicLong: the merge in [appendLogs] is a read-modify-write, so a
+     * plain @Volatile field could lose a concurrent update and let the
+     * cursor regress, causing already-seen entries to be re-delivered.
      */
-    @Volatile
-    var logCursor: Long = 0L
+    private val _logCursor = AtomicLong(0L)
+    val logCursor: Long get() = _logCursor.get()
 
     /**
      * Text most recently written to the system clipboard BY US (from peer).
@@ -69,6 +73,15 @@ object FluxsyncManager {
             val merged = prev + entries
             if (merged.size > LOG_VIEW_CAP) merged.takeLast(LOG_VIEW_CAP) else merged
         }
-        logCursor = entries.maxOf { it.seq }.coerceAtLeast(logCursor)
+        val maxSeq = entries.maxOf { it.seq }
+        _logCursor.accumulateAndGet(maxSeq) { current, candidate -> maxOf(current, candidate) }
+    }
+
+    /** Reset all mutable state. Test-only — this is a process-wide singleton. */
+    internal fun resetForTesting() {
+        _state.value = null
+        _logs.value = emptyList()
+        _logCursor.set(0L)
+        lastPeerClipText = ""
     }
 }
