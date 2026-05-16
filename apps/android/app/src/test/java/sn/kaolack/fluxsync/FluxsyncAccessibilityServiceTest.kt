@@ -37,6 +37,24 @@ class FluxsyncAccessibilityServiceTest {
         assertTrue("a prompt stop must report success", ok)
     }
 
+    // FS-019: the peer name sent to the daemon must be human-readable —
+    // manufacturer-prefixed, never a bare Build.MODEL code.
+
+    @Test
+    fun peerNamePrefixesAndCapitalisesTheManufacturer() {
+        assertEquals(
+            "Samsung SM-G998B",
+            FluxsyncAccessibilityService.formatPeerName("samsung", "SM-G998B"),
+        )
+    }
+
+    @Test
+    fun peerNameFallsBackWhenBuildFieldsAreMissing() {
+        assertEquals("Android", FluxsyncAccessibilityService.formatPeerName(null, null))
+        assertEquals("Android", FluxsyncAccessibilityService.formatPeerName("", "  "))
+        assertEquals("Pixel 8", FluxsyncAccessibilityService.formatPeerName("", "Pixel 8"))
+    }
+
     @Test
     fun stopWithinTimeoutBoundsAWedgedStop() = runBlocking {
         val started = System.currentTimeMillis()

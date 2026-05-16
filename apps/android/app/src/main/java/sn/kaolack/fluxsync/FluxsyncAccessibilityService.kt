@@ -97,7 +97,7 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                 val ipc = File(filesDir, "fluxsync.sock").absolutePath
                 val keystore = filesDir.absolutePath
                 val h = FluxsyncHandle.start(
-                    peerName = Build.MODEL ?: "Android",
+                    peerName = formatPeerName(Build.MANUFACTURER, Build.MODEL),
                     ipcPath = ipc,
                     keystoreDir = keystore,
                     udpPort = 0.toUShort(),
@@ -319,6 +319,20 @@ class FluxsyncAccessibilityService : AccessibilityService() {
          */
         @JvmStatic
         fun pollIntervalMs(active: Boolean): Long = if (active) 200L else 2000L
+
+        /**
+         * FS-019: human-readable peer name from the device build fields.
+         * `Build.MODEL` alone is a cryptic code ("SM-G998B"); prefixing the
+         * manufacturer ("Samsung SM-G998B") makes it recognisable on the
+         * paired Mac. Falls back to "Android" when both fields are missing.
+         */
+        @JvmStatic
+        fun formatPeerName(manufacturer: String?, model: String?): String {
+            val brand = manufacturer.orEmpty().trim()
+                .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+            val name = "$brand ${model.orEmpty().trim()}".trim()
+            return name.ifEmpty { "Android" }
+        }
 
         /** FS-013: upper bound for the blocking daemon stop in onDestroy. */
         private const val STOP_TIMEOUT_MS = 2000L
