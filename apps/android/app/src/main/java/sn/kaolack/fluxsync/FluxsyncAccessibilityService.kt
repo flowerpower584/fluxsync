@@ -155,9 +155,10 @@ class FluxsyncAccessibilityService : AccessibilityService() {
 
                                     // Process from oldest to newest (bottom up) to preserve order
                                     for (item in newItems.reversed()) {
-                                        // Only sync if we've already established a baseline lamport
-                                        // AND the item came from a remote peer.
-                                        if (lastSeenLamport > 0 && item.source == "remote") {
+                                        // Sync every remote item, including the first
+                                        // after a restart. Dedup is handled by
+                                        // lastPeerClipText + MainActivity's clipListener.
+                                        if (item.source == "remote") {
                                             syncToSystemClipboard(item.preview)
                                         }
                                     }
@@ -192,7 +193,7 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                 } catch (e: Exception) {
                     android.util.Log.w("FluxSync", "Poll error: ${e.message}")
                 }
-                delay(500)
+                delay(200)
             }
         }
     }
