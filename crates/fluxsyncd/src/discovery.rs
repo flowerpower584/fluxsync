@@ -119,6 +119,13 @@ where
     }
 }
 
+/// True for a well-formed 32-byte hex identifier (64 ASCII hex chars).
+/// Rejects wrong-length, non-hex, empty and whitespace-only strings.
+#[must_use]
+fn is_valid_hex_id(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 async fn browse_loop(
     receiver: mdns_sd::Receiver<ServiceEvent>,
     self_peer_id: String,
@@ -136,7 +143,9 @@ async fn browse_loop(
                         let props = info.get_properties();
                         let Some(peer_id) = props.get_property_val_str("peer_id") else { continue };
                         if peer_id == self_peer_id { continue; }
+                        if !is_valid_hex_id(peer_id) { continue; }
                         let Some(static_pub) = props.get_property_val_str("static_pub") else { continue };
+                        if !is_valid_hex_id(static_pub) { continue; }
                         let addr = info.get_addresses().iter().next().copied();
                         let Some(ip) = addr else { continue };
                         let port = info.get_port();
@@ -165,7 +174,7 @@ async fn browse_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{supervise, DISCOVERY_RETRY};
+    use super::{is_valid_hex_id, supervise, DISCOVERY_RETRY};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -202,5 +211,16 @@ mod tests {
         // No further attempt once shutdown has fired.
         tokio::time::sleep(Duration::from_secs(20)).await;
         assert_eq!(count.load(Ordering::SeqCst), after_cancel);
+    }
+
+    #[test]
+    fn fs037_hex_id_validation() {
+        assert!(is_valid_hex_id(&"a".repeat(64)));
+        assert!(is_valid_hex_id(&"0123456789abcdef".repeat(4)));
+        assert!(!is_valid_hex_id("garbage"));
+        assert!(!is_valid_hex_id(""));
+        assert!(!is_valid_hex_id(&"a".repeat(63)));
+        assert!(!is_valid_hex_id(&format!("{}g", "a".repeat(63))));
+        assert!(!is_valid_hex_id(&" ".repeat(64)));
     }
 }
