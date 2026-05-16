@@ -20,6 +20,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import sn.kaolack.fluxsync.ui.Routes
 import sn.kaolack.fluxsync.ui.components.LoadingState
+import sn.kaolack.fluxsync.ui.components.TabIcon
 import sn.kaolack.fluxsync.ui.theme.*
 import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
@@ -159,11 +160,9 @@ private fun BottomNav(currentRoute: String, onNavigate: (String) -> Unit) {
                     selected = active,
                     onClick = { onNavigate(tab.id) },
                     icon = {
-                        // Custom icon rendering matching the spec's wireframes
-                        Box(
-                            Modifier
-                                .size(18.dp)
-                                .border(width = 1.2.dp, color = if (active) FsCrit else FsDarkMuted, shape = RoundedCornerShape(2.dp))
+                        TabIcon(
+                            id = tab.icon,
+                            color = if (active) FsCrit else FsDarkMuted,
                         )
                     },
                     label = {
