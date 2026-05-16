@@ -16,10 +16,14 @@ use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub const SERVICE_TYPE: &str = "_fluxsync._udp.local.";
+
+/// Delay between discovery browse attempts after a failure or exit.
+pub const DISCOVERY_RETRY: Duration = Duration::from_secs(2);
 
 /// What discovery emits to the driver. The driver decides whether the
 /// peer is trusted; discovery just reports what it sees.
@@ -66,17 +70,53 @@ pub fn start(
 
     daemon.register(info).context("mdns register")?;
 
-    let receiver = daemon.browse(SERVICE_TYPE).context("mdns browse")?;
     let self_peer_id = peer_id_hex.to_string();
     let daemon_for_loop = daemon.clone();
     tokio::spawn(async move {
-        if let Err(e) = browse_loop(receiver, self_peer_id, tx, shutdown).await {
-            tracing::warn!(error = %e, "discovery browse loop exited");
-        }
+        supervise(shutdown.clone(), DISCOVERY_RETRY, || {
+            let daemon = daemon_for_loop.clone();
+            let self_peer_id = self_peer_id.clone();
+            let tx = tx.clone();
+            let shutdown = shutdown.clone();
+            async move {
+                match daemon.browse(SERVICE_TYPE) {
+                    Ok(receiver) => {
+                        if let Err(e) = browse_loop(receiver, self_peer_id, tx, shutdown).await {
+                            tracing::warn!(error = %e, "discovery browse loop exited, retrying");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "mdns browse failed, retrying");
+                    }
+                }
+            }
+        })
+        .await;
         let _ = daemon_for_loop.shutdown();
     });
 
     Ok(daemon)
+}
+
+/// Run `attempt` repeatedly, sleeping `retry` between runs, until
+/// `shutdown` fires. No new attempt is started once shutdown is
+/// cancelled — checked both before each run and via the sleep `select!`.
+async fn supervise<F, Fut>(shutdown: CancellationToken, retry: Duration, mut attempt: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    loop {
+        if shutdown.is_cancelled() {
+            return;
+        }
+        attempt().await;
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep(retry) => {}
+        }
+    }
 }
 
 async fn browse_loop(
@@ -120,5 +160,47 @@ async fn browse_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{supervise, DISCOVERY_RETRY};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test(start_paused = true)]
+    async fn fs036_supervise_retries_until_shutdown() {
+        let token = CancellationToken::new();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let task = {
+            let token = token.clone();
+            let count = count.clone();
+            tokio::spawn(async move {
+                supervise(token, DISCOVERY_RETRY, || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+                .await;
+            })
+        };
+
+        // Attempts fire at t0, t2, t4, t6 (DISCOVERY_RETRY = 2s).
+        tokio::time::sleep(Duration::from_secs(7)).await;
+        let during = count.load(Ordering::SeqCst);
+        assert!(during >= 3, "expected >=3 retries, got {during}");
+
+        token.cancel();
+        task.await.unwrap();
+        let after_cancel = count.load(Ordering::SeqCst);
+
+        // No further attempt once shutdown has fired.
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        assert_eq!(count.load(Ordering::SeqCst), after_cancel);
     }
 }
