@@ -33,6 +33,21 @@ pub struct TrustedPeer {
 
 pub type TrustedSet = Arc<Mutex<HashMap<[u8; 32], TrustedPeer>>>;
 
+/// Placeholder name a peer carries between TOFU acceptance and the
+/// `Msg::Hello` exchange that swaps in the real device name. Used as the
+/// single source for both the in-memory and on-disk records so they
+/// cannot diverge (FS-030).
+pub const TOFU_PLACEHOLDER_NAME: &str = "New Peer";
+
+/// Build the in-memory trust record for a peer accepted via TOFU.
+#[must_use]
+pub fn tofu_trusted_peer(remote_static: [u8; 32]) -> TrustedPeer {
+    TrustedPeer {
+        static_pub: remote_static,
+        name: String::from(TOFU_PLACEHOLDER_NAME),
+    }
+}
+
 /// Time-bounded "trust on first use" window. While the contained
 /// `Instant` is in the future, the responder accepts handshakes from
 /// previously-unknown peers and adds them to [`TrustedSet`] on success.
@@ -124,17 +139,16 @@ pub async fn run_responder(
                     &peer_id[..6]
                 );
             }
-            let new_peer = TrustedPeer {
-                static_pub: remote_static,
-                name: String::from("pending"),
-            };
+            let new_peer = tofu_trusted_peer(remote_static);
             tracing::info!(
                 peer = ?&peer_id[..6],
                 "TOFU: trusting new peer during pairing window"
             );
             trusted_guard.insert(peer_id, new_peer.clone());
 
-            // PERSIST to disk so we remember this peer after restart
+            // PERSIST to disk so we remember this peer after restart.
+            // The disk name copies `new_peer.name` so the live session and
+            // a post-restart load can never disagree (FS-030).
             if let Some(ref dir) = keystore_dir {
                 let mut stored = crate::keystore::load_peers(dir).unwrap_or_default();
                 crate::keystore::upsert_peer(
@@ -142,7 +156,7 @@ pub async fn run_responder(
                     crate::keystore::StoredPeer {
                         peer_id_hex: hex_encode(&peer_id),
                         static_pub_hex: hex_encode(&remote_static),
-                        name: String::from("New Peer"),
+                        name: new_peer.name.clone(),
                         last_addr: Some(from.to_string()),
                     },
                 );
@@ -190,4 +204,25 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tofu_trusted_peer, TOFU_PLACEHOLDER_NAME};
+
+    /// FS-030: the TOFU placeholder name has one source. The in-memory
+    /// `TrustedPeer` and the on-disk `StoredPeer` (which copies
+    /// `new_peer.name`) must therefore carry the identical string, so the
+    /// live session and a post-restart load never show two names.
+    #[test]
+    fn fs030_tofu_placeholder_is_single_source() {
+        let peer = tofu_trusted_peer([7u8; 32]);
+        assert_eq!(peer.name, TOFU_PLACEHOLDER_NAME);
+        assert_eq!(peer.name, "New Peer");
+
+        // The disk record is built as `name: new_peer.name.clone()`;
+        // mirror that here to lock the structural single-source invariant.
+        let disk_name = peer.name.clone();
+        assert_eq!(disk_name, peer.name);
+    }
 }

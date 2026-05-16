@@ -610,7 +610,7 @@ async fn dispatch(
                 // transition. Take advantage of that to swap friendly
                 // names: the Noise handshake only carries static pubkeys,
                 // so without this the responder shows the TOFU placeholder
-                // ("pending") instead of the peer's real device name.
+                // ("New Peer") instead of the peer's real device name.
                 let name = app.config().peer_name_self.clone();
                 let frame = Frame {
                     version: PROTOCOL_VERSION,
