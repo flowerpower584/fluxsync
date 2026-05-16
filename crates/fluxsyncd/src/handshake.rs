@@ -137,13 +137,18 @@ pub async fn run_responder(
             // PERSIST to disk so we remember this peer after restart
             if let Some(ref dir) = keystore_dir {
                 let mut stored = crate::keystore::load_peers(dir).unwrap_or_default();
-                stored.push(crate::keystore::StoredPeer {
-                    peer_id_hex: hex_encode(&peer_id),
-                    static_pub_hex: hex_encode(&remote_static),
-                    name: String::from("New Peer"),
-                    last_addr: Some(from.to_string()),
-                });
-                let _ = crate::keystore::save_peers(dir, &stored);
+                crate::keystore::upsert_peer(
+                    &mut stored,
+                    crate::keystore::StoredPeer {
+                        peer_id_hex: hex_encode(&peer_id),
+                        static_pub_hex: hex_encode(&remote_static),
+                        name: String::from("New Peer"),
+                        last_addr: Some(from.to_string()),
+                    },
+                );
+                if let Err(e) = crate::keystore::save_peers(dir, &stored) {
+                    tracing::warn!(error = %e, "failed to persist trusted peer to peers.json");
+                }
             }
 
             new_peer

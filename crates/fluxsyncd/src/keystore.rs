@@ -177,9 +177,17 @@ pub fn save_peers(dir: &Path, peers: &[StoredPeer]) -> Result<()> {
     Ok(())
 }
 
+/// Insert `new` into `peers`, replacing any existing entry with the same
+/// `peer_id_hex`. Last-write-wins: callers that re-pair a known peer get a
+/// refreshed entry instead of a duplicate.
+pub fn upsert_peer(peers: &mut Vec<StoredPeer>, new: StoredPeer) {
+    peers.retain(|p| p.peer_id_hex != new.peer_id_hex);
+    peers.push(new);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{load_peers, save_peers, StoredPeer, PEERS_FILE};
+    use super::{load_peers, save_peers, upsert_peer, StoredPeer, PEERS_FILE};
 
     fn peer(name: &str) -> StoredPeer {
         StoredPeer {
@@ -208,5 +216,41 @@ mod tests {
 
         let tmp = dir.path().join(PEERS_FILE).with_extension("json.tmp");
         assert!(!tmp.exists(), "the .tmp file must not survive the rename");
+    }
+
+    /// FS-029: `upsert_peer` must dedup by `peer_id_hex` (last-write-wins)
+    /// so re-pairing a known peer cannot append a duplicate to peers.json.
+    #[test]
+    fn fs029_upsert_peer_dedups_by_peer_id() {
+        let mut peers: Vec<StoredPeer> = Vec::new();
+
+        for i in 0..10 {
+            upsert_peer(
+                &mut peers,
+                StoredPeer {
+                    peer_id_hex: "aa".repeat(32),
+                    static_pub_hex: "bb".repeat(32),
+                    name: "Galaxy S21".to_owned(),
+                    last_addr: Some(format!("10.0.0.{i}:41889")),
+                },
+            );
+        }
+        assert_eq!(peers.len(), 1, "same peer_id must collapse to one entry");
+        assert_eq!(
+            peers[0].last_addr.as_deref(),
+            Some("10.0.0.9:41889"),
+            "the freshest upsert must win"
+        );
+
+        upsert_peer(
+            &mut peers,
+            StoredPeer {
+                peer_id_hex: "cc".repeat(32),
+                static_pub_hex: "dd".repeat(32),
+                name: "MacBook".to_owned(),
+                last_addr: None,
+            },
+        );
+        assert_eq!(peers.len(), 2, "a distinct peer_id must be a new entry");
     }
 }
