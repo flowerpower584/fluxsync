@@ -13,13 +13,11 @@ use serde_json::Value;
 
 const BOX_W: usize = 60;
 
+#[allow(clippy::too_many_lines)]
 pub fn render_status(v: &Value) {
-    let data = match v.get("data") {
-        Some(d) => d,
-        None => {
-            render_err(v, "status");
-            return;
-        }
+    let Some(data) = v.get("data") else {
+        render_err(v, "status");
+        return;
     };
     let on = data.get("on").and_then(Value::as_bool).unwrap_or(false);
     let status = data.get("status").and_then(Value::as_str).unwrap_or("?");
@@ -53,8 +51,7 @@ pub fn render_status(v: &Value) {
     let history_count = data
         .get("history")
         .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0);
+        .map_or(0, Vec::len);
 
     let title = format!(" FluxSync v{version} · {cipher} ");
     let bar = "─".repeat(BOX_W);
@@ -147,12 +144,9 @@ pub fn render_status(v: &Value) {
 }
 
 pub fn render_peers(v: &Value) {
-    let arr = match v.get("data").and_then(Value::as_array) {
-        Some(a) => a,
-        None => {
-            render_err(v, "peers");
-            return;
-        }
+    let Some(arr) = v.get("data").and_then(Value::as_array) else {
+        render_err(v, "peers");
+        return;
     };
     if arr.is_empty() {
         println!("{} no paired peers yet.", "·".bright_black());
@@ -205,12 +199,9 @@ pub fn render_peers(v: &Value) {
 }
 
 pub fn render_tail(v: &Value) {
-    let arr = match v.get("data").and_then(Value::as_array) {
-        Some(a) => a,
-        None => {
-            render_err(v, "tail");
-            return;
-        }
+    let Some(arr) = v.get("data").and_then(Value::as_array) else {
+        render_err(v, "tail");
+        return;
     };
     if arr.is_empty() {
         println!("{}", "(no log entries)".bright_black());
@@ -221,11 +212,11 @@ pub fn render_tail(v: &Value) {
         let msg = entry.get("msg").and_then(Value::as_str).unwrap_or("");
         let ts = entry.get("ts").and_then(Value::as_str).unwrap_or("");
         let level_str = match level {
-            "ERROR" => format!("{:<5}", level).red().bold().to_string(),
-            "WARN" => format!("{:<5}", level).yellow().bold().to_string(),
-            "INFO" => format!("{:<5}", level).cyan().to_string(),
-            "DEBUG" => format!("{:<5}", level).bright_black().to_string(),
-            _ => format!("{:<5}", level).white().to_string(),
+            "ERROR" => format!("{level:<5}").red().bold().to_string(),
+            "WARN" => format!("{level:<5}").yellow().bold().to_string(),
+            "INFO" => format!("{level:<5}").cyan().to_string(),
+            "DEBUG" => format!("{level:<5}").bright_black().to_string(),
+            _ => format!("{level:<5}").white().to_string(),
         };
         if ts.is_empty() {
             println!("{level_str}  {msg}");

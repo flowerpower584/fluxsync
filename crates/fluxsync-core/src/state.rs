@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// that shape — every current client now reads snake_case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::struct_excessive_bools)] // Wire DTO: field shape is fixed by the macOS/Android IPC consumers.
 pub struct State {
     pub phase: String,
     pub on: bool,

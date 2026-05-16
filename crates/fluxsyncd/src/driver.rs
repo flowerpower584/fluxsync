@@ -291,7 +291,9 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
     // `MainActivity` registers a `ClipboardManager` listener instead
     // and pushes via the FFI's `push_text`.
     #[cfg(not(target_os = "android"))]
-    if !disable_clipboard {
+    if disable_clipboard {
+        tracing::info!(disable_clipboard, "Clipboard watcher disabled by config");
+    } else {
         tracing::info!("Spawning clipboard watcher task");
         let cmd_tx = cmd_tx.clone();
         let transport = transport.clone();
@@ -305,8 +307,6 @@ pub async fn run(cfg: DaemonConfig, shutdown: Arc<Notify>) -> Result<()> {
             }
             Ok(())
         });
-    } else {
-        tracing::info!(disable_clipboard, "Clipboard watcher disabled by config");
     }
 
     // Pairing Watchdog.
@@ -437,6 +437,7 @@ enum DriverCmd {
 // Action dispatch
 // ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
 async fn dispatch(
     actions: Vec<Action>,
     app: &mut App,
@@ -506,7 +507,7 @@ async fn dispatch(
                         match transport.send_encrypted(&bytes).await {
                             Ok(()) => tracing::info!("SendItem: send_encrypted OK"),
                             Err(e) => {
-                                tracing::error!(error = %e, "SendItem: send_encrypted FAILED")
+                                tracing::error!(error = %e, "SendItem: send_encrypted FAILED");
                             }
                         }
                     } else {
@@ -1162,6 +1163,7 @@ fn peer_entry(state: &State, addr: Option<SocketAddr>) -> Option<PeerEntry> {
 // Transport receive loop — type-byte dispatch
 // ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn transport_recv_loop(
     transport: Arc<Transport>,
     identity: Identity,
@@ -1523,7 +1525,7 @@ async fn dispatch_inbound_frame(
         Msg::Chunk(c) => {
             // [REMEDIATION] DoS Protection: Limit chunk count and concurrent reassemblies.
             // Using MAX_CHUNKS (256) instead of magic 1000 for consistency.
-            if c.total > fluxsync_proto::MAX_CHUNKS as u16 || c.total == 0 {
+            if c.total > fluxsync_proto::MAX_CHUNKS || c.total == 0 {
                 tracing::warn!(total=%c.total, "Rejecting Chunk: invalid total (DoS protection)");
                 return;
             }
@@ -1557,8 +1559,10 @@ async fn dispatch_inbound_frame(
             }
 
             // Check if complete
-            if r.metadata.is_some() && r.chunks.iter().all(|x| x.is_some()) {
-                let (lamport, kind, sensitive) = r.metadata.unwrap();
+            if let Some((lamport, kind, sensitive)) = r
+                .metadata
+                .filter(|_| r.chunks.iter().all(std::option::Option::is_some))
+            {
                 let mut full_payload = Vec::new();
                 for chunk in r.chunks.drain(..) {
                     full_payload.extend(chunk.unwrap());
@@ -1659,7 +1663,7 @@ async fn discovery_dispatcher(
                             let history = transport.roaming_history.lock().await.clone();
                             for h_addr in history {
                                 let id_clone = identity.clone();
-                                let static_pub = peer.static_pub.clone();
+                                let static_pub = peer.static_pub;
                                 let peer_id_clone = id;
                                 let peer_name = peer.name.clone();
                                 let transport_clone = transport.clone();

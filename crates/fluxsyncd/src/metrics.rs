@@ -7,7 +7,14 @@ pub struct MetricsTracker {
     last_heartbeat_sent: Option<Instant>,
 }
 
+impl Default for MetricsTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricsTracker {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             metrics: ConnectionMetrics {
@@ -63,7 +70,7 @@ impl MetricsTracker {
 
     pub fn on_ack_received(&mut self) {
         if let Some(sent) = self.last_heartbeat_sent.take() {
-            let rtt_ms = sent.elapsed().as_millis() as u32;
+            let rtt_ms = u32::try_from(sent.elapsed().as_millis()).unwrap_or(u32::MAX);
             self.metrics.last_rtt_ms = rtt_ms;
             // Simple smoothing for p99
             if self.metrics.rtt_p99_ms == 0 {

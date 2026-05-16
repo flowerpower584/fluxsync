@@ -91,6 +91,7 @@ pub async fn run_initiator(
 ///    `peer_name` is recorded as `"pending"` because the responder
 ///    never learns the peer's friendly name from the handshake bytes.
 /// 3. Peer unknown + window closed → refuse with "untrusted peer".
+#[allow(clippy::too_many_arguments)]
 pub async fn run_responder(
     identity: Identity,
     init_msg: Vec<u8>,

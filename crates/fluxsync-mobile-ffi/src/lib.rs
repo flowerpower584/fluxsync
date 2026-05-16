@@ -246,9 +246,8 @@ impl FluxsyncHandle {
     /// whole buffer at startup; pass the highest seq seen so far on
     /// subsequent polls so the Kotlin side only walks new entries.
     pub fn poll_logs(&self, since: u64) -> Vec<FfiLogEntry> {
-        let g = match self.last_logs.lock() {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
+        let Ok(g) = self.last_logs.lock() else {
+            return Vec::new();
         };
         g.iter().filter(|e| e.seq > since).cloned().collect()
     }
@@ -260,6 +259,7 @@ impl FluxsyncHandle {
     }
 
     /// Inject a clipboard item. Same code path as `fluxctl push`.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn push_text(&self, text: String) -> Result<(), FluxError> {
         self.runtime
             .block_on(send_cmd(
@@ -347,6 +347,7 @@ impl FluxsyncHandle {
 
     /// Trust a peer described by a `fluxsync://pair/...` URI (typically
     /// from a scanned QR). `name` is the nickname for the peer.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn pair_from_uri(&self, uri: String, name: String) -> Result<(), FluxError> {
         self.runtime
             .block_on(send_cmd(
@@ -570,8 +571,7 @@ async fn logs_subscribe_once(
 fn format_utc_hms() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let h = (secs % 86400) / 3600;
     let m = (secs % 3600) / 60;
     let s = secs % 60;

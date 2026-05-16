@@ -24,6 +24,7 @@ pub enum Phase {
 /// Compute the next phase + action list for a `(phase, event)` pair.
 #[must_use]
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::match_same_arms)] // FSM table mirrors PROTOCOL.md line-for-line; keep one arm per pair.
 pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
     use Action as A;
     use Event as E;
@@ -230,14 +231,14 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
         (P::Handshaking, E::NetworkChanged) => (P::Discovering, vec![A::StartDiscovery]),
 
         // Fallback for all other undefined transitions.
-        (phase, _event) => {
+        (phase, event) => {
             // Only warn on events that should technically change phase but aren't handled.
             // Battery changes and clipboard events in Idle are common and don't need warnings.
             if !matches!(
-                _event,
+                event,
                 E::BatteryChangedSelf { .. } | E::BatteryChangedPeer { .. }
             ) {
-                tracing::debug!("Undefined FSM transition: ({:?}, {:?})", phase, _event);
+                tracing::debug!("Undefined FSM transition: ({:?}, {:?})", phase, event);
             }
             (phase, vec![])
         }

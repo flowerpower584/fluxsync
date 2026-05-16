@@ -1,3 +1,5 @@
+#![allow(clippy::no_effect_underscore_binding)]
+
 use anyhow::Result;
 use fluxsync_crypto::Identity;
 use fluxsyncd::transport::Transport;
@@ -23,10 +25,7 @@ async fn test_aggressive_probing_architecture() -> Result<()> {
     // 2. Simulation d'un "Last Known Address" (LKA)
     let lka_addr: SocketAddr = "192.168.1.13:60116".parse()?;
 
-    println!(
-        "📍 Peer A connaît Peer B sur sa dernière adresse : {}",
-        lka_addr
-    );
+    println!("📍 Peer A connaît Peer B sur sa dernière adresse : {lka_addr}");
 
     // 3. Scénario : Le mDNS est cassé, mais on veut reconnecter.
     // Dans l'ancienne architecture, on attendrait le mDNS indéfiniment.
@@ -39,10 +38,7 @@ async fn test_aggressive_probing_architecture() -> Result<()> {
 
     // Simulation de la boucle de probing intelligent
     for attempt in 1..=3 {
-        println!(
-            "📡 Tentative {} : Envoi d'un 'Wakeup' à {}...",
-            attempt, lka_addr
-        );
+        println!("📡 Tentative {attempt} : Envoi d'un 'Wakeup' à {lka_addr}...");
 
         // Ici on simulerait l'envoi d'un HandshakeInit direct
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -70,15 +66,12 @@ async fn test_chaos_monkey_ip_jumper() -> Result<()> {
     let mut current_ip = Ipv4Addr::new(192, 168, 1, 10);
     let _peer_id = [0u8; 32];
 
-    println!("📱 Le téléphone commence sur {}", current_ip);
+    println!("📱 Le téléphone commence sur {current_ip}");
 
     for jump in 1..=5 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         current_ip = Ipv4Addr::new(192, 168, 1, 10 + jump);
-        println!(
-            "🦘 JUMP {} : Le téléphone change d'IP -> {}",
-            jump, current_ip
-        );
+        println!("🦘 JUMP {jump} : Le téléphone change d'IP -> {current_ip}");
 
         // Ici on vérifierait que le Roaming du Transport détecte le changement
         // et met à jour le LKA sans rompre la session.
@@ -119,7 +112,6 @@ async fn test_sadistic_handshake_interruption() -> Result<()> {
     // 3. Le transport doit quand même réussir à répondre sur la nouvelle IP
     //    grâce au mécanisme de Roaming et à l'intelligence de probing.
 
-    let session_established;
     let start = Instant::now();
 
     println!("📡 Envoi du msg1 (HandshakeInit)...");
@@ -134,7 +126,7 @@ async fn test_sadistic_handshake_interruption() -> Result<()> {
         "✅ Le moteur a rattrapé le lien en {}ms malgré l'interruption.",
         start.elapsed().as_millis()
     );
-    session_established = true;
+    let session_established = true;
 
     assert!(session_established);
     Ok(())
@@ -146,12 +138,12 @@ async fn test_sadistic_packet_storm() -> Result<()> {
 
     // 1. On bind un vrai transport sur un port aléatoire
     let (transport, port) = Transport::bind("127.0.0.1", 0).await?;
-    let target_addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+    let target_addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
 
     // 2. On crée un socket "attaquant"
     let attacker = UdpSocket::bind("127.0.0.1:0").await?;
 
-    println!("🚀 Lancement de l'attaque sur 127.0.0.1:{}...", port);
+    println!("🚀 Lancement de l'attaque sur 127.0.0.1:{port}...");
 
     let start = Instant::now();
     for i in 0..5000 {

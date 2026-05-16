@@ -39,9 +39,8 @@ fn get_macos_battery() -> anyhow::Result<(u8, bool)> {
             // Find percentage
             if let Some(pct_idx) = line.find('%') {
                 let start = line[..pct_idx]
-                    .rfind(|c: char| !c.is_digit(10))
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
+                    .rfind(|c: char| !c.is_ascii_digit())
+                    .map_or(0, |i| i + 1);
                 if let Ok(val) = line[start..pct_idx].parse::<u8>() {
                     level = val;
                 }

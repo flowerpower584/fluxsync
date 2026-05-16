@@ -555,6 +555,7 @@ fn test_19_clipboard_push_while_linked_fires_send() {
 ///
 /// This is the EXACT flow that was broken.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn test_20_full_offline_online_cycle_end_to_end() {
     let (mut a, mut b) = link_pair();
     assert_eq!(a.phase, Phase::Linked);

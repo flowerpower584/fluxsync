@@ -74,13 +74,11 @@ fn untrusted_peer_seen_clears_peer_name() {
     // FSM must have emitted DropPeer + EmitState.
     assert!(
         actions.iter().any(|a| matches!(a, Action::DropPeer)),
-        "expected DropPeer action, got: {:?}",
-        actions
+        "expected DropPeer action, got: {actions:?}"
     );
     assert!(
         actions.iter().any(|a| matches!(a, Action::EmitState)),
-        "expected EmitState action, got: {:?}",
-        actions
+        "expected EmitState action, got: {actions:?}"
     );
 }
 
@@ -139,8 +137,8 @@ fn manual_unpair_resets_everything() {
         Phase::Idle,
         "FSM should go to Idle after ManualUnpair"
     );
-    assert_eq!(
-        app.state.on, false,
+    assert!(
+        !app.state.on,
         "on should be false after ManualUnpair (Idle)"
     );
 

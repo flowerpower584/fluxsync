@@ -3,13 +3,13 @@
 // `tokio::net::UnixStream`, so the whole file is Unix-only — the
 // Windows variant will be added with the v0.1.1 Named-Pipe daemon.
 #![cfg(unix)]
+#![allow(clippy::similar_names, clippy::cast_possible_truncation)]
 
 use fluxsync_crypto::{test_util::pair_for_test, Identity};
 use fluxsyncd::{
     cmd::{CmdData, CmdOp, CmdRequest},
     run, DaemonConfig, TestPair,
 };
-use hex;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -151,8 +151,7 @@ async fn extreme_dual_daemon_stress_test() {
             )
             .await;
             r.data
-                .map(|d| matches!(d, CmdData::State(s) if s.peer_name == "extreme-b"))
-                .unwrap_or(false)
+                .is_some_and(|d| matches!(d, CmdData::State(s) if s.peer_name == "extreme-b"))
         })
         .await,
         "Link A -> B failed"
@@ -163,7 +162,7 @@ async fn extreme_dual_daemon_stress_test() {
     tracing::info!("Starting Scenario 1: Clipboard Flood");
     let count = 50;
     for i in 0..count {
-        let text = format!("item-{}", i);
+        let text = format!("item-{i}");
         ipc_send_recv(
             &ipc_a,
             CmdRequest {

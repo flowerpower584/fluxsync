@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+
 use fluxsync_core::app::App;
 use fluxsync_core::clock::{Clock, StubWallClock};
 use fluxsync_core::events::{Action, Event};
@@ -242,7 +244,7 @@ fn test_07_clipboard_bomb_performance() {
     );
     let elapsed = start.elapsed();
 
-    println!("Response time with 50MB state: {:?}", elapsed);
+    println!("Response time with 50MB state: {elapsed:?}");
     assert!(elapsed.as_millis() < 50, "App is too slow under load!");
 }
 
@@ -258,7 +260,7 @@ fn test_08_mdns_flood() {
         app.handle(
             Event::PeerSeen {
                 peer_id: id,
-                name: format!("Bot-{}", i),
+                name: format!("Bot-{i}"),
             },
             &wall,
         );
@@ -426,7 +428,7 @@ fn test_15_empty_payload_integrity() {
     app.handle(
         Event::PeerSeen {
             peer_id: [1; 32],
-            name: "".into(),
+            name: String::new(),
         },
         &wall,
     ); // Empty name
@@ -435,7 +437,7 @@ fn test_15_empty_payload_integrity() {
         Event::FrameReceivedClipboard {
             hash: [0; 32],
             kind: Kind::Text,
-            preview: "".into(),
+            preview: String::new(),
             lamport: 1,
             sensitive: false,
         },
@@ -469,7 +471,7 @@ fn test_16_history_rotation_at_limit() {
             Event::FrameReceivedClipboard {
                 hash: [i as u8; 32],
                 kind: Kind::Text,
-                preview: format!("Old {}", i),
+                preview: format!("Old {i}"),
                 lamport: i as u64,
                 sensitive: false,
             },
@@ -661,8 +663,8 @@ fn test_21_large_history_unpair_repair_cycle() {
             Event::FrameReceivedClipboard {
                 hash: [i; 32],
                 kind: Kind::Text,
-                preview: format!("P1-{}", i),
-                lamport: i as u64,
+                preview: format!("P1-{i}"),
+                lamport: u64::from(i),
                 sensitive: false,
             },
             &wall,
@@ -1117,7 +1119,7 @@ fn test_40_classifier_performance_on_massive_string() {
     let start = std::time::Instant::now();
     let _ = fluxsync_core::classify::is_sensitive(&huge);
     let duration = start.elapsed();
-    println!("is_sensitive on 10MB: {:?}", duration);
+    println!("is_sensitive on 10MB: {duration:?}");
     assert!(duration.as_millis() < 1000);
 }
 
@@ -1127,7 +1129,7 @@ fn test_41_kind_of_performance_on_massive_string() {
     let start = std::time::Instant::now();
     let _ = fluxsync_core::classify::kind_of(&huge);
     let duration = start.elapsed();
-    println!("kind_of on 10MB: {:?}", duration);
+    println!("kind_of on 10MB: {duration:?}");
     assert!(duration.as_millis() < 500);
 }
 

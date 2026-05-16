@@ -49,6 +49,7 @@ mod sys {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(&lock_path)?;
 
             // Try to acquire an exclusive lock. If it fails, another daemon is already running.

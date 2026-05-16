@@ -1,5 +1,6 @@
 //! INDESTRUCTIBLE TEST SUITE — FluxSync Core
 //! Tests every critical path to prevent future bugs.
+#![allow(clippy::cast_possible_truncation)]
 
 use fluxsync_core::*;
 use fluxsync_proto::Kind;
@@ -161,7 +162,7 @@ fn toggle_off_from_every_phase() {
         Phase::Halted,
     ] {
         let (next, actions) = transition(start_phase, &Event::ToggleOff);
-        assert_eq!(next, Phase::Idle, "ToggleOff from {:?}", start_phase);
+        assert_eq!(next, Phase::Idle, "ToggleOff from {start_phase:?}");
         assert!(actions.contains(&Action::CloseSession));
         assert!(actions.contains(&Action::StopDiscovery));
     }

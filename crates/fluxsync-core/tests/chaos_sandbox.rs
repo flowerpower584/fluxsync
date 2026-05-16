@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+
 use fluxsync_core::app::App;
 use fluxsync_core::clock::{Clock, StubWallClock};
 use fluxsync_core::events::{Action, Event};
@@ -197,7 +199,7 @@ fn history_spam_test() {
             Event::FrameReceivedClipboard {
                 hash: [i as u8; 32],
                 kind: Kind::Text,
-                preview: format!("item {}", i),
+                preview: format!("item {i}"),
                 lamport: i as u64,
                 sensitive: false,
             },
@@ -425,16 +427,12 @@ fn memory_and_cpu_stress_test() {
     }
     let duration = start.elapsed();
 
-    println!(
-        "Time for 100 battery updates with 50MB state: {:?}",
-        duration
-    );
+    println!("Time for 100 battery updates with 50MB state: {duration:?}");
 
     // If this takes more than say 100ms, it's a major performance bug for a background daemon.
     // On a modern CPU, cloning 50MB 100 times = 5GB of memory copies.
     assert!(
         duration.as_millis() < 500,
-        "Performance too slow! State cloning is killing the CPU: {:?}",
-        duration
+        "Performance too slow! State cloning is killing the CPU: {duration:?}"
     );
 }

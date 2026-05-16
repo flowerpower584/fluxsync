@@ -16,6 +16,7 @@ use crate::policy::status_for;
 use crate::state::{Config, HistoryItem, State};
 
 const HISTORY_SOFT_CAP: usize = 50;
+const REPLAY_WINDOW: u64 = 100;
 
 pub struct App {
     pub phase: Phase,
@@ -69,6 +70,7 @@ impl App {
     /// (`&StubWallClock` in tests) or a trait object (`&dyn WallClock`
     /// in the daemon, which holds an `Arc<dyn WallClock + Send + Sync>`).
     #[allow(clippy::needless_pass_by_value)] // Event is consumed by design; callers lose ownership.
+    #[allow(clippy::too_many_lines)] // One match arm per event; splitting the dispatch hurts readability.
     pub fn handle<W: WallClock + ?Sized>(&mut self, event: Event, wall: &W) -> Vec<Action> {
         // [FIX] Optimization: Removed expensive state.clone().
         // Instead, we manually track if we need to EmitState.
@@ -84,12 +86,11 @@ impl App {
                     // [REMEDIATION] Completely abort the process.
                     // DO NOT transition, DO NOT return any actions.
                     return vec![];
-                } else {
-                    self.state.peer_name.clone_from(name);
-                    // Don't overwrite peer_id with placeholder
-                    if *peer_id != [0u8; 32] {
-                        self.state.peer_id = *peer_id;
-                    }
+                }
+                self.state.peer_name.clone_from(name);
+                // Don't overwrite peer_id with placeholder
+                if *peer_id != [0u8; 32] {
+                    self.state.peer_id = *peer_id;
                 }
             }
             Event::BatteryChangedSelf { level, charging } => {
@@ -136,7 +137,6 @@ impl App {
                 // past relative to our clock is a stale retransmit or a
                 // replay attack. Reject it — never write it to the clipboard,
                 // never advance our clock from attacker-controlled data.
-                const REPLAY_WINDOW: u64 = 100;
                 if self.clock.now().saturating_sub(*lamport) > REPLAY_WINDOW {
                     return vec![Action::EmitLog(LogEntry::warn(format!(
                         "Rejected stale item (lamport {}, clock {})",
@@ -266,6 +266,7 @@ impl App {
         actions
     }
 
+    #[must_use]
     pub fn is_peer_mismatch(&self, other_id: [u8; 32]) -> bool {
         // [FIX] Accept [0u8; 32] as it is used by Msg::Hello to update the name
         if other_id == [0u8; 32] {

@@ -99,10 +99,8 @@ enum PairSub {
 }
 
 #[tokio::main(flavor = "current_thread")]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
-    let args = Args::parse();
-    let ipc_path = args.ipc_path.unwrap_or_else(default_ipc_path);
-
     enum Kind {
         Status,
         Peers,
@@ -112,6 +110,9 @@ async fn main() -> Result<()> {
         PairQr,
         Ack(&'static str),
     }
+
+    let args = Args::parse();
+    let ipc_path = args.ipc_path.unwrap_or_else(default_ipc_path);
 
     let (value, kind) = match args.cmd {
         Cmd::Status => (
