@@ -3,6 +3,25 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [SemVer](https://semver.org/).
 
+## [v0.5.2] — 2026-05-17
+
+**Clipboard reliability.**
+
+### Fixed
+- Clipboard no longer flaps. The Noise transport ran a stateful nonce
+  counter over UDP; a single dropped or reordered datagram desynced
+  decryption and silently starved the link until the 30s heartbeat
+  timeout forced a re-handshake. Frames now carry an explicit per-frame
+  nonce so they decrypt regardless of loss or reorder; a 64-bit sliding
+  replay window keeps replay protection.
+- `Revoke` and `Unpair` now rewrite `peers.json`. Previously a removed
+  peer reappeared after a daemon restart and left `PairShow` stuck on
+  `already_paired` with no way to re-pair from the UI.
+
+### Changed
+- Release binaries (APK, macOS Tauri sidecar) are no longer tracked in
+  the repo — they ship via GitHub releases.
+
 ## [v0.5.1] — 2026-05-08
 
 **Terminal polish + Linux headless support.**

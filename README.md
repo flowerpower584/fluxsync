@@ -17,21 +17,16 @@
 **Universal clipboard. Local-first. Peer-to-peer. End-to-end encrypted.**
 One Rust daemon, dedicated apps for macOS + Android, zero servers.
 
-> **Platform status (v0.5.1):** Android app is the first-class GUI client. macOS ships a menu-bar tray app (Tauri v2) built from source — no signed DMG until an Apple Dev ID is funded. The daemon + CLI also build cleanly on Linux (cross-compile to `x86_64-unknown-linux-musl` is green) so headless Linux use is supported. Windows daemon/CLI is not tested yet. No GUI on Linux/Windows — contributions welcome.
+> **Platform status (v0.5.2):** Android app is the first-class GUI client. macOS ships a menu-bar tray app (Tauri v2) built from source — no signed DMG until an Apple Dev ID is funded. The daemon + CLI also build cleanly on Linux (cross-compile to `x86_64-unknown-linux-musl` is green) so headless Linux use is supported. The daemon + CLI carry a `#[cfg(windows)]` Named Pipe IPC path; the Windows menu-bar app is not built yet. No GUI on Linux/Windows — contributions welcome.
 
----
-
-## ⚡ v0.5.1 Release: Terminal Polish + Linux Headless
-Styled `fluxctl` terminal output. Linux headless cross-compile green. Daemon version now tied to `CARGO_PKG_VERSION` automatically.
-
-> **No macOS DMG for now.** Apple Developer ID signing costs $99/year and isn't funded yet, so there's no prebuilt DMG. macOS users: build the menu-bar tray app from source (below) — it builds locally, no signing required.
+See [CHANGELOG.md](CHANGELOG.md) for the per-release history.
 
 ---
 
 ## Install
 
 ### 📱 Android
-1. Download [**FluxSync-0.5.1.apk**](https://github.com/flowerpower584/fluxsync/releases/download/v0.5.1/FluxSync-0.5.1.apk) (~24 MB).
+1. Download [**fluxsync-v0.5.2.apk**](https://github.com/flowerpower584/fluxsync/releases/download/v0.5.2/fluxsync-v0.5.2.apk) (~25 MB).
 2. On the device, allow installs from the browser/Files app (Settings → Apps → Special access → Install unknown apps).
 3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access.
 
@@ -54,7 +49,7 @@ The daemon and CLI cross-compile cleanly to Linux (`x86_64-unknown-linux-musl` c
 ```sh
 # Option A: cargo install (any distro with rustup)
 cargo install --git https://github.com/flowerpower584/fluxsync \
-              --tag v0.5.1 fluxsyncd fluxctl
+              --tag v0.5.2 fluxsyncd fluxctl
 
 # Option B: clone and build (lets you keep up with HEAD)
 git clone https://github.com/flowerpower584/fluxsync.git
@@ -81,7 +76,7 @@ Then: `systemctl --user enable --now fluxsync.service`.
 > **Linux clipboard caveat.** The daemon uses [`arboard`](https://crates.io/crates/arboard) which needs an X11 or Wayland session. On a fully headless box (no display at all) the clipboard watcher will fail to start — the daemon still runs and is reachable for `fluxctl push`, but you won't sync the system clipboard. Most desktop Linux setups are fine.
 
 ### 🛠️ Build from source (any platform)
-Requires Rust ≥ 1.75 (`rustup` recommended).
+Requires Rust ≥ 1.88 (`rustup` recommended).
 ```sh
 git clone https://github.com/flowerpower584/fluxsync.git
 cd fluxsync
@@ -91,7 +86,7 @@ cargo build --release
 
 ---
 
-## Quickstart (v0.5.1)
+## Quickstart
 
 ### 1. Run the daemon
 The Android app starts the daemon for itself — skip to step 2 if you're only using a phone. The macOS tray app also manages the daemon for you.
@@ -113,7 +108,6 @@ fluxctl pair show-qr   # render this device's pair QR in the terminal
 ```
 
 ## Architecture
-(See the Mermaid diagram below for technical details)
 
 ```mermaid
 flowchart LR
@@ -157,17 +151,17 @@ FluxSync is dual-licensed under either of:
 
 at your option. This is the standard Rust ecosystem dual-license — pick whichever fits your downstream project. Apache 2.0 adds an explicit patent grant; MIT keeps things short and GPL-compatible.
 
-## 🔒 Security & Known Issues (v0.5.0)
+## 🔒 Security & Known Issues (v0.5.2)
 
 - **End-to-End Encryption**: All traffic is encrypted using the **Noise IK** handshake (Curve25519, ChaCha20, Poly1305).
-- **No Servers**: Peer discovery happens via mDNS (local network only). 
-- **Known Bugs (v0.5.0)**:
-    - **Handshake Deadlock**: If a handshake packet is lost, the sync can hang. Restart or manual toggle required.
-    - **Clipboard Ping-Pong**: Trailing spaces in text can cause infinite sync loops.
-    - **Persistence**: Peer pairing is NOT persistent across restarts in this version.
+- **No Servers**: Peer discovery happens via mDNS (local network only).
+- **Persistent Pairing**: Trusted peers are saved to `~/.fluxsync/peers.json` and reloaded on daemon start, so a pairing survives restarts.
+- **Known Bugs**:
+    - **Handshake Deadlock**: If a handshake packet is lost during pairing, sync can hang until a manual toggle. (Transport-frame loss after the handshake is handled as of v0.5.2.)
+    - **Clipboard Ping-Pong**: Trailing spaces in text can still cause sync loops in some cases.
 - **Roadmap (v0.6.0)**:
-    - **Key Storage**: Secure OS Keychain integration (currently stored in plain text).
-    - **Windows IPC**: Native Named Pipes (currently using Unix Socket emulation).
+    - **Key Storage**: Secure OS Keychain integration (the long-term identity key currently lives in a `0600` file).
+    - **Windows menu-bar app**: the daemon + CLI already speak Named Pipe IPC on Windows; a Tauri tray app for Windows is not built yet.
 
 ---
 Crafted in Kaolack, Senegal 🇸🇳
