@@ -246,9 +246,18 @@ async fn extreme_dual_daemon_stress_test() {
     shutdown_b.cancel();
     let _ = timeout(Duration::from_secs(2), h_b).await;
 
-    // Wait for A to see "Peer offline" (heartbeat takes ~15s now)
+    // Wait for A to detect the lost peer. Detection is heartbeat-only:
+    // heartbeat_loop ticks every 5s and fires Event::PeerLost after 6
+    // missed pings (~30s; see driver.rs heartbeat_loop). B shuts down
+    // gracefully without sending Msg::Bye, so the fast FS-041 path does
+    // not apply. Allow 45s to cover the worst-case ~35s detection.
+    //
+    // The observable signal is the FSM phase: PeerLost moves A from
+    // "linked" to "discovering". `peer_name` is intentionally kept across
+    // PeerLost (see fluxsync-core indestructible.rs) so it must NOT be
+    // used as the loss indicator.
     assert!(
-        wait_until(Duration::from_secs(20), || async {
+        wait_until(Duration::from_secs(45), || async {
             let r = ipc_send_recv(
                 &ipc_a,
                 CmdRequest {
@@ -258,7 +267,7 @@ async fn extreme_dual_daemon_stress_test() {
             )
             .await;
             if let Some(CmdData::State(s)) = r.data {
-                return s.peer_name.is_empty();
+                return s.phase == "discovering";
             }
             false
         })
@@ -388,12 +397,18 @@ async fn extreme_dual_daemon_stress_test() {
     cfg_c.udp_bind = "127.0.0.1".into();
     cfg_c.keystore_dir = Some(keystore_c.clone());
     cfg_c.disable_mdns = true;
+    // Like cfg_a/cfg_b: in-process test daemons must not drive the real
+    // macOS clipboard. arboard hits NSPasteboard from a tokio blocking
+    // thread; several daemons racing AppKit off the main thread corrupts
+    // memory (observed SIGSEGV in NSPasteboard via clipboard_watcher_loop).
+    cfg_c.disable_clipboard = true;
     cfg_c.peer_name_self = "mac-c".into();
 
     let mut cfg_d = DaemonConfig::new(id_d.clone(), port_d, ipc_d.clone());
     cfg_d.udp_bind = "127.0.0.1".into();
     cfg_d.keystore_dir = Some(keystore_d.clone());
     cfg_d.disable_mdns = true;
+    cfg_d.disable_clipboard = true;
     cfg_d.peer_name_self = "phone-d".into();
 
     let shutdown_c = CancellationToken::new();
