@@ -180,7 +180,6 @@ impl App {
                 self.state.trusted_peer_name = None;
                 self.state.peer_battery = 100;
                 self.state.peer_charging = false;
-                self.state.history.clear(); // [FIX] Prevent privacy leak
             }
             Event::SetTrustedPeer { name } => {
                 self.state.trusted_peer_name = Some(name.clone());
@@ -488,6 +487,40 @@ mod tests {
         assert_eq!(app.state.history.len(), 1);
         assert_eq!(app.state.history[0].preview, "https://github.com");
         assert_eq!(app.state.history[0].time, "14:32");
+    }
+
+    #[test]
+    fn fs046_manual_unpair_keeps_history() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Galaxy".into(),
+            },
+            &wall(),
+        );
+        app.handle(Event::HandshakeOk, &wall());
+        app.handle(
+            Event::LocalClipboardChange {
+                hash: [1; 32],
+                kind: Kind::Url,
+                preview: "https://github.com".into(),
+                sensitive: false,
+                lamport: 1,
+            },
+            &wall(),
+        );
+        assert_eq!(app.state.history.len(), 1);
+
+        app.handle(Event::ManualUnpair, &wall());
+
+        // Unpair disconnects the peer but must not wipe local history (FS-046).
+        assert_eq!(app.state.history.len(), 1);
+        assert_eq!(app.state.history[0].preview, "https://github.com");
+        assert!(!app.state.on);
+        assert_eq!(app.state.peer_id, [0u8; 32]);
+        assert_eq!(app.state.trusted_peer_name, None);
     }
 
     #[test]
