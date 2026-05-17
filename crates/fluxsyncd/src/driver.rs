@@ -935,6 +935,13 @@ async fn handle_driver_cmd(
         }
 
         CmdOp::PairShow {} => {
+            // Refuse to open the TOFU window while already paired: a
+            // re-share of the QR would otherwise let a LAN attacker
+            // handshake-join the trusted set. The proper two-step
+            // pairing (pending_peer + pair_confirm) is tracked as FS-052.
+            if !trusted.lock().await.is_empty() {
+                return reply_err(reply, req_id, "already_paired");
+            }
             let static_pub = identity.public_key();
             let peer_id = identity.peer_id();
             let pubkey_b32 = base32::encode(BASE32_ALPHA, &static_pub);
