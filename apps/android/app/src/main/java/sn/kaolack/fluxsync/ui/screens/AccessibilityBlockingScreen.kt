@@ -41,7 +41,7 @@ fun AccessibilityBlockingScreen() {
             Spacer(modifier = Modifier.height(24.dp))
             
             Text(
-                text = "Service d'Accessibilité requis",
+                text = "Accessibility Service required",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center
@@ -50,7 +50,7 @@ fun AccessibilityBlockingScreen() {
             Spacer(modifier = Modifier.height(16.dp))
             
             Text(
-                text = "FluxSync utilise le service d'accessibilité pour synchroniser votre presse-papier de manière invisible et efficace.",
+                text = "FluxSync uses the accessibility service to sync your clipboard quietly in the background.",
                 style = MaterialTheme.typography.bodyLarge,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -68,13 +68,13 @@ fun AccessibilityBlockingScreen() {
             ) {
                 Icon(Icons.Default.Settings, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Activer dans les réglages")
+                Text("Enable in settings")
             }
             
             Spacer(modifier = Modifier.height(16.dp))
             
             Text(
-                text = "Recherchez 'FluxSync' dans la liste des services téléchargés.",
+                text = "Find 'FluxSync' in the list of downloaded services.",
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant

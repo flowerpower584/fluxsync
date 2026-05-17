@@ -55,11 +55,11 @@ class FluxsyncService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIF_ID, 
-                createNotification("Actif & Sécurisé"),
+                createNotification("Active & Secure"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             )
         } else {
-            startForeground(NOTIF_ID, createNotification("Actif & Sécurisé"))
+            startForeground(NOTIF_ID, createNotification("Active & Secure"))
         }
     }
 
