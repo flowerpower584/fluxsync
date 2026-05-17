@@ -31,6 +31,59 @@ fn bidirectional_messages() {
 }
 
 #[test]
+fn dropped_frame_does_not_break_session() {
+    // The clipboard "flap" bug: a single lost UDP datagram used to
+    // desync the receiving nonce and kill the session. Each frame now
+    // carries its own nonce, so skipping one must not break the rest.
+    let a = Identity::generate();
+    let b = Identity::generate();
+    let (mut a_sess, mut b_sess) = pair_for_test(&a, &b).expect("pair");
+
+    let f1 = a_sess.encrypt(b"frame-1").expect("encrypt");
+    let _lost = a_sess.encrypt(b"frame-2").expect("encrypt"); // dropped in transit
+    let f3 = a_sess.encrypt(b"frame-3").expect("encrypt");
+
+    assert_eq!(b_sess.decrypt(&f1).expect("decrypt f1"), b"frame-1");
+    assert_eq!(
+        b_sess.decrypt(&f3).expect("decrypt f3 after a gap"),
+        b"frame-3"
+    );
+}
+
+#[test]
+fn out_of_order_delivery_decrypts() {
+    // UDP can reorder datagrams; every frame must decrypt regardless of
+    // arrival order.
+    let a = Identity::generate();
+    let b = Identity::generate();
+    let (mut a_sess, mut b_sess) = pair_for_test(&a, &b).expect("pair");
+
+    let f1 = a_sess.encrypt(b"one").expect("encrypt");
+    let f2 = a_sess.encrypt(b"two").expect("encrypt");
+    let f3 = a_sess.encrypt(b"three").expect("encrypt");
+
+    assert_eq!(b_sess.decrypt(&f3).expect("decrypt f3"), b"three");
+    assert_eq!(b_sess.decrypt(&f1).expect("decrypt f1"), b"one");
+    assert_eq!(b_sess.decrypt(&f2).expect("decrypt f2"), b"two");
+}
+
+#[test]
+fn replayed_frame_is_rejected() {
+    // Explicit per-frame nonces removed the implicit in-order replay
+    // protection; the sliding window must put it back.
+    let a = Identity::generate();
+    let b = Identity::generate();
+    let (mut a_sess, mut b_sess) = pair_for_test(&a, &b).expect("pair");
+
+    let f = a_sess.encrypt(b"once").expect("encrypt");
+    assert_eq!(b_sess.decrypt(&f).expect("first delivery"), b"once");
+    assert!(
+        b_sess.decrypt(&f).is_err(),
+        "a replayed frame must be rejected"
+    );
+}
+
+#[test]
 fn tampered_ciphertext_fails_decrypt() {
     let a = Identity::generate();
     let b = Identity::generate();
