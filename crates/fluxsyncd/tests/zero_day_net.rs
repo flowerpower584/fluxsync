@@ -176,11 +176,18 @@ async fn test_07_ip_roaming_legitimacy() -> Result<()> {
 // =============================================================================
 
 #[tokio::test]
-async fn test_11_rapid_ip_roaming() -> Result<()> {
+async fn test_11_rapid_ip_roaming_is_rate_limited() -> Result<()> {
+    // FS-034: peer-address roaming is rate-limited to one roam per
+    // ROAM_MIN_INTERVAL_MS (30s). A burst of source-port changes must
+    // pin peer_addr to the FIRST roamer; later rapid roams are rejected
+    // so a LAN attacker cannot hijack the outbound address by replaying
+    // authentic ciphertext from a fresh port.
     let (transport, port) = setup_transport().await;
     let (mut s1, s2) =
         test_util::pair_for_test(&Identity::generate(), &Identity::generate()).unwrap();
     transport.install_session([0u8; 32], s2).await;
+
+    let mut first_addr: Option<SocketAddr> = None;
     for i in 0..5 {
         let sender = UdpSocket::bind("127.0.0.1:0").await?;
         let addr = sender.local_addr()?;
@@ -190,7 +197,20 @@ async fn test_11_rapid_ip_roaming() -> Result<()> {
         sender.send_to(&packet, format!("127.0.0.1:{port}")).await?;
         let mut buf = [0u8; 1024];
         let _ = transport.recv(&mut buf).await?;
-        assert_eq!(*transport.peer_addr.lock().await, Some(addr));
+
+        let pinned = *transport.peer_addr.lock().await;
+        if i == 0 {
+            // First roam is always allowed (no prior roam recorded).
+            assert_eq!(pinned, Some(addr), "first roam must pin peer_addr");
+            first_addr = pinned;
+        } else {
+            // Rapid follow-up roams fall inside the 30s window and are
+            // rejected — peer_addr stays pinned to the first roamer.
+            assert_eq!(
+                pinned, first_addr,
+                "rapid roam #{i} must be rate-limited (FS-034)"
+            );
+        }
     }
     Ok(())
 }
