@@ -1,7 +1,10 @@
 package sn.kaolack.fluxsync.ui.screens
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,7 +41,12 @@ import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 fun SettingsScreen(vm: FluxsyncViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val s = state ?: return
+
+    fun openUrl(url: String) {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -184,7 +193,7 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
             SettingsGroup(title = "About") {
                 SettingsItem(
                     label = "Version",
-                    right = { Text(s.version.ifEmpty { "0.5.0" }, color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) }
+                    right = { Text(s.version.ifEmpty { "0.5.2" }, color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) }
                 )
                 SettingsItem(
                     label = "Build",
@@ -192,12 +201,14 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
                 )
                 SettingsItem(
                     label = "License",
-                    right = { Text("MIT ›", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) }
+                    right = { Text("MIT ›", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) },
+                    onClick = { openUrl("https://github.com/flowerpower584/fluxsync/blob/main/LICENSE-MIT") }
                 )
                 SettingsItem(
                     label = "Source",
                     right = { Text("github ›", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) },
-                    isLast = true
+                    isLast = true,
+                    onClick = { openUrl("https://github.com/flowerpower584/fluxsync") }
                 )
             }
         }
@@ -249,11 +260,13 @@ private fun SettingsItem(
     label: String,
     hint: String? = null,
     right: @Composable () -> Unit,
-    isLast: Boolean = false
+    isLast: Boolean = false,
+    onClick: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween

@@ -224,7 +224,7 @@ document.getElementById('device-list').addEventListener('click', async (e) => {
 });
 
 document.getElementById('link-license').addEventListener('click', () => {
-  invoke('fluxsync_open_url', { url: 'https://github.com/flowerpower584/fluxsync/blob/main/LICENSE' });
+  invoke('fluxsync_open_url', { url: 'https://github.com/flowerpower584/fluxsync/blob/main/LICENSE-MIT' });
 });
 
 document.getElementById('link-author').addEventListener('click', () => {
