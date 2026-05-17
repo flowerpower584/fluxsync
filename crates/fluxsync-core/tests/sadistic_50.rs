@@ -586,9 +586,15 @@ fn test_18_lamport_clock_causality_violation() {
         &wall,
     );
 
-    // App clock should stay at 301 because T2 and T1 are rejected
-    // by the Lamport Replay Guard (stale events don't touch the clock).
-    assert_eq!(app.clock.now(), 301);
+    // FS-045: there is no Lamport replay window. Out-of-order frames are
+    // legitimate (a peer can retransmit older history after a restart), so
+    // all three are accepted. The local clock only moves forward — `observe`
+    // takes the max — so it never regresses on the descending stamps.
+    assert!(app.clock.now() >= 300);
+    assert_eq!(app.state.history.len(), 3);
+    assert!(app.state.history.iter().any(|h| h.preview == "T3"));
+    assert!(app.state.history.iter().any(|h| h.preview == "T2"));
+    assert!(app.state.history.iter().any(|h| h.preview == "T1"));
 }
 
 #[test]

@@ -14,50 +14,55 @@ mod elite_sandbox {
     }
 
     #[test]
-    fn test_lamport_replay_guard() {
+    fn test_old_lamport_frame_is_accepted() {
+        // FS-045: the Lamport replay window was removed. A frame carrying an
+        // old Lamport stamp is a legitimate post-restart retransmit, not an
+        // attack — `observe()` jumps our clock to the peer's value, so any
+        // older retransmit would otherwise fail the window. Replay is already
+        // covered by Noise nonces and content-hash dedup.
         let mut app = App::new(Config::default());
         let wall = StubWall("12:00".into());
 
-        // 1. Establish current clock at 150.
+        // Reach Linked so clipboard writes are produced.
+        app.handle(Event::ToggleOn, &wall);
         app.handle(
-            Event::LocalClipboardChange {
-                hash: [1; 32],
-                kind: Kind::Text,
-                preview: "Secret A".into(),
-                sensitive: true,
-                lamport: 150,
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Peer".into(),
             },
             &wall,
         );
+        app.handle(Event::HandshakeOk, &wall);
 
+        // Advance the local Lamport clock far ahead.
+        app.handle(
+            Event::FrameReceivedClipboard {
+                hash: [1; 32],
+                kind: Kind::Text,
+                preview: "recent".into(),
+                lamport: 150,
+                sensitive: false,
+            },
+            &wall,
+        );
         assert!(app.clock.now() >= 150);
 
-        // 2. Receive an event from the past (Lamport 10).
-        // Current clock is ~151. 10 is way outside the 100-tick window.
+        // A frame from far in the past must NOT be rejected.
         let actions = app.handle(
             Event::FrameReceivedClipboard {
                 hash: [2; 32],
                 kind: Kind::Text,
-                preview: "Old Secret B (Leaked)".into(),
+                preview: "old retransmit".into(),
                 lamport: 10,
                 sensitive: false,
             },
             &wall,
         );
-
-        // Verify that WriteClipboard was NOT emitted.
-        let write_emitted = actions
-            .iter()
-            .any(|a| matches!(a, Action::WriteClipboard { .. }));
-        assert!(!write_emitted, "Stale Lamport event should be rejected");
-
-        // Verify we got a warning log instead.
-        let log_emitted = actions
-            .iter()
-            .any(|a| matches!(a, Action::EmitLog(l) if l.msg.contains("Rejected stale item")));
         assert!(
-            log_emitted,
-            "Should emit a warning log for rejected stale items"
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::WriteClipboard { .. })),
+            "old-Lamport retransmit should be written, not rejected"
         );
     }
 

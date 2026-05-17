@@ -16,7 +16,6 @@ use crate::policy::status_for;
 use crate::state::{Config, HistoryItem, State};
 
 const HISTORY_SOFT_CAP: usize = 50;
-const REPLAY_WINDOW: u64 = 100;
 
 pub struct App {
     pub phase: Phase,
@@ -132,18 +131,6 @@ impl App {
             } => {
                 // On nettoie le texte (espaces inutiles aux extrémités)
                 let preview = preview.trim();
-
-                // Replay guard: a frame whose Lamport stamp sits far in the
-                // past relative to our clock is a stale retransmit or a
-                // replay attack. Reject it — never write it to the clipboard,
-                // never advance our clock from attacker-controlled data.
-                if self.clock.now().saturating_sub(*lamport) > REPLAY_WINDOW {
-                    return vec![Action::EmitLog(LogEntry::warn(format!(
-                        "Rejected stale item (lamport {}, clock {})",
-                        lamport,
-                        self.clock.now()
-                    )))];
-                }
 
                 // On synchronise notre horloge logique (Lamport) avec celle de l'Android
                 self.clock.observe(*lamport);
@@ -616,6 +603,59 @@ mod tests {
             .iter()
             .any(|a| matches!(a, Action::AckItem { hash } if hash == &[4u8; 32])));
         assert_eq!(app.state.history[0].preview, "Bonjour");
+    }
+
+    #[test]
+    fn fs045_old_lamport_retransmit_is_still_accepted() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Galaxy".into(),
+            },
+            &wall(),
+        );
+        app.handle(Event::HandshakeOk, &wall());
+        app.handle(
+            Event::BatteryChangedPeer {
+                level: 80,
+                charging: false,
+            },
+            &wall(),
+        );
+        // A first frame advances our Lamport clock far ahead.
+        app.handle(
+            Event::FrameReceivedClipboard {
+                hash: [1; 32],
+                kind: Kind::Text,
+                preview: "recent".into(),
+                lamport: 500,
+                sensitive: false,
+            },
+            &wall(),
+        );
+        // A legitimate retransmit carrying an old Lamport stamp (peer
+        // restarted and re-sent earlier history). It must still be
+        // accepted — Noise nonces and content-hash dedup cover replay.
+        let actions = app.handle(
+            Event::FrameReceivedClipboard {
+                hash: [2; 32],
+                kind: Kind::Text,
+                preview: "old retransmit".into(),
+                lamport: 3,
+                sensitive: false,
+            },
+            &wall(),
+        );
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, Action::WriteClipboard { .. })));
+        assert!(app
+            .state
+            .history
+            .iter()
+            .any(|h| h.preview == "old retransmit"));
     }
 
     #[test]
