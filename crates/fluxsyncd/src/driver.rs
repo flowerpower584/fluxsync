@@ -1621,12 +1621,21 @@ async fn dispatch_inbound_frame(
             // Handshake frames are driven by the handshake task, not here.
         }
         Msg::Hello(h) => {
-            // Recover real peer_id from the transport's last known peer id
-            let peer_id = transport.last_peer_id.lock().await.unwrap_or([0u8; 32]);
-            let _ = event_tx.send(Event::PeerSeen {
-                peer_id,
-                name: h.name,
-            });
+            // Recover the real peer_id from the transport. If it is
+            // unknown (a race before the handshake fully completed) we
+            // must NOT fall back to an all-zero sentinel: that id
+            // bypasses the FSM peer-mismatch check. Drop the Hello.
+            match *transport.last_peer_id.lock().await {
+                Some(peer_id) => {
+                    let _ = event_tx.send(Event::PeerSeen {
+                        peer_id,
+                        name: h.name,
+                    });
+                }
+                None => {
+                    tracing::warn!("Received Hello with no last_peer_id; dropping");
+                }
+            }
         }
     }
 }

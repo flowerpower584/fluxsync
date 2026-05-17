@@ -268,10 +268,6 @@ impl App {
 
     #[must_use]
     pub fn is_peer_mismatch(&self, other_id: [u8; 32]) -> bool {
-        // [FIX] Accept [0u8; 32] as it is used by Msg::Hello to update the name
-        if other_id == [0u8; 32] {
-            return false;
-        }
         // If we are already handshaking or linked with someone else
         if !self.state.peer_name.is_empty() && self.state.peer_id != other_id {
             // We only care about mismatches if we are NOT in Idle or Discovering
@@ -394,6 +390,26 @@ mod tests {
         assert_eq!(app.state.status, Status::Syncing);
         assert_eq!(app.phase, Phase::Linked);
         assert_eq!(app.state.peer_name, "Galaxy S21 Ultra");
+    }
+
+    #[test]
+    fn fs043_zero_peer_id_is_a_mismatch_while_handshaking() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Galaxy".into(),
+            },
+            &wall(),
+        );
+        assert_eq!(app.phase, Phase::Handshaking);
+        // An all-zero peer_id must NOT be treated as a trusted sentinel.
+        assert!(app.is_peer_mismatch([0u8; 32]));
+        // A different real peer_id is still a mismatch.
+        assert!(app.is_peer_mismatch([9u8; 32]));
+        // The actual paired peer is not a mismatch.
+        assert!(!app.is_peer_mismatch([7u8; 32]));
     }
 
     #[test]
