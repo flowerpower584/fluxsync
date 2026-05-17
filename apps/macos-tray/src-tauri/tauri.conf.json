@@ -5,8 +5,8 @@
   "identifier": "sn.kaolack.fluxsync",
   "build": {
     "frontendDist": "../src",
-    "beforeBuildCommand": "",
-    "beforeDevCommand": ""
+    "beforeBuildCommand": "node scripts/prepare-sidecar.mjs",
+    "beforeDevCommand": "node scripts/prepare-sidecar.mjs"
   },
   "app": {
     "macOSPrivateApi": true,
