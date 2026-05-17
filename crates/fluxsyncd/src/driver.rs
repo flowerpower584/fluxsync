@@ -1319,6 +1319,17 @@ async fn clipboard_watcher_loop(
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let mut last_session_est = 0u64;
     loop {
+        // FS-048: while unpaired there is nothing to poll. Sleep on the
+        // session-install pulse instead of waking every 200ms only to
+        // observe `session.is_none()` and `continue`.
+        if transport.session.lock().await.is_none() {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return Ok(()),
+                () = transport.session_notify.notified() => {}
+            }
+            continue;
+        }
         tokio::select! {
             biased;
             () = shutdown.cancelled() => return Ok(()),

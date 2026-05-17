@@ -31,7 +31,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 pub const TYPE_HANDSHAKE_INIT: u8 = 0x01;
 pub const TYPE_HANDSHAKE_RESP: u8 = 0x02;
@@ -69,6 +69,10 @@ pub struct Transport {
     last_roam_ms: Arc<AtomicU64>,
     pub session_established_at_ms: Arc<AtomicU64>,
     pub metrics: Arc<Mutex<crate::metrics::MetricsTracker>>,
+    /// Pulsed whenever a session is installed. Lets idle pollers
+    /// (the clipboard watcher) sleep instead of busy-ticking while
+    /// unpaired (FS-048).
+    pub session_notify: Arc<Notify>,
 }
 
 #[must_use]
@@ -118,6 +122,7 @@ impl Transport {
                 last_roam_ms: Arc::new(AtomicU64::new(0)),
                 session_established_at_ms: Arc::new(AtomicU64::new(0)),
                 metrics: Arc::new(Mutex::new(crate::metrics::MetricsTracker::new())),
+                session_notify: Arc::new(Notify::new()),
             },
             actual_port,
         ))
@@ -142,6 +147,7 @@ impl Transport {
         self.session_generation.fetch_add(1, Ordering::SeqCst);
         self.session_established_at_ms
             .store(now_ms(), Ordering::SeqCst);
+        self.session_notify.notify_one();
     }
 
     async fn push_history(&self, addr: SocketAddr) {
@@ -166,6 +172,7 @@ impl Transport {
         self.session_generation.fetch_add(1, Ordering::SeqCst);
         self.session_established_at_ms
             .store(now_ms(), Ordering::SeqCst);
+        self.session_notify.notify_one();
         true
     }
 
@@ -313,5 +320,33 @@ mod tests {
         assert!(roam_allowed(100_000, 70_000));
         // 10s since last roam: rejected.
         assert!(!roam_allowed(100_000, 90_000));
+    }
+
+    /// FS-048: an idle clipboard watcher parks on `session_notify`.
+    /// Installing a session must pulse it so the watcher resumes
+    /// polling instead of sleeping forever.
+    #[tokio::test]
+    async fn fs048_install_session_pulses_watcher_notify() {
+        use super::Transport;
+        use fluxsync_crypto::{test_util::pair_for_test, Identity};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.unwrap();
+        let transport = Arc::new(transport);
+
+        let notify = transport.session_notify.clone();
+        let waiter = tokio::spawn(async move { notify.notified().await });
+        // Let the waiter register before the session is installed.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let (a, b) = (Identity::generate(), Identity::generate());
+        let (session, _peer) = pair_for_test(&a, &b).unwrap();
+        transport.install_session([7u8; 32], session).await;
+
+        tokio::time::timeout(Duration::from_millis(500), waiter)
+            .await
+            .expect("install_session must wake an idle clipboard watcher")
+            .unwrap();
     }
 }
