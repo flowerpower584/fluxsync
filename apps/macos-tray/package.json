@@ -6,8 +6,9 @@
   "description": "FluxSync macOS menu-bar app (Tauri v2). Frontend is a static HTML/CSS/JS bundle under src/.",
   "scripts": {
     "tauri": "tauri",
-    "dev": "tauri dev",
-    "build": "tauri build"
+    "sidecar": "node scripts/prepare-sidecar.mjs",
+    "dev": "npm run sidecar && tauri dev",
+    "build": "npm run sidecar && tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"
