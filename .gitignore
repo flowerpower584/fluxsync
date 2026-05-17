@@ -19,6 +19,9 @@ gradle_output.txt
 *.apk
 *.dmg
 
+# Tauri sidecar — rebuilt locally / shipped in the .app bundle, not the repo
+apps/macos-tray/src-tauri/binaries/
+
 # Dev scratch
 crates/fluxsyncd/scratch/
 
