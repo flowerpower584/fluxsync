@@ -23,6 +23,10 @@ pub struct App {
     pub clock: LamportClock,
     pub dedup: DedupRing,
     config: Config,
+    /// Peer id of the last peer this app paired with. Survives `ManualUnpair`
+    /// (which zeroes `state.peer_id`) so a later re-pair can tell whether the
+    /// new peer is the same device or a different one — see FS-046.
+    last_paired_peer_id: [u8; 32],
 }
 
 impl App {
@@ -35,6 +39,7 @@ impl App {
             clock: LamportClock::new(),
             dedup: DedupRing::default(),
             config,
+            last_paired_peer_id: [0u8; 32],
         }
     }
 
@@ -89,6 +94,16 @@ impl App {
                 self.state.peer_name.clone_from(name);
                 // Don't overwrite peer_id with placeholder
                 if *peer_id != [0u8; 32] {
+                    // FS-046: a re-pair with a *different* peer must drop the
+                    // previous peer's clipboard history. ManualUnpair keeps the
+                    // history (same-device reconnect is expected to resume it),
+                    // but without this a new peer would inherit — and could
+                    // BurstReplay — the prior peer's secrets.
+                    if self.last_paired_peer_id != [0u8; 32] && *peer_id != self.last_paired_peer_id
+                    {
+                        self.state.history.clear();
+                    }
+                    self.last_paired_peer_id = *peer_id;
                     self.state.peer_id = *peer_id;
                 }
             }
@@ -521,6 +536,89 @@ mod tests {
         assert!(!app.state.on);
         assert_eq!(app.state.peer_id, [0u8; 32]);
         assert_eq!(app.state.trusted_peer_name, None);
+    }
+
+    #[test]
+    fn fs046_repair_with_a_different_peer_clears_history() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Phone A".into(),
+            },
+            &wall(),
+        );
+        app.handle(Event::HandshakeOk, &wall());
+        app.handle(
+            Event::LocalClipboardChange {
+                hash: [1; 32],
+                kind: Kind::Text,
+                preview: "MY_PASSWORD".into(),
+                sensitive: false,
+                lamport: 1,
+            },
+            &wall(),
+        );
+        assert_eq!(app.state.history.len(), 1);
+
+        // Unpair keeps the history (FS-046).
+        app.handle(Event::ManualUnpair, &wall());
+        assert_eq!(app.state.history.len(), 1);
+
+        // Re-pair with a DIFFERENT peer: the old secret must be gone, or it
+        // would leak to the new peer on a BurstReplay.
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [0xB; 32],
+                name: "Phone B".into(),
+            },
+            &wall(),
+        );
+        assert!(
+            app.state.history.is_empty(),
+            "different-peer re-pair leaked prior history: {:?}",
+            app.state.history
+        );
+    }
+
+    #[test]
+    fn fs046_repair_with_the_same_peer_keeps_history() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Phone A".into(),
+            },
+            &wall(),
+        );
+        app.handle(Event::HandshakeOk, &wall());
+        app.handle(
+            Event::LocalClipboardChange {
+                hash: [1; 32],
+                kind: Kind::Url,
+                preview: "https://github.com".into(),
+                sensitive: false,
+                lamport: 1,
+            },
+            &wall(),
+        );
+        assert_eq!(app.state.history.len(), 1);
+
+        // Reconnect the SAME peer — history stays (FS-046 intent).
+        app.handle(Event::ManualUnpair, &wall());
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Phone A".into(),
+            },
+            &wall(),
+        );
+        assert_eq!(app.state.history.len(), 1);
+        assert_eq!(app.state.history[0].preview, "https://github.com");
     }
 
     #[test]
