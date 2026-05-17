@@ -76,11 +76,32 @@ pub struct TestPair {
 }
 
 fn hostname_or(default: &str) -> String {
-    // gethostname() is the reliable way to get the device name on
-    // macOS/Linux. The `HOSTNAME` / `COMPUTERNAME` env vars are often
-    // unset on macOS, causing the fallback to "this device".
+    // A device name that parses as an IP address is useless to show a
+    // peer. macOS in particular often sets the POSIX hostname to the
+    // DHCP-assigned address, so reject anything that looks like an IP.
+    fn usable(s: &str) -> bool {
+        !s.is_empty() && s.parse::<std::net::IpAddr>().is_err()
+    }
+
+    // macOS: the POSIX hostname is frequently the DHCP IP. The
+    // user-facing device name lives in SystemConfiguration — `scutil`
+    // is the simplest reliable way to read it ("Dethie's MacBook Pro").
+    #[cfg(target_os = "macos")]
+    if let Ok(out) = std::process::Command::new("/usr/sbin/scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+    {
+        if let Ok(s) = String::from_utf8(out.stdout) {
+            let s = s.trim();
+            if usable(s) {
+                return s.to_string();
+            }
+        }
+    }
+
+    // The `HOSTNAME` / `COMPUTERNAME` env vars are often unset on macOS.
     if let Ok(name) = std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")) {
-        if !name.is_empty() {
+        if usable(&name) {
             return name;
         }
     }
@@ -88,7 +109,7 @@ fn hostname_or(default: &str) -> String {
     #[cfg(unix)]
     if let Ok(name) = nix::unistd::gethostname() {
         if let Some(s) = name.to_str() {
-            if !s.is_empty() {
+            if usable(s) {
                 return s.to_string();
             }
         }
