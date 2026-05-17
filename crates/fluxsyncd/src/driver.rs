@@ -845,6 +845,12 @@ async fn handle_driver_cmd(
         CmdOp::DebugCapture {} | CmdOp::Shutdown {} => CmdResponse::ok(req_id, None),
         CmdOp::Unpair {} => {
             tracing::info!("Manual unpair requested via IPC");
+            trusted.lock().await.clear();
+            if let Some(dir) = keystore_dir {
+                if let Err(e) = save_current_peers(dir, trusted, transport).await {
+                    tracing::warn!(error = %e, "failed to persist unpair to keystore");
+                }
+            }
             let actions = app.handle(Event::ManualUnpair, &**wall);
             dispatch(
                 actions,
@@ -909,6 +915,11 @@ async fn handle_driver_cmd(
                 Err(_) => return reply_err(reply, req_id, "expected 32-byte peer_id"),
             };
             trusted.lock().await.remove(&arr);
+            if let Some(dir) = keystore_dir {
+                if let Err(e) = save_current_peers(dir, trusted, transport).await {
+                    tracing::warn!(error = %e, "failed to persist revocation to keystore");
+                }
+            }
             let actions = app.handle(Event::ManualUnpair, &**wall);
             dispatch(
                 actions,
