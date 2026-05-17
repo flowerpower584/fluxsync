@@ -313,15 +313,14 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         });
     }
 
-    // Pairing Watchdog.
-    // If we are in Discovering phase (on + no peer) and have no active session,
-    // ensure the pairing window is open so the QR code appears.
-    //
-    // Ghost Timeout: If we are in Discovering phase with a known peer, and 10 minutes
+    // Ghost Timeout watchdog.
+    // If we are in Discovering phase with a known peer, and 10 minutes
     // pass without reconnecting, drop the peer to prevent permanent ghosting.
+    //
+    // The pairing window is NOT opened here: it opens only on an explicit
+    // `PairShow` IPC command. A watchdog re-opening it would keep the TOFU
+    // window permanently open while unpaired (FS-040).
     {
-        let transport = transport.clone();
-        let pairing_window = pairing_window.clone();
         let state_rx = state_watch_rx.clone();
         let event_tx_clone = event_tx.clone();
         let shutdown = shutdown.clone();
@@ -330,15 +329,6 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
             let mut last_discovering_with_peer: Option<std::time::Instant> = None;
             loop {
                 let state = rx.borrow().clone();
-                // If turned on but not connected, and no session is active.
-                if state.on && state.peer_name.is_empty() && transport.session.lock().await.is_none() {
-                    let mut g = pairing_window.lock().await;
-                    let is_active = g.map(|d| Instant::now() < d).unwrap_or(false);
-                    if !is_active {
-                        tracing::info!("Pairing Watchdog: opening pairing window (90s)");
-                        *g = Some(Instant::now() + handshake::PAIRING_WINDOW);
-                    }
-                }
 
                 // Ghost Timeout Check
                 if state.phase == "discovering" && !state.peer_name.is_empty() {
