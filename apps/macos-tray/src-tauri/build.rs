@@ -26,7 +26,45 @@ fn main() {
         }
     }
 
+    prepare_sidecar();
+
     tauri_build::build();
+}
+
+/// Builds the `fluxsyncd` daemon and drops it in `binaries/` under the
+/// triple-suffixed name Tauri's `externalBin` expects. Runs here, before
+/// `tauri_build::build()`, so the sidecar always exists no matter how the
+/// crate is compiled (`cargo`, `tauri dev`, an IDE button — not just the
+/// npm scripts). `binaries/` is gitignored, so a fresh clone has nothing.
+fn prepare_sidecar() {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let repo_root = manifest_dir
+        .join("../../..")
+        .canonicalize()
+        .expect("locate repo root from src-tauri");
+    let target = std::env::var("TARGET").expect("TARGET");
+    let exe = if target.contains("windows") { ".exe" } else { "" };
+
+    let sidecar = manifest_dir
+        .join("binaries")
+        .join(format!("fluxsyncd-{target}{exe}"));
+    if sidecar.exists() {
+        return;
+    }
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = std::process::Command::new(&cargo)
+        .args(["build", "--release", "-p", "fluxsyncd", "--manifest-path"])
+        .arg(repo_root.join("Cargo.toml"))
+        .status()
+        .expect("spawn cargo build for fluxsyncd");
+    assert!(status.success(), "failed to build the fluxsyncd sidecar");
+
+    let built = repo_root
+        .join("target/release")
+        .join(format!("fluxsyncd{exe}"));
+    fs::create_dir_all(sidecar.parent().unwrap()).expect("create binaries/");
+    fs::copy(&built, &sidecar).expect("copy fluxsyncd sidecar into binaries/");
 }
 
 fn generate_glyph_png(path: &Path, size: u32) {
