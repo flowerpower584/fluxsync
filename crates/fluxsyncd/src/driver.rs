@@ -129,6 +129,11 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     let last_written_hashes: Arc<Mutex<VecDeque<[u8; 32]>>> =
         Arc::new(Mutex::new(VecDeque::with_capacity(10)));
 
+    // Outbound items awaiting acks. Shared between the action dispatch
+    // (inserts on SendItem), the inbound frame handler (removes on Ack),
+    // and the transport loop's retransmit timer.
+    let inflight: InflightMap = Arc::new(Mutex::new(HashMap::new()));
+
     // ── Test path: install session + jump to Linked ────────────────
     if let Some(tp) = test_pair {
         let TestPair {
@@ -223,9 +228,11 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let shutdown = shutdown.clone();
         let kd = keystore_dir.clone();
         let metrics = metrics.clone();
+        let inflight = inflight.clone();
         tasks.spawn(async move {
             transport_recv_loop(
                 transport, identity, trusted, window, pending, event_tx, shutdown, kd, metrics,
+                inflight,
             )
             .await
         });
@@ -388,28 +395,49 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 if !actions.is_empty() {
                     tracing::debug!(?event, ?actions, phase=?app.snapshot().phase, "FSM transition");
                 }
-                dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics).await;
+                dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight).await;
             }
             Some(driver_cmd) = cmd_rx.recv() => {
-                handle_driver_cmd(
-                    driver_cmd,
-                    &mut app,
-                    &wall_clock,
-                    &identity,
-                    &trusted,
-                    &pairing_window,
-                    &transport,
-                    &pending_initiator_tx,
-                    &event_tx,
-                    &state_watch_tx,
-                    &logs_bcast_tx,
-                    &log_tail,
-                    &last_written_hashes,
-                    keystore_dir.as_ref(),
-                    &udp_bind,
-                    udp_port,
-                    &metrics,
-                ).await;
+                match driver_cmd {
+                    DriverCmd::PushImage { hash, png, preview } => {
+                        use fluxsync_core::Clock;
+                        let lamport = app.clock.tick();
+                        let actions = app.handle(
+                            Event::LocalClipboardChange {
+                                hash,
+                                kind: Kind::Image,
+                                payload: png,
+                                preview,
+                                sensitive: false,
+                                lamport,
+                            },
+                            &*wall_clock,
+                        );
+                        dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight).await;
+                    }
+                    run_cmd => {
+                        handle_driver_cmd(
+                            run_cmd,
+                            &mut app,
+                            &wall_clock,
+                            &identity,
+                            &trusted,
+                            &pairing_window,
+                            &transport,
+                            &pending_initiator_tx,
+                            &event_tx,
+                            &state_watch_tx,
+                            &logs_bcast_tx,
+                            &log_tail,
+                            &last_written_hashes,
+                            keystore_dir.as_ref(),
+                            &udp_bind,
+                            udp_port,
+                            &metrics,
+                            &inflight,
+                        ).await;
+                    }
+                }
             }
         }
     }
@@ -424,6 +452,14 @@ enum DriverCmd {
         op: CmdOp,
         reply: oneshot::Sender<CmdResponse>,
         req_id: u64,
+    },
+    /// Image copied to the local OS clipboard, forwarded by the clipboard
+    /// watcher. Carries the PNG-encoded payload, the RGBA-derived dedup
+    /// hash, and the history label. No IPC reply — fire-and-forget.
+    PushImage {
+        hash: [u8; 32],
+        png: Vec<u8>,
+        preview: String,
     },
 }
 
@@ -443,6 +479,7 @@ async fn dispatch(
     log_tail: &Arc<LogTail>,
     last_written_hashes: &Arc<Mutex<VecDeque<[u8; 32]>>>,
     metrics: &Arc<Mutex<MetricsTracker>>,
+    inflight: &InflightMap,
 ) {
     for action in actions {
         tracing::debug!(?action, "dispatching action");
@@ -460,23 +497,28 @@ async fn dispatch(
             Action::SendItem {
                 hash,
                 kind,
-                preview,
+                payload,
                 sensitive,
             } => {
                 use fluxsync_core::Clock;
 
-                let payload = preview.into_bytes();
-                if payload.len() > MAX_PAYLOAD {
-                    tracing::warn!(size = payload.len(), "payload too large; truncating");
-                }
                 let payload = if payload.len() > MAX_PAYLOAD {
+                    // Truncating a PNG yields garbage, but a payload over
+                    // the 16 MiB cap can't go on the wire either — the
+                    // watcher already refuses oversized images upstream,
+                    // so this only guards text and is effectively dead
+                    // code for images.
+                    tracing::warn!(size = payload.len(), "payload too large; truncating");
                     payload[..MAX_PAYLOAD].to_vec()
                 } else {
                     payload
                 };
 
+                // Build every datagram for this item up front, encoded.
+                // The same bytes are kept in the inflight table so the
+                // retransmit timer can re-send them verbatim until acked.
+                let mut frames: Vec<Vec<u8>> = Vec::new();
                 if payload.len() <= MAX_CHUNK_DATA {
-                    // Small enough for a single frame
                     let item = ClipboardItem {
                         lamport: app.clock.now(),
                         hash,
@@ -489,27 +531,13 @@ async fn dispatch(
                         version: PROTOCOL_VERSION,
                         msg: Msg::ClipboardItem(item),
                     };
-                    if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                        let peer = *transport.peer_addr.lock().await;
-                        let has_session = transport.session.lock().await.is_some();
-                        tracing::info!(
-                            ?peer,
-                            has_session,
-                            len = bytes.len(),
-                            "SendItem: attempting send_encrypted"
-                        );
-                        match transport.send_encrypted(&bytes).await {
-                            Ok(()) => tracing::info!("SendItem: send_encrypted OK"),
-                            Err(e) => {
-                                tracing::error!(error = %e, "SendItem: send_encrypted FAILED");
-                            }
-                        }
-                    } else {
-                        tracing::error!("SendItem: CBOR encode failed");
+                    match fluxsync_proto::encode(&frame) {
+                        Ok(bytes) => frames.push(bytes),
+                        Err(_) => tracing::error!("SendItem: CBOR encode failed"),
                     }
                 } else {
-                    // Large payload: send as chunks.
-                    // 1. Send the header (ClipboardItem with empty payload)
+                    // Large payload: a header frame (empty payload), then
+                    // one frame per chunk.
                     let header = ClipboardItem {
                         lamport: app.clock.now(),
                         hash,
@@ -523,10 +551,9 @@ async fn dispatch(
                         msg: Msg::ClipboardItem(header),
                     };
                     if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                        let _ = transport.send_encrypted(&bytes).await;
+                        frames.push(bytes);
                     }
 
-                    // 2. Send chunks
                     let chunks: Vec<_> = payload.chunks(MAX_CHUNK_DATA).collect();
                     let total = chunks.len() as u16;
                     for (idx, data) in chunks.into_iter().enumerate() {
@@ -541,11 +568,46 @@ async fn dispatch(
                             msg: Msg::Chunk(chunk),
                         };
                         if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                            let _ = transport.send_encrypted(&bytes).await;
+                            frames.push(bytes);
                         }
-                        // Small delay to prevent UDP congestion
-                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
+                }
+
+                if frames.is_empty() {
+                    tracing::error!("SendItem: nothing to send (encode failed)");
+                } else {
+                    let peer = *transport.peer_addr.lock().await;
+                    let has_session = transport.session.lock().await.is_some();
+                    tracing::info!(
+                        ?peer,
+                        has_session,
+                        frames = frames.len(),
+                        "SendItem: sending item"
+                    );
+                    let multi = frames.len() > 1;
+                    for (i, bytes) in frames.iter().enumerate() {
+                        if let Err(e) = transport.send_encrypted(bytes).await {
+                            tracing::error!(error = %e, "SendItem: send_encrypted FAILED");
+                        }
+                        // Pace multi-frame (chunked) items to avoid UDP
+                        // congestion. A flat 10 ms per chunk would cost
+                        // ~163 s for a 16 MiB image (16384 chunks); burst
+                        // 16 frames then pause 2 ms instead (~2 s total).
+                        if multi && (i + 1) % 16 == 0 {
+                            tokio::time::sleep(Duration::from_millis(2)).await;
+                        }
+                    }
+                    // Retransmit until the peer acks this hash. Without
+                    // this a single dropped datagram loses the item — UDP
+                    // gives no delivery guarantee.
+                    inflight.lock().await.insert(
+                        hash,
+                        Inflight {
+                            frames,
+                            attempts: 0,
+                            last_sent: Instant::now(),
+                        },
+                    );
                 }
             }
             Action::AckItem { hash } => {
@@ -561,38 +623,82 @@ async fn dispatch(
                     let _ = transport.send_encrypted(&bytes).await;
                 }
             }
-            Action::WriteClipboard { preview } => {
+            Action::WriteClipboard { kind, payload } => {
                 // Mark the hash before writing so the watcher's next
                 // poll skips this exact payload — otherwise we'd read
                 // back our own write, fire a LocalClipboardChange, and
-                // ping-pong the same item back to the peer. The mark is
-                // also harmless on Android (the watcher isn't spawned
-                // there), so we update it unconditionally.
-                let hash = clipboard_dedup_hash(&preview);
-                let mut g = last_written_hashes.lock().await;
-                g.push_back(hash);
-                if g.len() > 10 {
-                    g.pop_front();
-                }
-
-                #[cfg(not(target_os = "android"))]
-                {
-                    let text = preview.clone();
-                    tokio::task::spawn_blocking(move || match arboard::Clipboard::new() {
-                        Ok(mut cb) => {
-                            if let Err(e) = cb.set_text(text) {
-                                tracing::warn!(error = %e, "clipboard set_text failed");
+                // ping-pong the same item back to the peer. The hash is
+                // taken over the clipboard's *canonical* form (trimmed
+                // UTF-8 for text, RGBA pixels for images) so it matches
+                // what the watcher computes on read-back — a re-encoded
+                // PNG would hash differently.
+                match kind {
+                    Kind::Image => {
+                        #[cfg(not(target_os = "android"))]
+                        match decode_png_to_rgba(&payload) {
+                            Some((w, h, rgba)) => {
+                                let hash = image_rgba_hash(w, h, &rgba);
+                                {
+                                    let mut g = last_written_hashes.lock().await;
+                                    g.push_back(hash);
+                                    if g.len() > 10 {
+                                        g.pop_front();
+                                    }
+                                }
+                                tokio::task::spawn_blocking(move || {
+                                    match arboard::Clipboard::new() {
+                                        Ok(mut cb) => {
+                                            let img = arboard::ImageData {
+                                                width: w as usize,
+                                                height: h as usize,
+                                                bytes: std::borrow::Cow::Owned(rgba),
+                                            };
+                                            if let Err(e) = cb.set_image(img) {
+                                                tracing::warn!(error = %e, "clipboard set_image failed");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "clipboard init failed");
+                                        }
+                                    }
+                                });
+                            }
+                            None => tracing::warn!("WriteClipboard: PNG decode failed"),
+                        }
+                        #[cfg(target_os = "android")]
+                        {
+                            // Android writes images from `MainActivity` by
+                            // observing `state.history`; nothing to do here.
+                            let _ = payload;
+                        }
+                    }
+                    _ => {
+                        let text = String::from_utf8_lossy(&payload).to_string();
+                        let hash = clipboard_dedup_hash(&text);
+                        {
+                            let mut g = last_written_hashes.lock().await;
+                            g.push_back(hash);
+                            if g.len() > 10 {
+                                g.pop_front();
                             }
                         }
-                        Err(e) => tracing::warn!(error = %e, "clipboard init failed"),
-                    });
-                }
-                #[cfg(target_os = "android")]
-                {
-                    // Android writes the OS clipboard from `MainActivity`
-                    // by observing `state.history`; the daemon side just
-                    // records the hash for dedup symmetry with desktop.
-                    let _ = preview;
+                        #[cfg(not(target_os = "android"))]
+                        tokio::task::spawn_blocking(move || match arboard::Clipboard::new() {
+                            Ok(mut cb) => {
+                                if let Err(e) = cb.set_text(text) {
+                                    tracing::warn!(error = %e, "clipboard set_text failed");
+                                }
+                            }
+                            Err(e) => tracing::warn!(error = %e, "clipboard init failed"),
+                        });
+                        #[cfg(target_os = "android")]
+                        {
+                            // Android writes the OS clipboard from
+                            // `MainActivity`; the daemon just records the
+                            // hash for dedup symmetry with desktop.
+                            let _ = text;
+                        }
+                    }
                 }
             }
             Action::OpenSession => {
@@ -680,6 +786,7 @@ async fn ensure_online(
     log_tail: &Arc<LogTail>,
     last_written_hashes: &Arc<Mutex<VecDeque<[u8; 32]>>>,
     metrics: &Arc<Mutex<MetricsTracker>>,
+    inflight: &InflightMap,
 ) {
     if app.snapshot().on {
         return;
@@ -696,6 +803,7 @@ async fn ensure_online(
         log_tail,
         last_written_hashes,
         metrics,
+        inflight,
     )
     .await;
 }
@@ -723,8 +831,11 @@ async fn handle_driver_cmd(
     udp_bind: &str,
     udp_port: u16,
     metrics: &Arc<Mutex<MetricsTracker>>,
+    inflight: &InflightMap,
 ) {
-    let DriverCmd::Run { op, reply, req_id } = cmd;
+    let DriverCmd::Run { op, reply, req_id } = cmd else {
+        return;
+    };
     let resp = match op {
         CmdOp::Status => {
             let m = metrics.lock().await.snapshot();
@@ -753,6 +864,7 @@ async fn handle_driver_cmd(
                     Event::LocalClipboardChange {
                         hash,
                         kind,
+                        payload: text.as_bytes().to_vec(),
                         preview: text,
                         sensitive,
                         lamport,
@@ -771,6 +883,7 @@ async fn handle_driver_cmd(
                     log_tail,
                     last_written_hashes,
                     metrics,
+                    inflight,
                 )
                 .await;
             }
@@ -809,6 +922,7 @@ async fn handle_driver_cmd(
                     log_tail,
                     last_written_hashes,
                     metrics,
+                    inflight,
                 )
                 .await;
                 CmdResponse::ok(req_id, None)
@@ -838,6 +952,7 @@ async fn handle_driver_cmd(
                 log_tail,
                 last_written_hashes,
                 metrics,
+                inflight,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -863,6 +978,7 @@ async fn handle_driver_cmd(
                 log_tail,
                 last_written_hashes,
                 metrics,
+                inflight,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -885,6 +1001,7 @@ async fn handle_driver_cmd(
                 log_tail,
                 last_written_hashes,
                 metrics,
+                inflight,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -902,6 +1019,7 @@ async fn handle_driver_cmd(
                 log_tail,
                 last_written_hashes,
                 metrics,
+                inflight,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -932,6 +1050,7 @@ async fn handle_driver_cmd(
                 log_tail,
                 last_written_hashes,
                 metrics,
+                inflight,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -982,6 +1101,7 @@ async fn handle_driver_cmd(
                 log_tail,
                 last_written_hashes,
                 metrics,
+                inflight,
             )
             .await;
             CmdResponse::ok(
@@ -1047,6 +1167,7 @@ async fn handle_driver_cmd(
                 log_tail,
                 last_written_hashes,
                 metrics,
+                inflight,
             )
             .await;
             // URI always carries an address hint; if it parses, kick off
@@ -1122,6 +1243,7 @@ async fn handle_driver_cmd(
                 log_tail,
                 last_written_hashes,
                 metrics,
+                inflight,
             )
             .await;
 
@@ -1185,16 +1307,54 @@ async fn transport_recv_loop(
     shutdown: CancellationToken,
     keystore_dir: Option<PathBuf>,
     metrics: Arc<Mutex<MetricsTracker>>,
+    inflight: InflightMap,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
     let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(5));
+    let mut retransmit_interval = tokio::time::interval(RETRANSMIT_INTERVAL);
 
     loop {
         tokio::select! {
             biased;
             () = shutdown.cancelled() => return Ok(()),
+            _ = retransmit_interval.tick() => {
+                // Re-send any clipboard item the peer hasn't acked yet.
+                // Frames whose item exceeds MAX_RETRANSMIT are dropped.
+                let mut to_send: Vec<Vec<u8>> = Vec::new();
+                {
+                    let mut map = inflight.lock().await;
+                    let mut done: Vec<[u8; 32]> = Vec::new();
+                    for (hash, item) in map.iter_mut() {
+                        if item.last_sent.elapsed() < RETRANSMIT_INTERVAL {
+                            continue;
+                        }
+                        if item.attempts >= MAX_RETRANSMIT {
+                            tracing::warn!(
+                                item = ?&hash[..6],
+                                "item dropped: peer never acked after max retransmits"
+                            );
+                            done.push(*hash);
+                            continue;
+                        }
+                        item.attempts += 1;
+                        item.last_sent = Instant::now();
+                        tracing::debug!(
+                            item = ?&hash[..6],
+                            attempt = item.attempts,
+                            "retransmitting unacked item"
+                        );
+                        to_send.extend(item.frames.iter().cloned());
+                    }
+                    for h in done {
+                        map.remove(&h);
+                    }
+                }
+                for bytes in &to_send {
+                    let _ = transport.send_encrypted(bytes).await;
+                }
+            }
             _ = cleanup_interval.tick() => {
                 let mut map = reassembly.lock().await;
                 map.retain(|hash, r| {
@@ -1275,7 +1435,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, &event_tx, &transport, &reassembly, &metrics).await,
+                            Ok(f) => dispatch_inbound_frame(f, &event_tx, &transport, &reassembly, &metrics, &inflight).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -1296,6 +1456,51 @@ async fn transport_recv_loop(
 /// the watcher (which trims before hashing) agree — see FS-026.
 fn clipboard_dedup_hash(text: &str) -> [u8; 32] {
     DedupRing::hash(text.trim().as_bytes())
+}
+
+/// Build the history label for a clipboard payload. Text-like kinds show
+/// the (lossy) UTF-8 text; images show a byte-size descriptor since their
+/// payload is binary PNG.
+fn preview_label(kind: Kind, payload: &[u8]) -> String {
+    match kind {
+        Kind::Image => format!("Image, {} KB", payload.len().div_ceil(1024)),
+        _ => String::from_utf8_lossy(payload).to_string(),
+    }
+}
+
+/// Dedup hash over an image's raw RGBA pixels (prefixed with its
+/// dimensions). Hashing the decoded pixels — not the PNG bytes — keeps the
+/// hash stable across a PNG encode/decode round-trip, so a write followed
+/// by the watcher's read-back is recognised as our own and not echoed back
+/// to the peer.
+#[cfg(not(target_os = "android"))]
+fn image_rgba_hash(width: u32, height: u32, rgba: &[u8]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(8 + rgba.len());
+    buf.extend_from_slice(&width.to_le_bytes());
+    buf.extend_from_slice(&height.to_le_bytes());
+    buf.extend_from_slice(rgba);
+    DedupRing::hash(&buf)
+}
+
+/// Decode PNG bytes to `(width, height, rgba)`. `None` on any decode error.
+#[cfg(not(target_os = "android"))]
+fn decode_png_to_rgba(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    Some((w, h, rgba.into_raw()))
+}
+
+/// Encode RGBA pixels to PNG bytes. `None` on failure (e.g. the buffer
+/// length doesn't match `width * height * 4`).
+#[cfg(not(target_os = "android"))]
+fn encode_png(width: u32, height: u32, rgba: Vec<u8>) -> Option<Vec<u8>> {
+    let img = image::RgbaImage::from_raw(width, height, rgba)?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .ok()?;
+    Some(out.into_inner())
 }
 
 /// Polls the OS clipboard every 200ms and forwards new payloads through
@@ -1362,40 +1567,92 @@ async fn clipboard_watcher_loop(
                     if let Ok(Ok(raw_text)) = text_res {
                         last_seen_hash = Some(clipboard_dedup_hash(&raw_text));
                         tracing::debug!("Clipboard watcher seeded for new session");
+                    } else {
+                        let img_res = tokio::task::spawn_blocking(|| {
+                            arboard::Clipboard::new().and_then(|mut cb| cb.get_image())
+                        })
+                        .await;
+                        if let Ok(Ok(img)) = img_res {
+                            last_seen_hash = Some(image_rgba_hash(
+                                img.width as u32,
+                                img.height as u32,
+                                &img.bytes,
+                            ));
+                            tracing::debug!("Clipboard watcher seeded (image) for new session");
+                        }
                     }
                 }
+                // ── Text ─────────────────────────────────────────────
                 let text_res = tokio::task::spawn_blocking(|| {
                     arboard::Clipboard::new().and_then(|mut cb| cb.get_text())
                 })
                 .await;
-                let Ok(Ok(raw_text)) = text_res else { continue };
-                let text = raw_text.trim().to_string();
-                if text.is_empty() {
-                    continue;
+                if let Ok(Ok(raw_text)) = text_res {
+                    let text = raw_text.trim().to_string();
+                    if !text.is_empty() {
+                        let hash = clipboard_dedup_hash(&raw_text);
+                        if last_seen_hash != Some(hash) {
+                            let already =
+                                last_written_hashes.lock().await.contains(&hash);
+                            last_seen_hash = Some(hash);
+                            if !already {
+                                let (reply_tx, _reply_rx) = oneshot::channel();
+                                if cmd_tx
+                                    .send(DriverCmd::Run {
+                                        op: CmdOp::Push { text },
+                                        reply: reply_tx,
+                                        req_id: 0,
+                                    })
+                                    .is_err()
+                                {
+                                    tracing::error!("clipboard_watcher_loop: failed to send Push command");
+                                    return Ok(());
+                                }
+                                tracing::debug!("clipboard_watcher_loop: Push command sent");
+                            }
+                        }
+                        // Had text this tick — skip the image probe.
+                        continue;
+                    }
                 }
-                let hash = clipboard_dedup_hash(&raw_text);
+
+                // ── Image (only when the clipboard holds no text) ────
+                let img_res = tokio::task::spawn_blocking(|| {
+                    arboard::Clipboard::new().and_then(|mut cb| cb.get_image())
+                })
+                .await;
+                let Ok(Ok(img)) = img_res else { continue };
+                let w = img.width as u32;
+                let h = img.height as u32;
+                let rgba = img.bytes.into_owned();
+                let hash = image_rgba_hash(w, h, &rgba);
                 if last_seen_hash == Some(hash) {
                     continue;
                 }
-                let hashes = last_written_hashes.lock().await;
-                if hashes.contains(&hash) {
-                    last_seen_hash = Some(hash);
+                let already = last_written_hashes.lock().await.contains(&hash);
+                last_seen_hash = Some(hash);
+                if already {
                     continue;
                 }
-                last_seen_hash = Some(hash);
-                let (reply_tx, _reply_rx) = oneshot::channel();
-                if cmd_tx
-                    .send(DriverCmd::Run {
-                        op: CmdOp::Push { text },
-                        reply: reply_tx,
-                        req_id: 0,
-                    })
-                    .is_err()
-                {
-                    tracing::error!("clipboard_watcher_loop: failed to send Push command");
-                    return Ok(());
+                match encode_png(w, h, rgba) {
+                    Some(png) if png.len() <= MAX_PAYLOAD => {
+                        let preview =
+                            format!("Image {w}×{h}, {} KB", png.len().div_ceil(1024));
+                        if cmd_tx
+                            .send(DriverCmd::PushImage { hash, png, preview })
+                            .is_err()
+                        {
+                            tracing::error!("clipboard_watcher_loop: failed to send PushImage command");
+                            return Ok(());
+                        }
+                        tracing::debug!("clipboard_watcher_loop: PushImage command sent");
+                    }
+                    Some(png) => tracing::warn!(
+                        size = png.len(),
+                        "clipboard image exceeds 16 MiB cap; skipped"
+                    ),
+                    None => tracing::warn!("clipboard image PNG encode failed"),
                 }
-                tracing::debug!("clipboard_watcher_loop: Push command sent");
             }
         }
     }
@@ -1523,6 +1780,7 @@ async fn dispatch_inbound_frame(
     transport: &Arc<Transport>,
     reassembly: &Arc<Mutex<HashMap<[u8; 32], Reassembly>>>,
     metrics: &Arc<Mutex<MetricsTracker>>,
+    inflight: &InflightMap,
 ) {
     match frame.msg {
         Msg::ClipboardItem(item) => {
@@ -1537,13 +1795,37 @@ async fn dispatch_inbound_frame(
                 });
                 r.metadata = Some((item.lamport, item.kind, item.sensitive));
                 r.last_update = Instant::now();
-                // If chunks arrived before the header, we already have them.
-                // If not, we just wait for them.
+                // A header datagram can arrive AFTER all its chunks (UDP
+                // reorders freely). Check completion here too — not only in
+                // the Chunk arm — or a late header strands a full payload.
+                if let Some((lamport, kind, sensitive)) = r
+                    .metadata
+                    .filter(|_| !r.chunks.is_empty())
+                    .filter(|_| r.chunks.iter().all(std::option::Option::is_some))
+                {
+                    let mut full_payload = Vec::new();
+                    for chunk in r.chunks.drain(..) {
+                        full_payload.extend(chunk.unwrap());
+                    }
+                    map.remove(&item.hash);
+                    drop(map);
+
+                    let preview = preview_label(kind, &full_payload);
+                    let _ = event_tx.send(Event::FrameReceivedClipboard {
+                        hash: item.hash,
+                        kind,
+                        payload: full_payload,
+                        preview,
+                        sensitive,
+                        lamport,
+                    });
+                }
             } else {
-                let preview = String::from_utf8_lossy(&item.payload).to_string();
+                let preview = preview_label(item.kind, &item.payload);
                 let _ = event_tx.send(Event::FrameReceivedClipboard {
                     hash: item.hash,
                     kind: item.kind,
+                    payload: item.payload,
                     preview,
                     sensitive: item.sensitive,
                     lamport: item.lamport,
@@ -1598,10 +1880,11 @@ async fn dispatch_inbound_frame(
                 map.remove(&c.item_id);
                 drop(map);
 
-                let preview = String::from_utf8_lossy(&full_payload).to_string();
+                let preview = preview_label(kind, &full_payload);
                 let _ = event_tx.send(Event::FrameReceivedClipboard {
                     hash: c.item_id,
                     kind,
+                    payload: full_payload,
                     preview,
                     sensitive,
                     lamport,
@@ -1629,9 +1912,15 @@ async fn dispatch_inbound_frame(
                 let _ = transport.send_encrypted(&bytes).await;
             }
         }
-        Msg::Ack(_) => {
-            tracing::debug!("Heartbeat: received ack (pong)");
+        Msg::Ack(ack) => {
             metrics.lock().await.on_ack_received();
+            if ack.hash == [0u8; 32] {
+                // Heartbeat pong — no item to clear.
+                tracing::debug!("Heartbeat: received ack (pong)");
+            } else if inflight.lock().await.remove(&ack.hash).is_some() {
+                // Item delivery confirmed — stop retransmitting it.
+                tracing::debug!(item = ?&ack.hash[..6], "item acked; retransmit cleared");
+            }
         }
         Msg::Bye => {
             // Peer announced a clean disconnect: tear down the session and
@@ -1668,6 +1957,25 @@ struct Reassembly {
     last_update: Instant,
     first_seen: Instant,
 }
+
+/// An outbound clipboard item awaiting the peer's `Msg::Ack`. Frames are
+/// stored already-encoded so the retransmit timer can re-send them
+/// verbatim until the ack lands or `MAX_RETRANSMIT` attempts elapse.
+/// This is the only delivery guarantee on the UDP path — without it a
+/// dropped datagram silently loses the item.
+struct Inflight {
+    frames: Vec<Vec<u8>>,
+    attempts: u8,
+    last_sent: Instant,
+}
+
+/// Map of clipboard items sent but not yet acked, keyed by item hash.
+type InflightMap = Arc<Mutex<HashMap<[u8; 32], Inflight>>>;
+
+/// Wait this long for an ack before re-sending an inflight item.
+const RETRANSMIT_INTERVAL: Duration = Duration::from_secs(2);
+/// Drop the item after this many re-sends with no ack.
+const MAX_RETRANSMIT: u8 = 6;
 
 // ─────────────────────────────────────────────────────────────────
 // mDNS discovery dispatcher
@@ -2128,13 +2436,14 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let inflight = Arc::new(Mutex::new(HashMap::new()));
         let metrics = Arc::new(Mutex::new(MetricsTracker::new()));
 
         let frame = Frame {
             version: PROTOCOL_VERSION,
             msg: Msg::Bye,
         };
-        dispatch_inbound_frame(frame, &event_tx, &transport, &reassembly, &metrics).await;
+        dispatch_inbound_frame(frame, &event_tx, &transport, &reassembly, &metrics, &inflight).await;
 
         assert!(
             matches!(event_rx.try_recv(), Ok(Event::PeerLost)),
