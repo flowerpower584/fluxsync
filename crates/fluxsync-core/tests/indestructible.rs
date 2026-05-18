@@ -307,6 +307,7 @@ fn clipboard_local_to_peer_emits_send() {
         Event::LocalClipboardChange {
             hash: h(1),
             kind: Kind::Text,
+            payload: "Salam".to_string().into_bytes(),
             preview: "Salam".into(),
             sensitive: false,
             lamport: 1,
@@ -326,6 +327,7 @@ fn clipboard_peer_to_local_writes_and_acks() {
         Event::FrameReceivedClipboard {
             hash: h(2),
             kind: Kind::Text,
+            payload: "Bonjour".to_string().into_bytes(),
             preview: "Bonjour".into(),
             lamport: 5,
             sensitive: false,
@@ -334,7 +336,7 @@ fn clipboard_peer_to_local_writes_and_acks() {
     );
     assert!(a
         .iter()
-        .any(|x| matches!(x, Action::WriteClipboard { preview } if preview == "Bonjour")));
+        .any(|x| matches!(x, Action::WriteClipboard { payload, .. } if payload == b"Bonjour")));
     assert!(a
         .iter()
         .any(|x| matches!(x, Action::AckItem { hash } if *hash == h(2))));
@@ -348,6 +350,7 @@ fn clipboard_dedup_suppresses_echo() {
         Event::LocalClipboardChange {
             hash: h(10),
             kind: Kind::Text,
+            payload: "x".to_string().into_bytes(),
             preview: "x".into(),
             sensitive: false,
             lamport: 1,
@@ -361,6 +364,7 @@ fn clipboard_dedup_suppresses_echo() {
         Event::LocalClipboardChange {
             hash: h(10),
             kind: Kind::Text,
+            payload: "x".to_string().into_bytes(),
             preview: "x".into(),
             sensitive: false,
             lamport: 2,
@@ -378,6 +382,7 @@ fn clipboard_cross_dedup_peer_then_local() {
         Event::FrameReceivedClipboard {
             hash: h(20),
             kind: Kind::Text,
+            payload: "echo".to_string().into_bytes(),
             preview: "echo".into(),
             lamport: 1,
             sensitive: false,
@@ -389,6 +394,7 @@ fn clipboard_cross_dedup_peer_then_local() {
         Event::LocalClipboardChange {
             hash: h(20),
             kind: Kind::Text,
+            payload: "echo".to_string().into_bytes(),
             preview: "echo".into(),
             sensitive: false,
             lamport: 2,
@@ -406,6 +412,7 @@ fn clipboard_sensitive_not_in_history() {
         Event::LocalClipboardChange {
             hash: h(30),
             kind: Kind::Text,
+            payload: "sk_live_aBcDeFgHiJkLmNoPqRsTuVwX".to_string().into_bytes(),
             preview: "sk_live_aBcDeFgHiJkLmNoPqRsTuVwX".into(),
             sensitive: true,
             lamport: 1,
@@ -423,6 +430,7 @@ fn clipboard_history_capped_at_50() {
             Event::FrameReceivedClipboard {
                 hash: h(i),
                 kind: Kind::Text,
+                payload: format!("item-{i}").into_bytes(),
                 preview: format!("item-{i}"),
                 lamport: u64::from(i),
                 sensitive: false,
@@ -442,6 +450,7 @@ fn clipboard_history_newest_first() {
             Event::FrameReceivedClipboard {
                 hash: h(i),
                 kind: Kind::Text,
+                payload: format!("msg-{i}").into_bytes(),
                 preview: format!("msg-{i}"),
                 lamport: u64::from(i),
                 sensitive: false,
@@ -694,6 +703,7 @@ fn emit_state_on_every_meaningful_event() {
         Event::FrameReceivedClipboard {
             hash: h(99),
             kind: Kind::Text,
+            payload: "test".to_string().into_bytes(),
             preview: "test".into(),
             lamport: 1,
             sensitive: false,
@@ -734,6 +744,7 @@ fn stress_interleaved_clipboard_and_battery() {
                 Event::LocalClipboardChange {
                     hash,
                     kind: Kind::Text,
+                    payload: format!("local-{i}").into_bytes(),
                     preview: format!("local-{i}"),
                     sensitive: false,
                     lamport: u64::from(i),
@@ -745,6 +756,7 @@ fn stress_interleaved_clipboard_and_battery() {
                 Event::FrameReceivedClipboard {
                     hash,
                     kind: Kind::Text,
+                    payload: format!("remote-{i}").into_bytes(),
                     preview: format!("remote-{i}"),
                     lamport: u64::from(i),
                     sensitive: false,

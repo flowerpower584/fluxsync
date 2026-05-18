@@ -121,6 +121,7 @@ impl App {
                 preview,
                 sensitive,
                 lamport,
+                ..
             } => {
                 let preview = preview.trim();
                 self.clock.observe(*lamport);
@@ -143,6 +144,7 @@ impl App {
                 preview,
                 sensitive,
                 lamport,
+                ..
             } => {
                 // On nettoie le texte (espaces inutiles aux extrémités)
                 let preview = preview.trim();
@@ -490,6 +492,7 @@ mod tests {
             Event::LocalClipboardChange {
                 hash: [1; 32],
                 kind: Kind::Url,
+                payload: "https://github.com".to_string().into_bytes(),
                 preview: "https://github.com".into(),
                 sensitive: false,
                 lamport: 1,
@@ -520,6 +523,7 @@ mod tests {
             Event::LocalClipboardChange {
                 hash: [1; 32],
                 kind: Kind::Url,
+                payload: "https://github.com".to_string().into_bytes(),
                 preview: "https://github.com".into(),
                 sensitive: false,
                 lamport: 1,
@@ -554,6 +558,7 @@ mod tests {
             Event::LocalClipboardChange {
                 hash: [1; 32],
                 kind: Kind::Text,
+                payload: "MY_PASSWORD".to_string().into_bytes(),
                 preview: "MY_PASSWORD".into(),
                 sensitive: false,
                 lamport: 1,
@@ -599,6 +604,7 @@ mod tests {
             Event::LocalClipboardChange {
                 hash: [1; 32],
                 kind: Kind::Url,
+                payload: "https://github.com".to_string().into_bytes(),
                 preview: "https://github.com".into(),
                 sensitive: false,
                 lamport: 1,
@@ -644,6 +650,7 @@ mod tests {
             Event::LocalClipboardChange {
                 hash: [9; 32],
                 kind: Kind::Text,
+                payload: "sk_live_aaaaaaaaaaaaaaaaaaaaaaaa".to_string().into_bytes(),
                 preview: "sk_live_aaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 sensitive: true,
                 lamport: 1,
@@ -677,6 +684,7 @@ mod tests {
             Event::LocalClipboardChange {
                 hash: [3; 32],
                 kind: Kind::Text,
+                payload: "x".to_string().into_bytes(),
                 preview: "x".into(),
                 sensitive: false,
                 lamport: 1,
@@ -689,6 +697,7 @@ mod tests {
             Event::LocalClipboardChange {
                 hash: [3; 32],
                 kind: Kind::Text,
+                payload: "x".to_string().into_bytes(),
                 preview: "x".into(),
                 sensitive: false,
                 lamport: 2,
@@ -721,6 +730,7 @@ mod tests {
             Event::FrameReceivedClipboard {
                 hash: [4; 32],
                 kind: Kind::Text,
+                payload: "Bonjour".to_string().into_bytes(),
                 preview: "Bonjour".into(),
                 lamport: 5,
                 sensitive: false,
@@ -760,6 +770,7 @@ mod tests {
             Event::FrameReceivedClipboard {
                 hash: [1; 32],
                 kind: Kind::Text,
+                payload: "recent".to_string().into_bytes(),
                 preview: "recent".into(),
                 lamport: 500,
                 sensitive: false,
@@ -773,6 +784,7 @@ mod tests {
             Event::FrameReceivedClipboard {
                 hash: [2; 32],
                 kind: Kind::Text,
+                payload: "old retransmit".to_string().into_bytes(),
                 preview: "old retransmit".into(),
                 lamport: 3,
                 sensitive: false,
@@ -814,6 +826,7 @@ mod tests {
                 Event::FrameReceivedClipboard {
                     hash: [i; 32],
                     kind: Kind::Text,
+                    payload: format!("item-{i}").into_bytes(),
                     preview: format!("item-{i}"),
                     lamport: u64::from(i),
                     sensitive: false,

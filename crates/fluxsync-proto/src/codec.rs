@@ -207,11 +207,38 @@ mod tests {
         let chunk = Chunk {
             item_id: [0; 32],
             idx: 0,
-            total: 257,
+            total: MAX_CHUNKS + 1,
             data: vec![],
         };
         let err = encode(&frame(Msg::Chunk(chunk))).unwrap_err();
-        assert!(matches!(err, ProtoError::ChunkTotalTooLarge(257)));
+        assert!(matches!(err, ProtoError::ChunkTotalTooLarge(n) if n == MAX_CHUNKS + 1));
+    }
+
+    #[test]
+    fn round_trip_clipboard_image() {
+        // A few non-UTF8 bytes to prove the payload survives as raw binary.
+        let f = frame(Msg::ClipboardItem(ClipboardItem {
+            lamport: 7,
+            hash: [9; 32],
+            kind: Kind::Image,
+            payload: vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0xFE, 0x01],
+            sensitive: false,
+            wall_time_ms: 1_700_000_000_000,
+        }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn accepts_chunk_total_at_max() {
+        let chunk = Chunk {
+            item_id: [0; 32],
+            idx: MAX_CHUNKS - 1,
+            total: MAX_CHUNKS,
+            data: vec![0u8; MAX_CHUNK_DATA],
+        };
+        let bytes = encode(&frame(Msg::Chunk(chunk))).unwrap();
+        assert!(decode(&bytes).is_ok());
     }
 
     #[test]

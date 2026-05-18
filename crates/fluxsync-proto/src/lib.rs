@@ -21,12 +21,16 @@ pub use types::{
 /// Wire-format version. Bumped on any breaking change to the CBOR shapes.
 pub const PROTOCOL_VERSION: u8 = 0x01;
 
-/// Largest reassembled clipboard payload v0.1 will accept (256 KiB).
-pub const MAX_PAYLOAD: usize = 256 * 1024;
+/// Largest reassembled clipboard payload we accept (16 MiB) — sized for
+/// Retina / S21-Ultra PNG screenshots, which run 8-12 MiB.
+pub const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 
-/// Largest data section inside a single [`Chunk`] frame (1 KiB).
+/// Largest data section inside a single [`Chunk`] frame (1 KiB). Held at 1 KiB
+/// so the final datagram (CBOR + Noise overhead ≈ 1.1-1.2 KiB) stays under the
+/// 1500 B Wi-Fi MTU — one lost IP fragment would kill the whole UDP datagram.
 pub const MAX_CHUNK_DATA: usize = 1024;
 
 /// Hard cap on chunk-count per item — bounds reassembly buffer and refuses
-/// trivial DoS allocations from a malicious peer.
-pub const MAX_CHUNKS: u16 = 256;
+/// trivial DoS allocations from a malicious peer. 16384 × 1 KiB = 16 MiB,
+/// matching [`MAX_PAYLOAD`] (u16 ceiling ≈ 64 MiB).
+pub const MAX_CHUNKS: u16 = 16384;

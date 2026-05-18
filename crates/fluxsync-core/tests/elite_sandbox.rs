@@ -39,6 +39,7 @@ mod elite_sandbox {
             Event::FrameReceivedClipboard {
                 hash: [1; 32],
                 kind: Kind::Text,
+                payload: "recent".to_string().into_bytes(),
                 preview: "recent".into(),
                 lamport: 150,
                 sensitive: false,
@@ -52,6 +53,7 @@ mod elite_sandbox {
             Event::FrameReceivedClipboard {
                 hash: [2; 32],
                 kind: Kind::Text,
+                payload: "old retransmit".to_string().into_bytes(),
                 preview: "old retransmit".into(),
                 lamport: 10,
                 sensitive: false,
@@ -89,6 +91,7 @@ mod elite_sandbox {
             Event::FrameReceivedClipboard {
                 hash,
                 kind: Kind::Text,
+                payload: "First".to_string().into_bytes(),
                 preview: "First".into(),
                 lamport: 10,
                 sensitive: false,
@@ -104,6 +107,7 @@ mod elite_sandbox {
             Event::FrameReceivedClipboard {
                 hash,
                 kind: Kind::Text,
+                payload: "First".to_string().into_bytes(),
                 preview: "First".into(),
                 lamport: 11,
                 sensitive: false,
@@ -129,6 +133,7 @@ mod elite_sandbox {
             Event::LocalClipboardChange {
                 hash: [1; 32],
                 kind: Kind::Text,
+                payload: "  Hello World  ".to_string().into_bytes(),
                 preview: "  Hello World  ".into(),
                 sensitive: false,
                 lamport: 1,

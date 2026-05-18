@@ -37,6 +37,10 @@ pub enum Event {
     LocalClipboardChange {
         hash: [u8; 32],
         kind: Kind,
+        /// Raw clipboard bytes — UTF-8 for text/url/code, PNG for images.
+        payload: Vec<u8>,
+        /// Human-readable label for the history UI (truncated text, or an
+        /// "Image 1280×720, 340 KB" descriptor). Never the wire payload.
         preview: String,
         sensitive: bool,
         lamport: u64,
@@ -44,6 +48,9 @@ pub enum Event {
     FrameReceivedClipboard {
         hash: [u8; 32],
         kind: Kind,
+        /// Raw clipboard bytes — UTF-8 for text/url/code, PNG for images.
+        payload: Vec<u8>,
+        /// Human-readable label for the history UI.
         preview: String,
         sensitive: bool,
         lamport: u64,
@@ -66,14 +73,17 @@ pub enum Action {
     SendItem {
         hash: [u8; 32],
         kind: Kind,
-        preview: String,
+        /// Raw bytes to put on the wire as the `ClipboardItem` payload.
+        payload: Vec<u8>,
         sensitive: bool,
     },
     AckItem {
         hash: [u8; 32],
     },
     WriteClipboard {
-        preview: String,
+        kind: Kind,
+        /// Raw bytes to write to the OS clipboard — decoded per `kind`.
+        payload: Vec<u8>,
     },
     EmitState,
     EmitLog(LogEntry),

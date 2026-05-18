@@ -3,13 +3,15 @@ use std::net::SocketAddr;
 
 /// Clipboard payload kind, matching the frontend's history items.
 ///
-/// Serialized as the lower-case strings `"text"`, `"url"`, `"code"`.
+/// Serialized as the lower-case strings `"text"`, `"url"`, `"code"`, `"image"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Text,
     Url,
     Code,
+    /// Binary image payload — PNG bytes (phase 1 is PNG-only).
+    Image,
 }
 
 /// Top-level wire envelope. Every UDP datagram, after decryption, decodes to

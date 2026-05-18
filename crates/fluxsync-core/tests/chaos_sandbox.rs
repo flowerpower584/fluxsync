@@ -97,6 +97,7 @@ fn the_time_paradox_test() {
         Event::FrameReceivedClipboard {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: "Future".to_string().into_bytes(),
             preview: "Future".into(),
             lamport: 100,
             sensitive: false,
@@ -110,6 +111,7 @@ fn the_time_paradox_test() {
         Event::FrameReceivedClipboard {
             hash: [2; 32],
             kind: Kind::Text,
+            payload: "Past".to_string().into_bytes(),
             preview: "Past".into(),
             lamport: 10,
             sensitive: false,
@@ -199,6 +201,7 @@ fn history_spam_test() {
             Event::FrameReceivedClipboard {
                 hash: [i as u8; 32],
                 kind: Kind::Text,
+                payload: format!("item {i}").into_bytes(),
                 preview: format!("item {i}"),
                 lamport: i as u64,
                 sensitive: false,
@@ -265,6 +268,7 @@ fn the_duplicate_history_bug_test() {
         Event::FrameReceivedClipboard {
             hash,
             kind: Kind::Text,
+            payload: "Duplicate Content".to_string().into_bytes(),
             preview: "Duplicate Content".into(),
             lamport: 1,
             sensitive: false,
@@ -276,6 +280,7 @@ fn the_duplicate_history_bug_test() {
         Event::FrameReceivedClipboard {
             hash,
             kind: Kind::Text,
+            payload: "Duplicate Content".to_string().into_bytes(),
             preview: "Duplicate Content".into(),
             lamport: 2,
             sensitive: false,
@@ -310,6 +315,7 @@ fn the_out_of_order_history_test() {
         Event::FrameReceivedClipboard {
             hash: [2; 32],
             kind: Kind::Text,
+            payload: "Message 2".to_string().into_bytes(),
             preview: "Message 2".into(),
             lamport: 10,
             sensitive: false,
@@ -322,6 +328,7 @@ fn the_out_of_order_history_test() {
         Event::FrameReceivedClipboard {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: "Message 1".to_string().into_bytes(),
             preview: "Message 1".into(),
             lamport: 5,
             sensitive: false,
@@ -354,6 +361,7 @@ fn the_privacy_leak_test() {
         Event::LocalClipboardChange {
             hash: [0x55; 32],
             kind: Kind::Text,
+            payload: "MY_PASSWORD".to_string().into_bytes(),
             preview: "MY_PASSWORD".into(),
             sensitive: false, // User forgot to mark it sensitive
             lamport: 1,
@@ -406,6 +414,7 @@ fn memory_and_cpu_stress_test() {
             Event::FrameReceivedClipboard {
                 hash: [i as u8; 32],
                 kind: Kind::Text,
+                payload: large_string.clone().into_bytes(),
                 preview: large_string.clone(),
                 lamport: i as u64,
                 sensitive: false,

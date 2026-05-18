@@ -102,6 +102,7 @@ fn test_04_privacy_leak_cross_peer_history() {
         Event::LocalClipboardChange {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: "SECRET_1".to_string().into_bytes(),
             preview: "SECRET_1".into(),
             sensitive: false,
             lamport: 1,
@@ -149,6 +150,7 @@ fn test_05_sensitive_bypass_attempt() {
         Event::LocalClipboardChange {
             hash: [9; 32],
             kind: Kind::Text,
+            payload: malicious.clone().into_bytes(),
             preview: malicious,
             sensitive: false,
             lamport: 10,
@@ -178,6 +180,7 @@ fn test_06_duplicate_hash_poisoning() {
         Event::FrameReceivedClipboard {
             hash,
             kind: Kind::Text,
+            payload: "Real".to_string().into_bytes(),
             preview: "Real".into(),
             lamport: 1,
             sensitive: false,
@@ -189,6 +192,7 @@ fn test_06_duplicate_hash_poisoning() {
         Event::FrameReceivedClipboard {
             hash,
             kind: Kind::Text,
+            payload: "Fake/Poison".to_string().into_bytes(),
             preview: "Fake/Poison".into(),
             lamport: 2,
             sensitive: false,
@@ -225,6 +229,7 @@ fn test_07_clipboard_bomb_performance() {
             Event::FrameReceivedClipboard {
                 hash: [i as u8; 32],
                 kind: Kind::Text,
+                payload: bomb.clone().into_bytes(),
                 preview: bomb.clone(),
                 lamport: i as u64,
                 sensitive: false,
@@ -292,6 +297,7 @@ fn test_09_lamport_jump_to_max() {
         Event::FrameReceivedClipboard {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: "End of Time".to_string().into_bytes(),
             preview: "End of Time".into(),
             lamport: u64::MAX - 1,
             sensitive: false,
@@ -303,6 +309,7 @@ fn test_09_lamport_jump_to_max() {
         Event::LocalClipboardChange {
             hash: [2; 32],
             kind: Kind::Text,
+            payload: "Next".to_string().into_bytes(),
             preview: "Next".into(),
             sensitive: false,
             lamport: 0,
@@ -329,6 +336,7 @@ fn test_10_negative_lamport_regression() {
         Event::FrameReceivedClipboard {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: "A".to_string().into_bytes(),
             preview: "A".into(),
             lamport: 1000,
             sensitive: false,
@@ -340,6 +348,7 @@ fn test_10_negative_lamport_regression() {
         Event::FrameReceivedClipboard {
             hash: [2; 32],
             kind: Kind::Text,
+            payload: "B".to_string().into_bytes(),
             preview: "B".into(),
             lamport: 0,
             sensitive: false,
@@ -437,6 +446,7 @@ fn test_15_empty_payload_integrity() {
         Event::FrameReceivedClipboard {
             hash: [0; 32],
             kind: Kind::Text,
+            payload: Vec::new(),
             preview: String::new(),
             lamport: 1,
             sensitive: false,
@@ -471,6 +481,7 @@ fn test_16_history_rotation_at_limit() {
             Event::FrameReceivedClipboard {
                 hash: [i as u8; 32],
                 kind: Kind::Text,
+                payload: format!("Old {i}").into_bytes(),
                 preview: format!("Old {i}"),
                 lamport: i as u64,
                 sensitive: false,
@@ -486,6 +497,7 @@ fn test_16_history_rotation_at_limit() {
         Event::FrameReceivedClipboard {
             hash: [99; 32],
             kind: Kind::Text,
+            payload: "Fresh".to_string().into_bytes(),
             preview: "Fresh".into(),
             lamport: 100,
             sensitive: false,
@@ -519,6 +531,7 @@ fn test_17_dedup_collision_resistance() {
         Event::FrameReceivedClipboard {
             hash,
             kind: Kind::Text,
+            payload: "Content A".to_string().into_bytes(),
             preview: "Content A".into(),
             lamport: 1,
             sensitive: false,
@@ -529,6 +542,7 @@ fn test_17_dedup_collision_resistance() {
         Event::FrameReceivedClipboard {
             hash,
             kind: Kind::Text,
+            payload: "Content B".to_string().into_bytes(),
             preview: "Content B".into(),
             lamport: 2,
             sensitive: false,
@@ -559,6 +573,7 @@ fn test_18_lamport_clock_causality_violation() {
         Event::FrameReceivedClipboard {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: "T3".to_string().into_bytes(),
             preview: "T3".into(),
             lamport: 300,
             sensitive: false,
@@ -569,6 +584,7 @@ fn test_18_lamport_clock_causality_violation() {
         Event::FrameReceivedClipboard {
             hash: [2; 32],
             kind: Kind::Text,
+            payload: "T2".to_string().into_bytes(),
             preview: "T2".into(),
             lamport: 200,
             sensitive: false,
@@ -579,6 +595,7 @@ fn test_18_lamport_clock_causality_violation() {
         Event::FrameReceivedClipboard {
             hash: [3; 32],
             kind: Kind::Text,
+            payload: "T1".to_string().into_bytes(),
             preview: "T1".into(),
             lamport: 100,
             sensitive: false,
@@ -641,6 +658,7 @@ fn test_20_null_byte_in_preview() {
         Event::FrameReceivedClipboard {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: malicious.clone().into_bytes(),
             preview: malicious.clone(),
             lamport: 1,
             sensitive: false,
@@ -669,6 +687,7 @@ fn test_21_large_history_unpair_repair_cycle() {
             Event::FrameReceivedClipboard {
                 hash: [i; 32],
                 kind: Kind::Text,
+                payload: format!("P1-{i}").into_bytes(),
                 preview: format!("P1-{i}"),
                 lamport: u64::from(i),
                 sensitive: false,
@@ -762,6 +781,7 @@ fn test_25_local_clipboard_same_as_peer_ack_loop_prevention() {
         Event::FrameReceivedClipboard {
             hash,
             kind: Kind::Text,
+            payload: "Shared".to_string().into_bytes(),
             preview: "Shared".into(),
             lamport: 1,
             sensitive: false,
@@ -774,6 +794,7 @@ fn test_25_local_clipboard_same_as_peer_ack_loop_prevention() {
         Event::LocalClipboardChange {
             hash,
             kind: Kind::Text,
+            payload: "Shared".to_string().into_bytes(),
             preview: "Shared".into(),
             sensitive: false,
             lamport: 2,
@@ -875,6 +896,7 @@ fn test_30_simulated_sha256_poisoning_in_history() {
         Event::LocalClipboardChange {
             hash,
             kind: Kind::Text,
+            payload: "Original".to_string().into_bytes(),
             preview: "Original".into(),
             sensitive: false,
             lamport: 1,
@@ -887,6 +909,7 @@ fn test_30_simulated_sha256_poisoning_in_history() {
         Event::FrameReceivedClipboard {
             hash,
             kind: Kind::Text,
+            payload: "Poison".to_string().into_bytes(),
             preview: "Poison".into(),
             lamport: 2,
             sensitive: false,
@@ -972,6 +995,7 @@ fn test_34_manual_unpair_resets_lamport_clock() {
         Event::FrameReceivedClipboard {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: "X".to_string().into_bytes(),
             preview: "X".into(),
             lamport: 5000,
             sensitive: false,
@@ -1004,6 +1028,7 @@ fn test_35_very_long_preview_truncation() {
         Event::FrameReceivedClipboard {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: long_preview.clone().into_bytes(),
             preview: long_preview.clone(),
             lamport: 1,
             sensitive: false,
@@ -1038,6 +1063,7 @@ fn test_36_malformed_wall_clock_time() {
         Event::FrameReceivedClipboard {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: "X".to_string().into_bytes(),
             preview: "X".into(),
             lamport: 1,
             sensitive: false,
@@ -1095,6 +1121,7 @@ fn test_39_sensitive_data_then_replay_attack() {
         Event::LocalClipboardChange {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: "MOCK_STRIPE_KEY_REDACTED".to_string().into_bytes(),
             preview: "MOCK_STRIPE_KEY_REDACTED".into(),
             sensitive: true,
             lamport: 1,
@@ -1108,6 +1135,7 @@ fn test_39_sensitive_data_then_replay_attack() {
         Event::FrameReceivedClipboard {
             hash: [1; 32],
             kind: Kind::Text,
+            payload: "MOCK_STRIPE_KEY_REDACTED".to_string().into_bytes(),
             preview: "MOCK_STRIPE_KEY_REDACTED".into(),
             lamport: 2,
             sensitive: false,
@@ -1234,6 +1262,7 @@ fn test_46_dedup_eviction_and_reentry() {
         Event::FrameReceivedClipboard {
             hash,
             kind: Kind::Text,
+            payload: "A".to_string().into_bytes(),
             preview: "A".into(),
             lamport: 1,
             sensitive: false,
@@ -1247,6 +1276,7 @@ fn test_46_dedup_eviction_and_reentry() {
             Event::FrameReceivedClipboard {
                 hash: [i as u8; 32],
                 kind: Kind::Text,
+                payload: "B".to_string().into_bytes(),
                 preview: "B".into(),
                 lamport: (i + 10) as u64,
                 sensitive: false,
@@ -1260,6 +1290,7 @@ fn test_46_dedup_eviction_and_reentry() {
         Event::FrameReceivedClipboard {
             hash,
             kind: Kind::Text,
+            payload: "A".to_string().into_bytes(),
             preview: "A".into(),
             lamport: 100,
             sensitive: false,
@@ -1288,6 +1319,7 @@ fn test_47_frozen_wall_clock() {
             Event::FrameReceivedClipboard {
                 hash: [i as u8; 32],
                 kind: Kind::Text,
+                payload: "X".to_string().into_bytes(),
                 preview: "X".into(),
                 lamport: i as u64,
                 sensitive: false,

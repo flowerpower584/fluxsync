@@ -528,6 +528,7 @@ fn test_19_clipboard_push_while_linked_fires_send() {
         Event::LocalClipboardChange {
             hash: [0x42; 32],
             kind: Kind::Text,
+            payload: "hello from mac".to_string().into_bytes(),
             preview: "hello from mac".into(),
             sensitive: false,
             lamport: 1,
@@ -571,6 +572,7 @@ fn test_20_full_offline_online_cycle_end_to_end() {
         Event::LocalClipboardChange {
             hash: [0x01; 32],
             kind: Kind::Url,
+            payload: "https://github.com/fluxsync".to_string().into_bytes(),
             preview: "https://github.com/fluxsync".into(),
             sensitive: false,
             lamport: 1,
@@ -656,6 +658,7 @@ fn test_20_full_offline_online_cycle_end_to_end() {
         Event::LocalClipboardChange {
             hash: [0x02; 32],
             kind: Kind::Text,
+            payload: "from android".to_string().into_bytes(),
             preview: "from android".into(),
             sensitive: false,
             lamport: 2,
@@ -671,6 +674,7 @@ fn test_20_full_offline_online_cycle_end_to_end() {
         Event::FrameReceivedClipboard {
             hash: [0x02; 32],
             kind: Kind::Text,
+            payload: "from android".to_string().into_bytes(),
             preview: "from android".into(),
             lamport: 2,
             sensitive: false,
@@ -678,7 +682,7 @@ fn test_20_full_offline_online_cycle_end_to_end() {
         &wall(),
     );
     assert!(has_action(&a_actions, |a| {
-        matches!(a, Action::WriteClipboard { preview } if preview == "from android")
+        matches!(a, Action::WriteClipboard { payload, .. } if payload == b"from android")
     }));
     assert_eq!(a.snapshot().history[0].preview, "from android");
 }

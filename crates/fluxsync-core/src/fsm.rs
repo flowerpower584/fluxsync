@@ -21,6 +21,22 @@ pub enum Phase {
     Halted,
 }
 
+/// Build the friendly log line for an inbound clipboard frame. Text-like
+/// kinds report a character count off the `preview`; images report a byte
+/// size, since their `payload` is binary and has no meaningful char count.
+fn received_label(kind: fluxsync_proto::Kind, payload: &[u8], preview: &str) -> String {
+    match kind {
+        fluxsync_proto::Kind::Image => {
+            let kib = payload.len().div_ceil(1024);
+            format!("Clipboard updated — image, {kib} KB from peer.")
+        }
+        _ => format!(
+            "Clipboard updated — {} chars from peer.",
+            preview.chars().count()
+        ),
+    }
+}
+
 /// Compute the next phase + action list for a `(phase, event)` pair.
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -148,7 +164,7 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             E::LocalClipboardChange {
                 hash,
                 kind,
-                preview,
+                payload,
                 sensitive,
                 ..
             },
@@ -157,7 +173,7 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             vec![A::SendItem {
                 hash: *hash,
                 kind: *kind,
-                preview: preview.clone(),
+                payload: payload.clone(),
                 sensitive: *sensitive,
             }],
         ),
@@ -167,7 +183,8 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             P::Linked,
             E::FrameReceivedClipboard {
                 hash,
-                kind: _,
+                kind,
+                payload,
                 preview,
                 ..
             },
@@ -175,14 +192,12 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             P::Linked,
             vec![
                 A::WriteClipboard {
-                    preview: preview.clone(),
+                    kind: *kind,
+                    payload: payload.clone(),
                 },
                 A::AckItem { hash: *hash },
                 A::EmitState,
-                A::EmitLog(LogEntry::ok(format!(
-                    "Clipboard updated — {} chars from peer.",
-                    preview.chars().count()
-                ))),
+                A::EmitLog(LogEntry::ok(received_label(*kind, payload, preview))),
             ],
         ),
 
@@ -340,6 +355,7 @@ mod tests {
         let ev = Event::LocalClipboardChange {
             hash: [1; 32],
             kind: Kind::Url,
+            payload: "https://github.com".to_string().into_bytes(),
             preview: "https://github.com".into(),
             sensitive: false,
             lamport: 7,
@@ -351,7 +367,7 @@ mod tests {
             vec![A::SendItem {
                 hash: [1; 32],
                 kind: Kind::Url,
-                preview: "https://github.com".into(),
+                payload: b"https://github.com".to_vec(),
                 sensitive: false,
             }]
         );
@@ -362,6 +378,7 @@ mod tests {
         let ev = Event::FrameReceivedClipboard {
             hash: [2; 32],
             kind: Kind::Text,
+            payload: "Bonjour".to_string().into_bytes(),
             preview: "Bonjour".into(),
             lamport: 11,
             sensitive: false,
@@ -383,6 +400,7 @@ mod tests {
         let ev = Event::FrameReceivedClipboard {
             hash: [7; 32],
             kind: Kind::Text,
+            payload: "early".to_string().into_bytes(),
             preview: "early".into(),
             lamport: 3,
             sensitive: false,
