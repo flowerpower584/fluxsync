@@ -9,8 +9,10 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,6 +45,8 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val s = state ?: return
+
+    var showUnpairConfirm by remember { mutableStateOf(false) }
 
     fun openUrl(url: String) {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
@@ -95,9 +99,10 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
                 )
                 SettingsItem(
                     label = "Unpair all devices",
-                    hint = "Remove every linked peer",
+                    hint = "Reset pairing — needed to re-pair a reinstalled daemon",
                     right = { Text("ACTION ›", color = FsCrit, style = MaterialTheme.typography.labelSmall) },
-                    isLast = true
+                    isLast = true,
+                    onClick = { showUnpairConfirm = true }
                 )
             }
         }
@@ -225,6 +230,36 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
                 Text("Crafted in Kaolack 🇸🇳", color = FsDarkMuted, style = MaterialTheme.typography.bodySmall, fontSize = 11.sp)
             }
         }
+    }
+
+    if (showUnpairConfirm) {
+        AlertDialog(
+            onDismissRequest = { showUnpairConfirm = false },
+            containerColor = FsDarkSurface,
+            title = { Text("Unpair all devices?", color = FsDarkFg) },
+            text = {
+                Text(
+                    "Removes every trusted peer and resets the pairing state. " +
+                        "Use this when a daemon was uninstalled — it clears the stale " +
+                        "link so you can pair the reinstalled daemon again. This cannot be undone.",
+                    color = FsDarkMuted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.unpair()
+                    showUnpairConfirm = false
+                }) {
+                    Text("UNPAIR", color = FsCrit)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUnpairConfirm = false }) {
+                    Text("CANCEL", color = FsDarkMuted)
+                }
+            },
+        )
     }
 }
 

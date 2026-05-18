@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 #[tauri::command]
 async fn fluxsync_status() -> Result<Value, String> {
@@ -160,6 +161,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let _ = app.get_webview_window("menu").map(|w| {
                 let _ = w.show();
@@ -321,12 +323,16 @@ pub fn run() {
             let pair_item = MenuItem::with_id(app, "pair", "Pair a device…", true, None::<&str>)?;
             let prefs_item =
                 MenuItem::with_id(app, "prefs", "Preferences…", true, None::<&str>)?;
+            let unpair_item =
+                MenuItem::with_id(app, "unpair", "Unpair all devices…", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit FluxSync", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
                 &[
                     &pair_item,
                     &prefs_item,
+                    &PredefinedMenuItem::separator(app)?,
+                    &unpair_item,
                     &PredefinedMenuItem::separator(app)?,
                     &quit_item,
                 ],
@@ -349,6 +355,30 @@ pub fn run() {
                     "quit" => app.exit(0),
                     "pair" => open_pair_window(app),
                     "prefs" => open_settings_window(app),
+                    "unpair" => {
+                        let confirmed = app
+                            .dialog()
+                            .message(
+                                "Removes every trusted peer and resets pairing. \
+                                 Use this when a daemon was reinstalled — it clears \
+                                 the stale link so you can pair again. This cannot be undone.",
+                            )
+                            .title("Unpair all devices?")
+                            .kind(MessageDialogKind::Warning)
+                            .buttons(MessageDialogButtons::OkCancelCustom(
+                                "Unpair".into(),
+                                "Cancel".into(),
+                            ))
+                            .blocking_show();
+                        if confirmed {
+                            tauri::async_runtime::spawn(async {
+                                match ipc::one_shot(json!({"id": 1, "op": "unpair"})).await {
+                                    Ok(_) => eprintln!("[fluxsync-tray] unpaired all devices"),
+                                    Err(e) => eprintln!("[fluxsync-tray] unpair failed: {e}"),
+                                }
+                            });
+                        }
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| match event {
