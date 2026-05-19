@@ -52,8 +52,14 @@ nix = { version = "0.28", features = ["fs", "hostname"] }
 # into `fluxsync-mobile-ffi` and the OS clipboard is read/written from
 # `MainActivity` via Android's `ClipboardManager`, so the daemon doesn't
 # need this dep there. Excluding it keeps `cargo ndk` builds green.
+#
+# `wayland-data-control` is required for the native Wayland clipboard
+# (the `wlr-data-control` protocol, supported by KWin/wlroots). Without
+# it arboard falls back to Xwayland, which bridges text but drops
+# image/png — so Wayland → peer image sync silently fails. The feature
+# is target-gated inside arboard, a no-op on macOS/Windows.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-arboard = { version = "3", default-features = false, features = ["image-data"] }
+arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 
 [dev-dependencies]
 fluxsync-crypto = { path = "../fluxsync-crypto", features = ["test-util"] }

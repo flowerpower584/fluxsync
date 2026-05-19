@@ -1725,28 +1725,78 @@ async fn clipboard_watcher_loop(
                 // with the current OS clipboard to avoid blasting disconnected-state copies to the peer.
                 if est != last_session_est {
                     last_session_est = est;
-                    let text_res = tokio::task::spawn_blocking(|| {
-                        arboard::Clipboard::new().and_then(|mut cb| cb.get_text())
-                    }).await;
-                    if let Ok(Ok(raw_text)) = text_res {
-                        last_seen_hash = Some(clipboard_dedup_hash(&raw_text));
-                        tracing::debug!("Clipboard watcher seeded for new session");
+                    // Image-first, mirroring the poll below: a clipboard
+                    // holding image/png means an image was copied, even
+                    // when text/html is attached alongside.
+                    let img_res = tokio::task::spawn_blocking(|| {
+                        arboard::Clipboard::new().and_then(|mut cb| cb.get_image())
+                    })
+                    .await;
+                    if let Ok(Ok(img)) = img_res {
+                        last_seen_hash = Some(image_rgba_hash(
+                            img.width as u32,
+                            img.height as u32,
+                            &img.bytes,
+                        ));
+                        tracing::debug!("Clipboard watcher seeded (image) for new session");
                     } else {
-                        let img_res = tokio::task::spawn_blocking(|| {
-                            arboard::Clipboard::new().and_then(|mut cb| cb.get_image())
+                        let text_res = tokio::task::spawn_blocking(|| {
+                            arboard::Clipboard::new().and_then(|mut cb| cb.get_text())
                         })
                         .await;
-                        if let Ok(Ok(img)) = img_res {
-                            last_seen_hash = Some(image_rgba_hash(
-                                img.width as u32,
-                                img.height as u32,
-                                &img.bytes,
-                            ));
-                            tracing::debug!("Clipboard watcher seeded (image) for new session");
+                        if let Ok(Ok(raw_text)) = text_res {
+                            last_seen_hash = Some(clipboard_dedup_hash(&raw_text));
+                            tracing::debug!("Clipboard watcher seeded for new session");
                         }
                     }
                 }
-                // ── Text ─────────────────────────────────────────────
+                // ── Image (takes priority) ───────────────────────────
+                // image/png on the clipboard means the user copied an
+                // image. Browsers attach text/html + text/x-moz-url
+                // alongside it; probing text first would let that URL
+                // shadow the image (FS: "des fois ça donne l'URL"). So
+                // probe the image first and, when present, skip text.
+                let img_res = tokio::task::spawn_blocking(|| {
+                    arboard::Clipboard::new().and_then(|mut cb| cb.get_image())
+                })
+                .await;
+                if let Ok(Ok(img)) = img_res {
+                    let w = img.width as u32;
+                    let h = img.height as u32;
+                    let rgba = img.bytes.into_owned();
+                    let hash = image_rgba_hash(w, h, &rgba);
+                    if last_seen_hash != Some(hash) {
+                        let already = last_written_hashes.lock().await.contains(&hash);
+                        last_seen_hash = Some(hash);
+                        if !already {
+                            match encode_png(w, h, rgba) {
+                                Some(png) if png.len() <= MAX_PAYLOAD => {
+                                    let preview = format!(
+                                        "Image {w}×{h}, {} KB",
+                                        png.len().div_ceil(1024)
+                                    );
+                                    if cmd_tx
+                                        .send(DriverCmd::PushImage { hash, png, preview })
+                                        .is_err()
+                                    {
+                                        tracing::error!("clipboard_watcher_loop: failed to send PushImage command");
+                                        return Ok(());
+                                    }
+                                    tracing::debug!("clipboard_watcher_loop: PushImage command sent");
+                                }
+                                Some(png) => tracing::warn!(
+                                    size = png.len(),
+                                    "clipboard image exceeds 16 MiB cap; skipped"
+                                ),
+                                None => tracing::warn!("clipboard image PNG encode failed"),
+                            }
+                        }
+                    }
+                    // Had an image this tick — skip the text probe.
+                    continue;
+                }
+
+                // ── Text (only when the clipboard holds no image) ────
                 let text_res = tokio::task::spawn_blocking(|| {
                     arboard::Clipboard::new().and_then(|mut cb| cb.get_text())
                 })
@@ -1775,47 +1825,7 @@ async fn clipboard_watcher_loop(
                                 tracing::debug!("clipboard_watcher_loop: Push command sent");
                             }
                         }
-                        // Had text this tick — skip the image probe.
-                        continue;
                     }
-                }
-
-                // ── Image (only when the clipboard holds no text) ────
-                let img_res = tokio::task::spawn_blocking(|| {
-                    arboard::Clipboard::new().and_then(|mut cb| cb.get_image())
-                })
-                .await;
-                let Ok(Ok(img)) = img_res else { continue };
-                let w = img.width as u32;
-                let h = img.height as u32;
-                let rgba = img.bytes.into_owned();
-                let hash = image_rgba_hash(w, h, &rgba);
-                if last_seen_hash == Some(hash) {
-                    continue;
-                }
-                let already = last_written_hashes.lock().await.contains(&hash);
-                last_seen_hash = Some(hash);
-                if already {
-                    continue;
-                }
-                match encode_png(w, h, rgba) {
-                    Some(png) if png.len() <= MAX_PAYLOAD => {
-                        let preview =
-                            format!("Image {w}×{h}, {} KB", png.len().div_ceil(1024));
-                        if cmd_tx
-                            .send(DriverCmd::PushImage { hash, png, preview })
-                            .is_err()
-                        {
-                            tracing::error!("clipboard_watcher_loop: failed to send PushImage command");
-                            return Ok(());
-                        }
-                        tracing::debug!("clipboard_watcher_loop: PushImage command sent");
-                    }
-                    Some(png) => tracing::warn!(
-                        size = png.len(),
-                        "clipboard image exceeds 16 MiB cap; skipped"
-                    ),
-                    None => tracing::warn!("clipboard image PNG encode failed"),
                 }
             }
         }
