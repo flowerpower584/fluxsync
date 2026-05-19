@@ -52,9 +52,45 @@ fn main() {
         }
     }
 
+    // Windows resource compiler needs an `.ico`; the macOS/Linux builds
+    // never exercise this path so the file was previously absent.
+    let ico_path = icons_dir.join("icon.ico");
+    if !ico_path.exists() {
+        generate_ico(&ico_path, 256);
+    }
+
     prepare_sidecar();
 
     tauri_build::build();
+}
+
+/// Wrap the rendered glyph as a single-image `.ico` (PNG-encoded entry,
+/// the Vista+ icon format). `tauri-build` embeds this as the Windows
+/// executable resource.
+fn generate_ico(path: &Path, size: u32) {
+    let pixels = render_tray_glyph(size);
+    let mut png_buf: Vec<u8> = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_buf, size, size);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut w = encoder.write_header().expect("ico png header");
+        w.write_image_data(&pixels).expect("ico png data");
+    }
+
+    let mut ico: Vec<u8> = Vec::new();
+    ico.extend_from_slice(&[0, 0, 1, 0, 1, 0]); // reserved, type=icon, count=1
+    let dim = if size >= 256 { 0u8 } else { size as u8 };
+    ico.push(dim); // width  (0 == 256)
+    ico.push(dim); // height (0 == 256)
+    ico.push(0); // color palette
+    ico.push(0); // reserved
+    ico.extend_from_slice(&1u16.to_le_bytes()); // color planes
+    ico.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+    ico.extend_from_slice(&(png_buf.len() as u32).to_le_bytes()); // image byte size
+    ico.extend_from_slice(&22u32.to_le_bytes()); // offset: 6-byte dir + 16-byte entry
+    ico.extend_from_slice(&png_buf);
+    fs::write(path, ico).expect("write icon.ico");
 }
 
 /// Builds the `fluxsyncd` daemon and drops it in `binaries/` under the
@@ -75,20 +111,38 @@ fn prepare_sidecar() {
         .join("binaries")
         .join(format!("fluxsyncd-{target}{exe}"));
 
+    // Tell the runtime which `binaries/fluxsyncd-<triple>` name to look
+    // for — `locate_daemon` reads this so the dev-mode managed-sidecar
+    // path works on whatever target we built for.
+    println!("cargo:rustc-env=FLUXSYNC_SIDECAR_FILE=fluxsyncd-{target}{exe}");
+
     // Always rebuild — never trust an existing `binaries/fluxsyncd-*` to
     // be current. `cargo build` is incremental, so this is near-free when
     // nothing changed; build.rs's `rerun-if-changed` set (see `main`)
     // keeps the script itself from re-executing needlessly.
+    //
+    // Always pass `--target` so a cross-compile (cargo-xwin → Windows)
+    // produces a sidecar for the *target*, not the build host.
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let status = std::process::Command::new(&cargo)
-        .args(["build", "--release", "-p", "fluxsyncd", "--manifest-path"])
+        .args([
+            "build",
+            "--release",
+            "-p",
+            "fluxsyncd",
+            "--target",
+            &target,
+            "--manifest-path",
+        ])
         .arg(repo_root.join("Cargo.toml"))
         .status()
         .expect("spawn cargo build for fluxsyncd");
     assert!(status.success(), "failed to build the fluxsyncd sidecar");
 
     let built = repo_root
-        .join("target/release")
+        .join("target")
+        .join(&target)
+        .join("release")
         .join(format!("fluxsyncd{exe}"));
     fs::create_dir_all(sidecar.parent().unwrap()).expect("create binaries/");
     fs::copy(&built, &sidecar).expect("copy fluxsyncd sidecar into binaries/");

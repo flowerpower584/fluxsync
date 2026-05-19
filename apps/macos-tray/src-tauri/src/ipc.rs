@@ -10,7 +10,8 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
 /// Default IPC socket path. Honors `FLUXSYNC_IPC_PATH` so contributors
@@ -18,6 +19,10 @@ use tokio::net::UnixStream;
 fn ipc_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("FLUXSYNC_IPC_PATH") {
         return Ok(PathBuf::from(p));
+    }
+    // Windows: Named Pipe, matching `fluxsyncd`'s `default_ipc_path()`.
+    if cfg!(windows) {
+        return Ok(PathBuf::from(r"\\.\pipe\fluxsync"));
     }
     let home = dirs::home_dir().ok_or_else(|| anyhow!("could not find home directory"))?;
     Ok(home.join(".fluxsync").join("sock"))
@@ -36,9 +41,15 @@ fn ipc_path() -> Result<PathBuf> {
 /// the popup ("daemon not reachable").
 pub fn ensure_daemon_running() {
     if is_daemon_alive() {
+        // Windows has no blocking Named Pipe client wired for the
+        // version guard below — trust a live daemon as-is.
+        #[cfg(not(unix))]
+        return;
+
         // Socket answers — but is it the daemon build this tray expects?
         // A daemon left over from a previous (older) checkout would
         // otherwise be used silently. See the version-guard helpers.
+        #[cfg(unix)]
         match daemon_build_id() {
             Ok(Some(id)) if id == env!("FLUXSYNC_TRAY_BUILD_ID") => return,
             Ok(found) => {
@@ -86,12 +97,22 @@ fn is_daemon_alive() -> bool {
     let Ok(p) = ipc_path() else {
         return false;
     };
-    std::os::unix::net::UnixStream::connect(&p).is_ok()
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(&p).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(&p)
+            .is_ok()
+    }
 }
 
 /// Blocking one-shot `cmd` request on the daemon's UNIX socket. Used by
 /// the boot-time version guard, which runs on a sync thread before the
 /// tokio runtime is wired up — so it can't reuse the async `one_shot`.
+#[cfg(unix)]
 fn ipc_cmd_blocking(op: &str) -> Result<Value> {
     use std::io::{BufRead, Write};
 
@@ -117,6 +138,7 @@ fn ipc_cmd_blocking(op: &str) -> Result<Value> {
 ///   * `Ok(None)` — daemon answered but carries no `build_id` (a build
 ///     predating the field) → treat as stale.
 ///   * `Err(_)` — the probe itself failed; caller should not act on it.
+#[cfg(unix)]
 fn daemon_build_id() -> Result<Option<String>> {
     let v = ipc_cmd_blocking("status")?;
     if !v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
@@ -132,6 +154,7 @@ fn daemon_build_id() -> Result<Option<String>> {
 
 /// Tell a stale daemon to shut down, then wait for it to release its
 /// socket. Returns `true` once the socket stops answering.
+#[cfg(unix)]
 fn restart_stale_daemon() -> bool {
     // Fire-and-forget: a clean shutdown often drops the connection
     // before any response is flushed, so the reply isn't worth reading.
@@ -174,6 +197,14 @@ fn spawn_daemon_detached() -> Result<PathBuf> {
         }
     }
 
+    // Windows: DETACHED_PROCESS so the daemon outlives the tray and
+    // carries no console window of its own.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0000_0008);
+    }
+
     cmd.spawn()
         .with_context(|| format!("spawn {}", bin.display()))?;
     Ok(bin)
@@ -196,9 +227,8 @@ fn detach_session() -> std::io::Result<()> {
 }
 
 fn open_daemon_log() -> Result<std::fs::File> {
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| anyhow!("HOME unset; cannot derive log path"))?;
-    let dir = PathBuf::from(home).join(".fluxsync");
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("could not find home directory"))?;
+    let dir = home.join(".fluxsync");
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("daemon.log");
@@ -207,6 +237,15 @@ fn open_daemon_log() -> Result<std::fs::File> {
         .append(true)
         .open(&path)
         .with_context(|| format!("open {}", path.display()))
+}
+
+/// `fluxsyncd` on Unix, `fluxsyncd.exe` on Windows.
+const fn daemon_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "fluxsyncd.exe"
+    } else {
+        "fluxsyncd"
+    }
 }
 
 /// Search order for the daemon binary:
@@ -232,18 +271,21 @@ fn locate_daemon() -> Result<PathBuf> {
     // through to the bundle layout.
     let managed = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("binaries")
-        .join("fluxsyncd-aarch64-apple-darwin");
+        .join(env!("FLUXSYNC_SIDECAR_FILE"));
     if managed.is_file() {
         return Ok(managed);
     }
 
     if let Ok(self_exe) = std::env::current_exe() {
         if let Some(dir) = self_exe.parent() {
-            let cand = dir.join("fluxsyncd");
+            // Tauri drops the `externalBin` sidecar next to the app
+            // binary with the target triple stripped — `fluxsyncd[.exe]`.
+            let cand = dir.join(daemon_bin_name());
             if cand.is_file() {
                 return Ok(cand);
             }
             // Sidecar location in macOS bundle: ../Resources/binaries/fluxsyncd-<target>
+            #[cfg(target_os = "macos")]
             if let Some(contents) = dir.parent() {
                 let sidecar = contents.join("Resources").join("binaries").join("fluxsyncd-aarch64-apple-darwin");
                 if sidecar.is_file() {
@@ -256,6 +298,7 @@ fn locate_daemon() -> Result<PathBuf> {
     for p in [
         "/opt/homebrew/bin/fluxsyncd",
         "/usr/local/bin/fluxsyncd",
+        "/usr/bin/fluxsyncd",
     ] {
         let p = Path::new(p);
         if p.is_file() {
@@ -263,8 +306,8 @@ fn locate_daemon() -> Result<PathBuf> {
         }
     }
 
-    if let Some(home) = std::env::var_os("HOME") {
-        let cargo_bin = PathBuf::from(&home).join(".cargo/bin/fluxsyncd");
+    if let Some(home) = dirs::home_dir() {
+        let cargo_bin = home.join(".cargo").join("bin").join(daemon_bin_name());
         if cargo_bin.is_file() {
             return Ok(cargo_bin);
         }
@@ -279,7 +322,7 @@ fn locate_daemon() -> Result<PathBuf> {
         let mut cur = self_exe.as_path();
         while let Some(parent) = cur.parent() {
             for profile in ["release", "debug"] {
-                let cand = parent.join("target").join(profile).join("fluxsyncd");
+                let cand = parent.join("target").join(profile).join(daemon_bin_name());
                 if cand.is_file() {
                     return Ok(cand);
                 }
@@ -301,12 +344,28 @@ pub async fn one_shot(request: Value) -> Result<Value, String> {
     one_shot_inner(request).await.map_err(|e| e.to_string())
 }
 
-async fn one_shot_inner(request: Value) -> Result<Value> {
-    let path = ipc_path()?;
-    let stream = UnixStream::connect(&path)
+/// Open an IPC connection to the daemon, returning split read/write
+/// halves. UNIX-domain socket on macOS/Linux, Named Pipe on Windows.
+#[cfg(unix)]
+async fn connect_ipc(path: &Path) -> Result<(impl AsyncRead + Unpin, impl AsyncWrite + Unpin)> {
+    let stream = UnixStream::connect(path)
         .await
         .with_context(|| format!("connect {}", path.display()))?;
-    let (read, mut write) = stream.into_split();
+    Ok(stream.into_split())
+}
+
+#[cfg(windows)]
+async fn connect_ipc(path: &Path) -> Result<(impl AsyncRead + Unpin, impl AsyncWrite + Unpin)> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    let stream = ClientOptions::new()
+        .open(path)
+        .with_context(|| format!("connect {}", path.display()))?;
+    Ok(tokio::io::split(stream))
+}
+
+async fn one_shot_inner(request: Value) -> Result<Value> {
+    let path = ipc_path()?;
+    let (read, mut write) = connect_ipc(&path).await?;
     write.write_all(b"{\"subscribe\":\"cmd\"}\n").await?;
     write
         .write_all(format!("{request}\n").as_bytes())
@@ -335,10 +394,7 @@ where
     F: FnMut(Value) + Send + 'static,
 {
     let path = ipc_path()?;
-    let stream = UnixStream::connect(&path)
-        .await
-        .with_context(|| format!("connect {}", path.display()))?;
-    let (read, mut write) = stream.into_split();
+    let (read, mut write) = connect_ipc(&path).await?;
     write.write_all(b"{\"subscribe\":\"state\"}\n").await?;
     write.flush().await?;
     let mut reader = BufReader::new(read);

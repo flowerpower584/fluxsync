@@ -54,11 +54,10 @@ function updateUI(s) {
   // Daemon-backed toggle: charge_override now lives on State.
   document.getElementById('opt-resume-on-charge').classList.toggle('on', !!s.charge_override);
 
-  // Frontend-local prefs (the daemon doesn't track these). localStorage
-  // hydrates them so the visual state survives reload.
-  const launch = localStorage.getItem('fs.launchAtLogin') === '1';
+  // Show in Dock stays a frontend-local pref (the daemon doesn't track
+  // it); localStorage hydrates the visual state across reloads. Launch
+  // at login is real OS autostart — queried separately, not cached here.
   const dock = localStorage.getItem('fs.showInDock') === '1';
-  document.getElementById('opt-launch-at-login').classList.toggle('on', launch);
   document.getElementById('opt-show-in-dock').classList.toggle('on', dock);
 
   // Telemetry pane — pulls everything from `s.metrics` if present.
@@ -158,12 +157,10 @@ document.getElementById('opt-launch-at-login').addEventListener('click', async (
   const btn = document.getElementById('opt-launch-at-login');
   const isNowOn = !btn.classList.contains('on');
   btn.classList.toggle('on', isNowOn);
-  localStorage.setItem('fs.launchAtLogin', isNowOn ? '1' : '0');
   try {
     await invoke('fluxsync_set_launch_at_login', { value: isNowOn });
   } catch (err) {
     btn.classList.toggle('on', !isNowOn);
-    localStorage.setItem('fs.launchAtLogin', !isNowOn ? '1' : '0');
     showToast(`Couldn't update preference: ${err}`);
   }
 });
@@ -238,6 +235,13 @@ document.getElementById('btn-check-updates').addEventListener('click', () => {
 // ── Initialization ─────────────────────────────────────────────
 (async () => {
   await refreshState();
+  // Launch at login reflects real OS autostart state, not a cached pref.
+  try {
+    const enabled = await invoke('fluxsync_get_launch_at_login');
+    document.getElementById('opt-launch-at-login').classList.toggle('on', !!enabled);
+  } catch (e) {
+    console.error('Failed to read launch-at-login state', e);
+  }
   unlistenState = await listen('state-update', (event) => {
     lastState = event.payload;
     updateUI(event.payload);

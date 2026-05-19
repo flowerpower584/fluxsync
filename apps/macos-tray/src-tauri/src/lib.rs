@@ -47,22 +47,43 @@ async fn fluxsync_set_charge_override(value: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn fluxsync_set_launch_at_login(value: bool) -> Result<(), String> {
-    // Forward to daemon which manages the launchd agent or use a tauri plugin.
-    // For now, we just inform the daemon of the preference.
-    ipc::one_shot(json!({"id": 1, "op": "set_launch_at_login", "value": value}))
-        .await
-        .map(|_| ())
+fn fluxsync_set_launch_at_login(app: tauri::AppHandle, value: bool) -> Result<(), String> {
+    // Real OS-level autostart via tauri-plugin-autostart: a LaunchAgent
+    // on macOS, a registry Run key on Windows, an XDG .desktop entry on
+    // Linux. Launching the tray also spawns the daemon (see setup()), so
+    // this is the "start daemon at login" the settings hint promises.
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    if value {
+        mgr.enable().map_err(|e| e.to_string())
+    } else {
+        mgr.disable().map_err(|e| e.to_string())
+    }
+}
+
+/// Report whether OS autostart is currently enabled, so the settings
+/// toggle can show the real state instead of a cached guess.
+#[tauri::command]
+fn fluxsync_get_launch_at_login(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn fluxsync_set_show_in_dock(app: tauri::AppHandle, value: bool) {
-    use tauri::ActivationPolicy;
-    if value {
-        let _ = app.set_activation_policy(ActivationPolicy::Regular);
-    } else {
-        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+    // Dock visibility is a macOS-only concept. On Windows/Linux taskbar
+    // visibility is fixed by `skipTaskbar` in `tauri.conf.json`.
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(if value {
+            ActivationPolicy::Regular
+        } else {
+            ActivationPolicy::Accessory
+        });
     }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (&app, value);
 }
 
 #[tauri::command]
@@ -162,6 +183,10 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let _ = app.get_webview_window("menu").map(|w| {
                 let _ = w.show();
@@ -179,6 +204,7 @@ pub fn run() {
             fluxsync_open_pair,
             fluxsync_open_settings,
             fluxsync_set_launch_at_login,
+            fluxsync_get_launch_at_login,
             fluxsync_set_show_in_dock,
             fluxsync_set_prefer_lan,
             fluxsync_unpair,
@@ -346,9 +372,10 @@ pub fn run() {
             let tray_icon = tauri::image::Image::from_bytes(TRAY_ICON_PNG)
                 .expect("decode embedded tray icon");
 
-            let _ = TrayIconBuilder::with_id("main")
+            // `mut` is only consumed by the macOS-only block below.
+            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+            let mut tray_builder = TrayIconBuilder::with_id("main")
                 .icon(tray_icon)
-                .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -390,8 +417,16 @@ pub fn run() {
                         toggle_popup(tray.app_handle());
                     }
                     _ => {}
-                })
-                .build(app)?;
+                });
+
+            // macOS: render the glyph as a template image so it tracks
+            // the menu-bar tint. `icon_as_template` is a macOS-only method.
+            #[cfg(target_os = "macos")]
+            {
+                tray_builder = tray_builder.icon_as_template(true);
+            }
+
+            let _ = tray_builder.build(app)?;
 
             Ok(())
         })
