@@ -37,7 +37,11 @@ anyhow = "1"
 thiserror = { workspace = true }
 mdns-sd = "0.13"
 base32 = "0.5"
+base64 = "0.22"
 hex = "0.4"
+# PNG codec — pure Rust (`png` feature only), so it builds for Android
+# too. Image clipboard sync needs decode/hash on every platform.
+image = { version = "0.25", default-features = false, features = ["png"] }
 sentry = { version = "0.48.1", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -50,7 +54,6 @@ nix = { version = "0.28", features = ["fs", "hostname"] }
 # need this dep there. Excluding it keeps `cargo ndk` builds green.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = { version = "3", default-features = false, features = ["image-data"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 fluxsync-crypto = { path = "../fluxsync-crypto", features = ["test-util"] }

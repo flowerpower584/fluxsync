@@ -15,7 +15,7 @@ pub use codec::{decode, encode};
 pub use error::ProtoError;
 pub use types::{
     Ack, BatteryStatus, Chunk, ClipboardItem, Frame, HandshakeInit, HandshakeResp, Heartbeat,
-    Hello, Kind, Msg, PeerInfo,
+    Hello, Kind, Msg, Nak, PeerInfo,
 };
 
 /// Wire-format version. Bumped on any breaking change to the CBOR shapes.
@@ -34,3 +34,9 @@ pub const MAX_CHUNK_DATA: usize = 1024;
 /// trivial DoS allocations from a malicious peer. 16384 × 1 KiB = 16 MiB,
 /// matching [`MAX_PAYLOAD`] (u16 ceiling ≈ 64 MiB).
 pub const MAX_CHUNKS: u16 = 16384;
+
+/// Hard cap on the `missing` list inside a [`Nak`]. A receiver caps its own
+/// list well below this (≈400) so the encoded Nak stays inside one datagram;
+/// the decoder enforces this larger ceiling purely as a DoS guard against a
+/// malicious peer claiming a giant missing set.
+pub const MAX_NAK_MISSING: usize = 512;

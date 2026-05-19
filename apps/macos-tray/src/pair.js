@@ -74,17 +74,20 @@ function showPaired(peerName) {
     `</div>`;
 }
 
-(async function main() {
-  // Arm the listener BEFORE generating the QR so handshakes that complete
-  // during the `pair_show` retry window are not lost. Tauri events are not
-  // queued for late subscribers — `listen()` only catches events fired
-  // after registration returns.
-  await watchForPair();
+// Fetch `pair_show` and render the QR (or a URI/error fallback). Split
+// out of `main` so the unpair button can regenerate the QR after it
+// clears the stale pairing that was blocking `pair_show`.
+async function generateQr() {
+  const card = document.getElementById('qr-card');
+  const err = document.getElementById('pair-error');
+  err.style.display = 'none';
+  err.textContent = '';
+  card.innerHTML =
+    `<span style="color:#71717A;font-family:'JetBrains Mono',monospace;font-size:11px">Generating…</span>`;
 
   try {
     const info = await pairShowWithRetry();
 
-    const card = document.getElementById('qr-card');
     if (info.qr_svg) {
       card.innerHTML = info.qr_svg;
     } else if (info.uri) {
@@ -104,10 +107,64 @@ function showPaired(peerName) {
     document.getElementById('addr-hint').textContent =
       `REACHABLE AT ${info.addr_hint || '—'}`;
   } catch (e) {
-    const err = document.getElementById('pair-error');
     err.style.display = 'block';
     err.textContent = `Pair info unavailable: ${e?.message || e}`;
   }
+}
+
+// Unpair-all button. The daemon's `pair_show` refuses with
+// `already_paired` while a trusted peer exists, so the QR can't render
+// until pairing is cleared. First click arms a confirm; the second
+// click within 4s clears every trusted peer (daemon `unpair` op) and
+// regenerates the QR. Reversible — just pair again.
+function setupUnpairButton() {
+  const btn = document.getElementById('unpair-btn');
+  if (!btn) return;
+  const idle = 'Unpair all devices';
+  let armed = false;
+  let armTimer = null;
+
+  function disarm() {
+    armed = false;
+    btn.textContent = idle;
+    btn.classList.remove('armed');
+    if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+  }
+
+  btn.addEventListener('click', async () => {
+    if (!armed) {
+      armed = true;
+      btn.textContent = 'Click again to confirm';
+      btn.classList.add('armed');
+      armTimer = setTimeout(disarm, 4000);
+      return;
+    }
+    disarm();
+    btn.disabled = true;
+    btn.textContent = 'Unpairing…';
+    try {
+      await invoke('fluxsync_unpair');
+      btn.textContent = 'Unpaired ✓';
+      await watchForPair(); // re-arm so a fresh scan still closes the window
+      await generateQr();
+    } catch (e) {
+      const err = document.getElementById('pair-error');
+      err.style.display = 'block';
+      err.textContent = `Unpair failed: ${e?.message || e}`;
+    } finally {
+      setTimeout(() => { btn.disabled = false; btn.textContent = idle; }, 1200);
+    }
+  });
+}
+
+(async function main() {
+  // Arm the listener BEFORE generating the QR so handshakes that complete
+  // during the `pair_show` retry window are not lost. Tauri events are not
+  // queued for late subscribers — `listen()` only catches events fired
+  // after registration returns.
+  await watchForPair();
+  setupUnpairButton();
+  await generateQr();
 })();
 
 function escapeHtml(s) {

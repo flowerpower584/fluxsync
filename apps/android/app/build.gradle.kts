@@ -129,7 +129,11 @@ tasks.register<Exec>("buildRustFfi") {
         "bash", "-lc",
         "PATH=\"\$HOME/.cargo/bin:\$PATH\" cargo ndk -t arm64-v8a -o '${jniLibsDir.absolutePath}' build --release -p fluxsync-mobile-ffi",
     )
-    inputs.dir("${workspaceRoot}/crates/fluxsync-mobile-ffi/src")
+    // Track every workspace crate, not just fluxsync-mobile-ffi: the FFI
+    // statically links fluxsyncd / fluxsync-core / etc, so a change in any
+    // of them must invalidate this task — otherwise the APK ships a stale
+    // .so (the build is "successful" but runs old Rust code).
+    inputs.dir("${workspaceRoot}/crates")
     outputs.file(ffiSoPath)
 }
 

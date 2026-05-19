@@ -30,6 +30,7 @@ fn make_app(name: &str) -> App {
         peer_name_self: name.into(),
         charge_override: true,
         version: "0.4.2-test".into(),
+        build_id: "test".into(),
         cipher: "chacha20-poly1305".into(),
     })
 }

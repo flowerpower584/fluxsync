@@ -25,6 +25,7 @@ use crate::metrics::{DisconnectReason, MetricsTracker};
 use crate::transport::{RecvFrame, Transport};
 use anyhow::{anyhow, Context, Result};
 use base32::Alphabet;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use fluxsync_core::{
     dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, Event, LogEntry, LogLevel, State,
     WallClock,
@@ -77,6 +78,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         peer_name_self: peer_name_self.clone(),
         charge_override,
         version: String::from(env!("CARGO_PKG_VERSION")),
+        build_id: String::from(env!("FLUXSYNCD_BUILD_ID")),
         cipher: String::from("chacha20-poly1305"),
     });
 
@@ -606,6 +608,7 @@ async fn dispatch(
                             frames,
                             attempts: 0,
                             last_sent: Instant::now(),
+                            first_sent: Instant::now(),
                         },
                     );
                 }
@@ -667,9 +670,23 @@ async fn dispatch(
                         }
                         #[cfg(target_os = "android")]
                         {
-                            // Android writes images from `MainActivity` by
-                            // observing `state.history`; nothing to do here.
-                            let _ = payload;
+                            // Android can't put raw bytes on the OS
+                            // clipboard, so the daemon stashes the PNG under
+                            // its hex hash; the client pulls it via the
+                            // `fetch_item` IPC op once the matching history
+                            // row appears. The hash is recomputed off the
+                            // decoded RGBA so it matches `HistoryItem::hash`
+                            // (sender-side `image_rgba_hash`, stable across
+                            // the PNG round-trip).
+                            match decode_png_to_rgba(&payload) {
+                                Some((w, h, rgba)) => {
+                                    let hash = image_rgba_hash(w, h, &rgba);
+                                    cache_image(hex::encode(hash), payload);
+                                }
+                                None => {
+                                    tracing::warn!("WriteClipboard(android): PNG decode failed");
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -889,6 +906,56 @@ async fn handle_driver_cmd(
             }
             CmdResponse::ok(req_id, None)
         }
+        CmdOp::PushImage { data } => {
+            use fluxsync_core::Clock;
+            tracing::info!(b64_len = data.len(), "IPC: push_image requested from local");
+            match B64.decode(data.as_bytes()) {
+                Ok(png) => match decode_png_to_rgba(&png) {
+                    Some((w, h, rgba)) => {
+                        let hash = image_rgba_hash(w, h, &rgba);
+                        let preview = preview_label(Kind::Image, &png);
+                        let lamport = app.clock.tick();
+                        let actions = app.handle(
+                            Event::LocalClipboardChange {
+                                hash,
+                                kind: Kind::Image,
+                                payload: png,
+                                preview,
+                                sensitive: false,
+                                lamport,
+                            },
+                            &**wall,
+                        );
+                        dispatch(
+                            actions,
+                            app,
+                            transport,
+                            trusted,
+                            keystore_dir,
+                            state_watch_tx,
+                            logs_bcast_tx,
+                            log_tail,
+                            last_written_hashes,
+                            metrics,
+                            inflight,
+                        )
+                        .await;
+                        CmdResponse::ok(req_id, None)
+                    }
+                    None => CmdResponse::err(req_id, "push_image: PNG decode failed"),
+                },
+                Err(e) => CmdResponse::err(req_id, format!("push_image: base64: {e}")),
+            }
+        }
+        CmdOp::FetchItem { hash } => match lookup_cached_image(&hash) {
+            Some(png) => CmdResponse::ok(
+                req_id,
+                Some(CmdData::ItemBytes {
+                    bytes: B64.encode(&png),
+                }),
+            ),
+            None => CmdResponse::err(req_id, "fetch_item: payload not cached"),
+        },
         CmdOp::Pull => {
             let last = app.snapshot().history.first().cloned();
             CmdResponse::ok(req_id, Some(CmdData::Pull(last)))
@@ -1314,6 +1381,7 @@ async fn transport_recv_loop(
         Arc::new(Mutex::new(HashMap::new()));
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(5));
     let mut retransmit_interval = tokio::time::interval(RETRANSMIT_INTERVAL);
+    let mut nak_interval = tokio::time::interval(NAK_INTERVAL);
 
     loop {
         tokio::select! {
@@ -1327,6 +1395,18 @@ async fn transport_recv_loop(
                     let mut map = inflight.lock().await;
                     let mut done: Vec<[u8; 32]> = Vec::new();
                     for (hash, item) in map.iter_mut() {
+                        // Age backstop first: NAK resends keep `last_sent`
+                        // fresh, so the `continue` below would otherwise
+                        // shield a never-converging item from ever being
+                        // dropped.
+                        if item.first_sent.elapsed() > INFLIGHT_MAX_AGE {
+                            tracing::warn!(
+                                item = ?&hash[..6],
+                                "item dropped: exceeded max age (transfer never converged)"
+                            );
+                            done.push(*hash);
+                            continue;
+                        }
                         if item.last_sent.elapsed() < RETRANSMIT_INTERVAL {
                             continue;
                         }
@@ -1352,6 +1432,51 @@ async fn transport_recv_loop(
                     }
                 }
                 for bytes in &to_send {
+                    let _ = transport.send_encrypted(bytes).await;
+                }
+            }
+            _ = nak_interval.tick() => {
+                // Selective NAK: for every chunked transfer still in
+                // reassembly, tell the sender exactly which chunk indices
+                // (and the header) are still missing so it resends only
+                // those — whole-item retransmit can't converge under
+                // steady UDP loss.
+                let mut naks: Vec<Vec<u8>> = Vec::new();
+                {
+                    let map = reassembly.lock().await;
+                    for (item_id, r) in map.iter() {
+                        if r.chunks.is_empty() {
+                            // Only a header (or nothing) seen so far —
+                            // total unknown, nothing concrete to ask for.
+                            continue;
+                        }
+                        let missing: Vec<u16> = r
+                            .chunks
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| c.is_none())
+                            .map(|(i, _)| i as u16)
+                            .take(NAK_MISSING_PER_FRAME)
+                            .collect();
+                        let want_header = r.metadata.is_none();
+                        if missing.is_empty() && !want_header {
+                            continue;
+                        }
+                        let nak = fluxsync_proto::Nak {
+                            item_id: *item_id,
+                            want_header,
+                            missing,
+                        };
+                        let frame = Frame {
+                            version: PROTOCOL_VERSION,
+                            msg: Msg::Nak(nak),
+                        };
+                        if let Ok(bytes) = fluxsync_proto::encode(&frame) {
+                            naks.push(bytes);
+                        }
+                    }
+                }
+                for bytes in &naks {
                     let _ = transport.send_encrypted(bytes).await;
                 }
             }
@@ -1473,7 +1598,6 @@ fn preview_label(kind: Kind, payload: &[u8]) -> String {
 /// hash stable across a PNG encode/decode round-trip, so a write followed
 /// by the watcher's read-back is recognised as our own and not echoed back
 /// to the peer.
-#[cfg(not(target_os = "android"))]
 fn image_rgba_hash(width: u32, height: u32, rgba: &[u8]) -> [u8; 32] {
     let mut buf = Vec::with_capacity(8 + rgba.len());
     buf.extend_from_slice(&width.to_le_bytes());
@@ -1482,8 +1606,48 @@ fn image_rgba_hash(width: u32, height: u32, rgba: &[u8]) -> [u8; 32] {
     DedupRing::hash(&buf)
 }
 
+/// Process-global cache of recently-received image payloads, keyed by hex
+/// content hash. The daemon never puts binary in the state JSON; on
+/// Android the client pulls an inbound image's PNG bytes on demand via the
+/// `fetch_item` IPC op, which reads this map. Bounded to the last few
+/// images so a 16 MiB cap can't grow memory without limit. Desktop never
+/// reads it (it writes images straight to the OS clipboard).
+static IMAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<VecDeque<(String, Vec<u8>)>>> =
+    std::sync::OnceLock::new();
+
+/// Max image payloads retained in [`IMAGE_CACHE`]. 4 × 16 MiB worst case.
+const IMAGE_CACHE_CAP: usize = 4;
+
+fn image_cache() -> &'static std::sync::Mutex<VecDeque<(String, Vec<u8>)>> {
+    IMAGE_CACHE.get_or_init(|| std::sync::Mutex::new(VecDeque::with_capacity(IMAGE_CACHE_CAP)))
+}
+
+/// Store an inbound image's PNG bytes under its hex hash. No-op if the
+/// hash is already cached. Android-only — desktop writes images straight
+/// to the OS clipboard and never needs the cache.
+#[cfg(target_os = "android")]
+fn cache_image(hash_hex: String, png: Vec<u8>) {
+    if let Ok(mut g) = image_cache().lock() {
+        if g.iter().any(|(h, _)| *h == hash_hex) {
+            return;
+        }
+        g.push_back((hash_hex, png));
+        while g.len() > IMAGE_CACHE_CAP {
+            g.pop_front();
+        }
+    }
+}
+
+/// Look up a cached image's PNG bytes by hex hash. `None` if evicted or
+/// never received.
+fn lookup_cached_image(hash_hex: &str) -> Option<Vec<u8>> {
+    let g = image_cache().lock().ok()?;
+    g.iter()
+        .find(|(h, _)| h == hash_hex)
+        .map(|(_, png)| png.clone())
+}
+
 /// Decode PNG bytes to `(width, height, rgba)`. `None` on any decode error.
-#[cfg(not(target_os = "android"))]
 fn decode_png_to_rgba(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
     let rgba = img.to_rgba8();
@@ -1922,6 +2086,47 @@ async fn dispatch_inbound_frame(
                 tracing::debug!(item = ?&ack.hash[..6], "item acked; retransmit cleared");
             }
         }
+        Msg::Nak(nak) => {
+            // Peer is missing chunks of an item we sent. Resend only the
+            // frames it asked for. Layout in `Inflight.frames`:
+            // frames[0] = header, frames[idx + 1] = chunk `idx`.
+            let mut to_send: Vec<Vec<u8>> = Vec::new();
+            {
+                let map = inflight.lock().await;
+                if let Some(item) = map.get(&nak.item_id) {
+                    if nak.want_header {
+                        if let Some(header) = item.frames.first() {
+                            to_send.push(header.clone());
+                        }
+                    }
+                    for idx in &nak.missing {
+                        if let Some(frame) = item.frames.get(*idx as usize + 1) {
+                            to_send.push(frame.clone());
+                        }
+                    }
+                }
+            }
+            if !to_send.is_empty() {
+                tracing::debug!(
+                    item = ?&nak.item_id[..6],
+                    frames = to_send.len(),
+                    "NAK: resending missing frames"
+                );
+                for (i, bytes) in to_send.iter().enumerate() {
+                    let _ = transport.send_encrypted(bytes).await;
+                    // Same burst-16/pause-2ms pacing as the initial send.
+                    if (i + 1) % 16 == 0 {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                }
+                // NAK is making progress — defer the whole-item retransmit
+                // so it doesn't redundantly blast every frame again. The
+                // INFLIGHT_MAX_AGE backstop still bounds total lifetime.
+                if let Some(item) = inflight.lock().await.get_mut(&nak.item_id) {
+                    item.last_sent = Instant::now();
+                }
+            }
+        }
         Msg::Bye => {
             // Peer announced a clean disconnect: tear down the session and
             // signal PeerLost so the FSM closes the session and re-discovers.
@@ -1967,6 +2172,11 @@ struct Inflight {
     frames: Vec<Vec<u8>>,
     attempts: u8,
     last_sent: Instant,
+    /// When the item was first queued. Selective-NAK resends keep
+    /// `last_sent` perpetually fresh, which defers the `attempts`-based
+    /// whole-item retransmit forever — so this is the backstop that
+    /// drops an item that never converges. See `INFLIGHT_MAX_AGE`.
+    first_sent: Instant,
 }
 
 /// Map of clipboard items sent but not yet acked, keyed by item hash.
@@ -1976,6 +2186,18 @@ type InflightMap = Arc<Mutex<HashMap<[u8; 32], Inflight>>>;
 const RETRANSMIT_INTERVAL: Duration = Duration::from_secs(2);
 /// Drop the item after this many re-sends with no ack.
 const MAX_RETRANSMIT: u8 = 6;
+/// Absolute lifetime cap for an inflight item. Selective-NAK resends bump
+/// `last_sent`, so the `attempts`/`MAX_RETRANSMIT` path can be deferred
+/// indefinitely while a transfer slowly progresses; this is the hard
+/// backstop that frees the buffer if it simply never converges.
+const INFLIGHT_MAX_AGE: Duration = Duration::from_secs(90);
+/// How often the receiver emits a selective NAK for an incomplete
+/// chunked transfer still in reassembly.
+const NAK_INTERVAL: Duration = Duration::from_millis(700);
+/// Cap on chunk indices a single NAK asks for — kept under
+/// `fluxsync_proto::MAX_NAK_MISSING` (512) so the encoded NAK fits one
+/// datagram. Remaining gaps are picked up by the next NAK tick.
+const NAK_MISSING_PER_FRAME: usize = 400;
 
 // ─────────────────────────────────────────────────────────────────
 // mDNS discovery dispatcher

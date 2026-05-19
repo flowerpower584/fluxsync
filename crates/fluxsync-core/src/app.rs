@@ -135,6 +135,7 @@ impl App {
                         source: crate::state::HistorySource::Local,
                         sensitive: *sensitive,
                         lamport: *lamport,
+                        hash: hex32(hash),
                     });
                 }
             }
@@ -167,6 +168,7 @@ impl App {
                         source: crate::state::HistorySource::Remote,
                         sensitive: *sensitive,
                         lamport: *lamport,
+                        hash: hex32(hash),
                     });
                 }
             }
@@ -332,6 +334,16 @@ impl App {
     pub fn log(level_msg: LogEntry) -> Action {
         Action::EmitLog(level_msg)
     }
+}
+
+/// Lowercase hex of a 32-byte content hash, for `HistoryItem::hash`.
+fn hex32(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        s.push(char::from_digit(u32::from(b >> 4), 16).unwrap());
+        s.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap());
+    }
+    s
 }
 
 #[cfg(test)]

@@ -166,7 +166,11 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                                 if (parsed.history.isNotEmpty()) {
                                     // Process from oldest to newest to preserve order.
                                     for (item in newRemoteItemsSince(parsed.history, lastSeenLamport)) {
-                                        syncToSystemClipboard(item.preview)
+                                        if (item.kind == "image") {
+                                            syncImageToSystemClipboard(item.hash)
+                                        } else {
+                                            syncToSystemClipboard(item.preview)
+                                        }
                                     }
                                     // FS-022: advance + persist the cursor only when it
                                     // actually moves, so the tight poll doesn't write
@@ -229,13 +233,54 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                 // Important: Mark this as a peer item BEFORE writing to OS clipboard
                 // so MainActivity's clipListener ignores the event and doesn't echo it.
                 FluxsyncManager.lastPeerClipText = text.trim()
-                
+
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 val clip = android.content.ClipData.newPlainText("FluxSync", text)
                 clipboard.setPrimaryClip(clip)
                 android.util.Log.i("FluxSync", "✅ CLIPBOARD SYNCED: [${text.take(30)}...]")
             } catch (e: Exception) {
                 android.util.Log.e("FluxSync", "Failed to write to system clipboard: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Write an inbound peer image to the OS clipboard. The daemon keeps
+     * binary out of the state JSON, so the bytes are pulled on demand via
+     * the `fetch_item` FFI keyed by the history row's content hash. Android
+     * forbids raw bytes on the clipboard, so the PNG is staged in the app
+     * cache and shared as a `content://` URI through this app's
+     * FileProvider — MainActivity's clip listener recognises that authority
+     * and skips the echo.
+     */
+    private fun syncImageToSystemClipboard(hash: String) {
+        if (hash.isEmpty()) {
+            android.util.Log.w("FluxSync", "Image history row carries no hash; cannot fetch")
+            return
+        }
+        scope.launch {
+            try {
+                val png = FluxsyncManager.withHandle { it.fetchItem(hash) }
+                if (png == null || png.isEmpty()) {
+                    android.util.Log.w("FluxSync", "fetchItem returned no bytes for $hash")
+                    return@launch
+                }
+                val dir = File(cacheDir, "images").apply { mkdirs() }
+                val file = File(dir, "clip.png")
+                file.writeBytes(png)
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    this@FluxsyncAccessibilityService,
+                    "$packageName.fileprovider",
+                    file,
+                )
+                withContext(Dispatchers.Main) {
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = android.content.ClipData.newUri(contentResolver, "FluxSync", uri)
+                    clipboard.setPrimaryClip(clip)
+                    android.util.Log.i("FluxSync", "✅ IMAGE SYNCED: ${png.size} B")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("FluxSync", "Failed to write image to clipboard: ${e.message}")
             }
         }
     }

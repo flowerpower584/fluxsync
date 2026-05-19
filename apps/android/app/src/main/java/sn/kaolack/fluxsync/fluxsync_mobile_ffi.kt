@@ -721,6 +721,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -746,6 +750,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_fluxsync_mobile_ffi_fn_constructor_fluxsynchandle_start(`peerName`: RustBuffer.ByValue,`ipcPath`: RustBuffer.ByValue,`keystoreDir`: RustBuffer.ByValue,`udpPort`: Short,`identitySecretB64`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Pointer
+    fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_fetch_item(`ptr`: Pointer,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_log_cursor(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_accept(`ptr`: Pointer,`pubkeyB32`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`addr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -758,6 +764,8 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_poll_state(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_item(`ptr`: Pointer,`kind`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_text(`ptr`: Pointer,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_battery_threshold(`ptr`: Pointer,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -884,6 +892,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_fluxsync_mobile_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_fetch_item(
+    ): Short
     fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_log_cursor(
     ): Short
     fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_accept(
@@ -895,6 +905,8 @@ internal interface UniffiLib : Library {
     fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_poll_logs(
     ): Short
     fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_poll_state(
+    ): Short
+    fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_item(
     ): Short
     fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_text(
     ): Short
@@ -929,6 +941,9 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_fetch_item() != 46069.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_log_cursor() != 49238.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -945,6 +960,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_poll_state() != 63397.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_item() != 38274.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_text() != 51988.toShort()) {
@@ -1145,6 +1163,22 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     }
 }
 
+public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
+    override fun read(buf: ByteBuffer): ByteArray {
+        val len = buf.getInt()
+        val byteArr = ByteArray(len)
+        buf.get(byteArr)
+        return byteArr
+    }
+    override fun allocationSize(value: ByteArray): ULong {
+        return 4UL + value.size.toULong()
+    }
+    override fun write(value: ByteArray, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        buf.put(value)
+    }
+}
+
 
 // This template implements a class for working with a Rust struct via a Pointer/Arc<T>
 // to the live Rust struct on the other side of the FFI.
@@ -1312,6 +1346,13 @@ private class JavaLangRefCleanable(
 public interface FluxsyncHandleInterface {
     
     /**
+     * Fetch a clipboard item's raw bytes by its hex content hash. Used by
+     * the Android client to pull an inbound image's PNG on demand — the
+     * state JSON only carries the hash + a label, never the bytes.
+     */
+    fun `fetchItem`(`hash`: kotlin.String): kotlin.ByteArray
+    
+    /**
      * Highest log seq observed so far. Useful for Kotlin's first poll
      * when it wants only new entries (subscribe-after-attach pattern).
      */
@@ -1348,6 +1389,13 @@ public interface FluxsyncHandleInterface {
      * O(1) and lock-cheap.
      */
     fun `pollState`(): kotlin.String
+    
+    /**
+     * Inject a typed clipboard item. `kind` is `"text"` or `"image"`;
+     * `bytes` is the raw payload (UTF-8 for text, PNG for image). Image
+     * bytes ride to the daemon as base64 since the IPC channel is NDJSON.
+     */
+    fun `pushItem`(`kind`: kotlin.String, `bytes`: kotlin.ByteArray)
     
     /**
      * Inject a clipboard item. Same code path as `fluxctl push`.
@@ -1482,6 +1530,24 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface {
 
     
     /**
+     * Fetch a clipboard item's raw bytes by its hex content hash. Used by
+     * the Android client to pull an inbound image's PNG on demand — the
+     * state JSON only carries the hash + a label, never the bytes.
+     */
+    @Throws(FluxException::class)override fun `fetchItem`(`hash`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    callWithPointer {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_fetch_item(
+        it, FfiConverterString.lower(`hash`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Highest log seq observed so far. Useful for Kotlin's first poll
      * when it wants only new entries (subscribe-after-attach pattern).
      */override fun `logCursor`(): kotlin.ULong {
@@ -1577,6 +1643,23 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface {
     }
     )
     }
+    
+
+    
+    /**
+     * Inject a typed clipboard item. `kind` is `"text"` or `"image"`;
+     * `bytes` is the raw payload (UTF-8 for text, PNG for image). Image
+     * bytes ride to the daemon as base64 since the IPC channel is NDJSON.
+     */
+    @Throws(FluxException::class)override fun `pushItem`(`kind`: kotlin.String, `bytes`: kotlin.ByteArray)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.INSTANCE.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_item(
+        it, FfiConverterString.lower(`kind`),FfiConverterByteArray.lower(`bytes`),_status)
+}
+    }
+    
     
 
     

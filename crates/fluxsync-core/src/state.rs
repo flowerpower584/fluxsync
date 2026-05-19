@@ -27,6 +27,11 @@ pub struct State {
     pub history: Vec<HistoryItem>,
     pub status: Status,
     pub version: String,
+    /// Short build identifier (git short hash, `-dirty` suffixed for an
+    /// uncommitted tree). Lets a launcher detect that it spawned — or is
+    /// talking to — a stale daemon binary and refresh it. Empty/`unknown`
+    /// when the build wasn't stamped.
+    pub build_id: String,
     pub link_latency_ms: u32,
     pub cipher: String,
     pub metrics: Option<ConnectionMetrics>,
@@ -74,6 +79,10 @@ pub struct HistoryItem {
     pub source: HistorySource,
     pub sensitive: bool,
     pub lamport: u64,
+    /// Hex of the 32-byte content hash. Lets the Android client fetch an
+    /// image's raw bytes on demand (`fetch_item`) — the daemon never puts
+    /// binary payloads in the state JSON, only this hash + a label.
+    pub hash: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +111,7 @@ pub struct Config {
     pub peer_name_self: String,
     pub charge_override: bool,
     pub version: String,
+    pub build_id: String,
     pub cipher: String,
 }
 
@@ -111,6 +121,7 @@ impl Default for Config {
             peer_name_self: String::from("this device"),
             charge_override: true,
             version: String::from(env!("CARGO_PKG_VERSION")),
+            build_id: String::from("unknown"),
             cipher: String::from("chacha20-poly1305"),
         }
     }
@@ -135,6 +146,7 @@ impl State {
             history: Vec::new(),
             status: Status::Inactive,
             version: config.version.clone(),
+            build_id: config.build_id.clone(),
             link_latency_ms: 0,
             cipher: config.cipher.clone(),
             metrics: None,
@@ -233,6 +245,7 @@ mod tests {
             "history",
             "status",
             "version",
+            "build_id",
             "link_latency_ms",
             "cipher",
             "charge_override",

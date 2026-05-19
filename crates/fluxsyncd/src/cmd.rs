@@ -44,6 +44,18 @@ pub enum CmdOp {
     Push {
         text: String,
     },
+    /// Inject an image clipboard item. `data` is the base64 of the raw
+    /// PNG bytes — NDJSON is line-based, so binary payloads ride as
+    /// base64. Fired by the Android FFI `push_item("image", …)`.
+    PushImage {
+        data: String,
+    },
+    /// Fetch a clipboard item's raw bytes by its hex content hash. Used
+    /// by the Android client to pull an inbound image's PNG on demand —
+    /// the state JSON only carries the hash + a label, never the bytes.
+    FetchItem {
+        hash: String,
+    },
     Pull,
     Tail {
         #[serde(default = "default_tail_n")]
@@ -140,6 +152,11 @@ pub enum CmdData {
         /// Self-contained URI suitable for QR encoding. Format:
         /// `fluxsync://pair/<pubkey_b32>?a=<ip:port>&f=<w1.w2.w3.w4.w5.w6>`
         uri: String,
+    },
+    /// Raw bytes of a fetched clipboard item, base64-encoded. Reply to a
+    /// `FetchItem` request.
+    ItemBytes {
+        bytes: String,
     },
     Pong,
 }

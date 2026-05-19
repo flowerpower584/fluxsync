@@ -5,6 +5,32 @@ use std::path::{Path, PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
+    // Re-run this script (and therefore rebuild + recopy the sidecar)
+    // whenever any daemon-side source changes. Without these, build.rs
+    // only re-executes when build.rs itself changes, so a daemon code
+    // edit would leave a stale `binaries/fluxsyncd-<target>` in place.
+    for p in [
+        "../../../crates/fluxsyncd/src",
+        "../../../crates/fluxsyncd/build.rs",
+        "../../../crates/fluxsyncd/Cargo.toml",
+        "../../../crates/fluxsync-core/src",
+        "../../../crates/fluxsync-core/Cargo.toml",
+        "../../../crates/fluxsync-proto/src",
+        "../../../crates/fluxsync-proto/Cargo.toml",
+        "../../../crates/fluxsync-crypto/src",
+        "../../../crates/fluxsync-crypto/Cargo.toml",
+        // HEAD movement → the daemon's compiled-in build id changes.
+        "../../../.git/HEAD",
+        "../../../.git/logs/HEAD",
+    ] {
+        println!("cargo:rerun-if-changed={p}");
+    }
+
+    // Stamp the tray with the same kind of build id the daemon carries,
+    // so the runtime version guard can compare them. Same git HEAD →
+    // same hash, so a fresh co-built pair always matches.
+    println!("cargo:rustc-env=FLUXSYNC_TRAY_BUILD_ID={}", tray_build_id());
+
     // Generate placeholder PNGs once if the artist hasn't already
     // dropped real assets in `icons/`. macOS uses these as template
     // images, so the design is intentionally a flat black-on-transparent
@@ -48,10 +74,11 @@ fn prepare_sidecar() {
     let sidecar = manifest_dir
         .join("binaries")
         .join(format!("fluxsyncd-{target}{exe}"));
-    if sidecar.exists() {
-        return;
-    }
 
+    // Always rebuild — never trust an existing `binaries/fluxsyncd-*` to
+    // be current. `cargo build` is incremental, so this is near-free when
+    // nothing changed; build.rs's `rerun-if-changed` set (see `main`)
+    // keeps the script itself from re-executing needlessly.
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let status = std::process::Command::new(&cargo)
         .args(["build", "--release", "-p", "fluxsyncd", "--manifest-path"])
@@ -65,6 +92,32 @@ fn prepare_sidecar() {
         .join(format!("fluxsyncd{exe}"));
     fs::create_dir_all(sidecar.parent().unwrap()).expect("create binaries/");
     fs::copy(&built, &sidecar).expect("copy fluxsyncd sidecar into binaries/");
+}
+
+/// `<short-hash>` or `<short-hash>-dirty` for the current checkout —
+/// identical to `fluxsyncd`'s own build-id logic so a co-built tray and
+/// daemon compare equal. Falls back to `unknown` outside a git checkout.
+fn tray_build_id() -> String {
+    let hash = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let dirty = std::process::Command::new("git")
+        .args(["diff", "--quiet", "--ignore-submodules"])
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(false);
+
+    if dirty {
+        format!("{hash}-dirty")
+    } else {
+        hash
+    }
 }
 
 fn generate_glyph_png(path: &Path, size: u32) {

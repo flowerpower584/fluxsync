@@ -93,6 +93,8 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
 
     fun pushText(text: String) = ffi("Send clipboard") { it.pushText(text) }
 
+    fun pushImage(png: ByteArray) = ffi("Send image") { it.pushItem("image", png) }
+
     fun setBatteryThreshold(threshold: UByte) =
         ffi("Set battery threshold") { it.setBatteryThreshold(threshold.toShort().toUByte()) }
 

@@ -122,6 +122,7 @@ impl FluxsyncHandle {
                 .with_tag("fluxsyncd")
                 .with_max_level(log::LevelFilter::Debug),
         );
+        init_trace_bridge();
 
         let identity = if identity_secret_b64.is_empty() {
             if keystore_dir.is_empty() {
@@ -282,6 +283,48 @@ impl FluxsyncHandle {
             .map_err(|e| FluxError::Ipc(e.to_string()))
     }
 
+    /// Inject a typed clipboard item. `kind` is `"text"` or `"image"`;
+    /// `bytes` is the raw payload (UTF-8 for text, PNG for image). Image
+    /// bytes ride to the daemon as base64 since the IPC channel is NDJSON.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn push_item(&self, kind: String, bytes: Vec<u8>) -> Result<(), FluxError> {
+        let request = match kind.as_str() {
+            "image" => {
+                serde_json::json!({"id": 1, "op": "push_image", "data": B64.encode(&bytes)})
+            }
+            "text" => {
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                serde_json::json!({"id": 1, "op": "push", "text": text})
+            }
+            other => return Err(FluxError::Invalid(format!("unknown kind {other}"))),
+        };
+        self.runtime
+            .block_on(send_cmd(&self.ipc_path, request))
+            .map(|_| ())
+            .map_err(|e| FluxError::Ipc(e.to_string()))
+    }
+
+    /// Fetch a clipboard item's raw bytes by its hex content hash. Used by
+    /// the Android client to pull an inbound image's PNG on demand — the
+    /// state JSON only carries the hash + a label, never the bytes.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn fetch_item(&self, hash: String) -> Result<Vec<u8>, FluxError> {
+        let resp = self
+            .runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({"id": 1, "op": "fetch_item", "hash": hash}),
+            ))
+            .map_err(|e| FluxError::Ipc(e.to_string()))?;
+        let b64 = resp
+            .get("data")
+            .and_then(|d| d.get("bytes"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FluxError::Ipc("fetch_item missing `data.bytes`".into()))?;
+        B64.decode(b64)
+            .map_err(|e| FluxError::Ipc(format!("fetch_item base64: {e}")))
+    }
+
     /// Pause-below-X% battery threshold (5..=50).
     pub fn set_battery_threshold(&self, value: u8) -> Result<(), FluxError> {
         if !(5..=50).contains(&value) {
@@ -417,6 +460,53 @@ impl FluxsyncHandle {
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────
+
+/// Bridges the daemon's `tracing` events into the `log` crate (and thus
+/// `android_logger` → logcat). The desktop daemon installs a
+/// `tracing_subscriber` in `main.rs`, but the FFI path calls
+/// `fluxsyncd::run` directly with no subscriber, so every `tracing::*`
+/// event from the daemon is silently dropped on Android. This bridge
+/// makes the daemon internals visible in `adb logcat` (tag `fluxsyncd`).
+fn init_trace_bridge() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_writer(LogBridgeWriter)
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_target(true)
+            .without_time()
+            .try_init();
+    });
+}
+
+/// `MakeWriter` that forwards each formatted `tracing` line to
+/// `log::info!`, which `android_logger` routes to logcat.
+#[derive(Clone, Copy)]
+struct LogBridgeWriter;
+
+impl std::io::Write for LogBridgeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(buf);
+        for line in text.lines() {
+            if !line.is_empty() {
+                log::info!(target: "trace", "{line}");
+            }
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBridgeWriter {
+    type Writer = LogBridgeWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        *self
+    }
+}
 
 async fn wait_for_socket(path: &PathBuf, deadline: std::time::Duration) -> anyhow::Result<()> {
     let start = std::time::Instant::now();

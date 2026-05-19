@@ -1,6 +1,6 @@
 use crate::error::ProtoError;
-use crate::types::{Chunk, ClipboardItem, Frame, Msg};
-use crate::{MAX_CHUNKS, MAX_CHUNK_DATA, MAX_PAYLOAD, PROTOCOL_VERSION};
+use crate::types::{Chunk, ClipboardItem, Frame, Msg, Nak};
+use crate::{MAX_CHUNKS, MAX_CHUNK_DATA, MAX_NAK_MISSING, MAX_PAYLOAD, PROTOCOL_VERSION};
 
 /// Encode a [`Frame`] to CBOR bytes.
 ///
@@ -53,9 +53,17 @@ fn validate(frame: &Frame) -> Result<(), ProtoError> {
     match &frame.msg {
         Msg::ClipboardItem(item) => validate_item(item),
         Msg::Chunk(chunk) => validate_chunk(chunk),
+        Msg::Nak(nak) => validate_nak(nak),
         Msg::BatteryStatus(b) if b.level > 100 => Err(ProtoError::BatteryLevel(b.level)),
         _ => Ok(()),
     }
+}
+
+fn validate_nak(nak: &Nak) -> Result<(), ProtoError> {
+    if nak.missing.len() > MAX_NAK_MISSING {
+        return Err(ProtoError::NakMissingTooLarge(nak.missing.len()));
+    }
+    Ok(())
 }
 
 fn validate_item(item: &ClipboardItem) -> Result<(), ProtoError> {
@@ -87,7 +95,7 @@ fn validate_chunk(chunk: &Chunk) -> Result<(), ProtoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Ack, BatteryStatus, ClipboardItem, Heartbeat, Kind};
+    use crate::types::{Ack, BatteryStatus, ClipboardItem, Heartbeat, Kind, Nak};
 
     fn frame(msg: Msg) -> Frame {
         Frame {
@@ -277,6 +285,39 @@ mod tests {
         };
         let err = encode(&frame(Msg::BatteryStatus(bs))).unwrap_err();
         assert!(matches!(err, ProtoError::BatteryLevel(101)));
+    }
+
+    #[test]
+    fn round_trip_nak() {
+        let f = frame(Msg::Nak(Nak {
+            item_id: [5; 32],
+            want_header: true,
+            missing: vec![1, 7, 9000, 16383],
+        }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn accepts_nak_missing_at_max() {
+        let f = frame(Msg::Nak(Nak {
+            item_id: [0; 32],
+            want_header: false,
+            missing: vec![0u16; MAX_NAK_MISSING],
+        }));
+        let bytes = encode(&f).unwrap();
+        assert!(decode(&bytes).is_ok());
+    }
+
+    #[test]
+    fn rejects_nak_missing_too_large() {
+        let f = frame(Msg::Nak(Nak {
+            item_id: [0; 32],
+            want_header: false,
+            missing: vec![0u16; MAX_NAK_MISSING + 1],
+        }));
+        let err = encode(&f).unwrap_err();
+        assert!(matches!(err, ProtoError::NakMissingTooLarge(n) if n == MAX_NAK_MISSING + 1));
     }
 
     #[test]

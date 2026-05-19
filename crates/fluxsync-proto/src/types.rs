@@ -32,6 +32,11 @@ pub enum Msg {
     Heartbeat(Heartbeat),
     Chunk(Chunk),
     Ack(Ack),
+    /// Selective negative-ack for an in-progress chunked transfer. The
+    /// receiver sends this periodically while reassembly is incomplete so
+    /// the sender resends only the missing chunks instead of the whole
+    /// item — the difference between converging and not under UDP loss.
+    Nak(Nak),
     Bye,
     /// Sent once per side immediately after the Linked transition.
     /// Carries the sender's `peer_name_self` so the receiver can drop
@@ -82,6 +87,18 @@ pub struct Chunk {
 pub struct Ack {
     pub lamport: u64,
     pub hash: [u8; 32],
+}
+
+/// Selective negative-ack: the chunk indices a receiver still needs for
+/// the chunked item `item_id`. `want_header` is set when the header
+/// datagram (the empty-payload `ClipboardItem`) was lost, so the sender
+/// resends that too. `missing` is bounded by the sender of the Nak to
+/// stay within one datagram — see `MAX_NAK_MISSING`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Nak {
+    pub item_id: [u8; 32],
+    pub want_header: bool,
+    pub missing: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

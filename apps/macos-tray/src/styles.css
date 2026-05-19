@@ -305,3 +305,14 @@ html, body {
 .unpair-btn svg {
   opacity: 0.7;
 }
+
+.unpair-btn.armed {
+  background: var(--fs-crit-soft);
+  color: var(--fs-crit);
+  border-color: var(--fs-crit);
+}
+
+.unpair-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

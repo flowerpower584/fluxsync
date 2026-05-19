@@ -957,6 +957,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uniffi",
 ]
 
@@ -977,6 +978,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "base32",
+ "base64",
  "chrono",
  "ciborium",
  "clap",

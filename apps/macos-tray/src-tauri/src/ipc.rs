@@ -36,7 +36,31 @@ fn ipc_path() -> Result<PathBuf> {
 /// the popup ("daemon not reachable").
 pub fn ensure_daemon_running() {
     if is_daemon_alive() {
-        return;
+        // Socket answers — but is it the daemon build this tray expects?
+        // A daemon left over from a previous (older) checkout would
+        // otherwise be used silently. See the version-guard helpers.
+        match daemon_build_id() {
+            Ok(Some(id)) if id == env!("FLUXSYNC_TRAY_BUILD_ID") => return,
+            Ok(found) => {
+                let shown = found.as_deref().unwrap_or("<none>");
+                eprintln!(
+                    "[fluxsync-tray] stale daemon (build {shown} != tray {}); restarting",
+                    env!("FLUXSYNC_TRAY_BUILD_ID")
+                );
+                if !restart_stale_daemon() {
+                    // Couldn't confirm the old daemon exited — don't pile
+                    // a second daemon on top of it.
+                    return;
+                }
+                // Old daemon gone; fall through to spawn a fresh one.
+            }
+            Err(e) => {
+                // Probe itself failed (socket race / parse error). Leave
+                // the running daemon alone rather than risk a thrash loop.
+                eprintln!("[fluxsync-tray] daemon build-id probe failed: {e:#}; leaving it");
+                return;
+            }
+        }
     }
     match spawn_daemon_detached() {
         Ok(bin) => eprintln!("[fluxsync-tray] spawned daemon: {}", bin.display()),
@@ -63,6 +87,70 @@ fn is_daemon_alive() -> bool {
         return false;
     };
     std::os::unix::net::UnixStream::connect(&p).is_ok()
+}
+
+/// Blocking one-shot `cmd` request on the daemon's UNIX socket. Used by
+/// the boot-time version guard, which runs on a sync thread before the
+/// tokio runtime is wired up — so it can't reuse the async `one_shot`.
+fn ipc_cmd_blocking(op: &str) -> Result<Value> {
+    use std::io::{BufRead, Write};
+
+    let path = ipc_path()?;
+    let mut stream = std::os::unix::net::UnixStream::connect(&path)
+        .with_context(|| format!("connect {}", path.display()))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .context("set socket read timeout")?;
+    stream.write_all(b"{\"subscribe\":\"cmd\"}\n")?;
+    stream.write_all(format!("{{\"id\":1,\"op\":\"{op}\"}}\n").as_bytes())?;
+    stream.flush()?;
+
+    let mut reader = std::io::BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    serde_json::from_str(line.trim())
+        .with_context(|| format!("parse daemon response: {line:?}"))
+}
+
+/// Ask the running daemon for its compiled-in `build_id`.
+///   * `Ok(Some(id))` — daemon reported an id.
+///   * `Ok(None)` — daemon answered but carries no `build_id` (a build
+///     predating the field) → treat as stale.
+///   * `Err(_)` — the probe itself failed; caller should not act on it.
+fn daemon_build_id() -> Result<Option<String>> {
+    let v = ipc_cmd_blocking("status")?;
+    if !v.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(anyhow!("daemon refused `status`: {v}"));
+    }
+    // `CmdData` is `#[serde(untagged)]`, so the `State` object sits
+    // directly under `data`.
+    Ok(v.get("data")
+        .and_then(|d| d.get("build_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
+/// Tell a stale daemon to shut down, then wait for it to release its
+/// socket. Returns `true` once the socket stops answering.
+fn restart_stale_daemon() -> bool {
+    // Fire-and-forget: a clean shutdown often drops the connection
+    // before any response is flushed, so the reply isn't worth reading.
+    if let Ok(path) = ipc_path() {
+        if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&path) {
+            use std::io::Write;
+            let _ = s.write_all(b"{\"subscribe\":\"cmd\"}\n{\"id\":1,\"op\":\"shutdown\"}\n");
+            let _ = s.flush();
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if !is_daemon_alive() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    eprintln!("[fluxsync-tray] stale daemon did not exit within 3s");
+    false
 }
 
 fn spawn_daemon_detached() -> Result<PathBuf> {
@@ -134,6 +222,19 @@ fn locate_daemon() -> Result<PathBuf> {
         if p.is_file() {
             return Ok(p);
         }
+    }
+
+    // Dev: prefer the build.rs-managed sidecar. `build.rs` rebuilds it
+    // fresh on every tray compile, so it is guaranteed current — unlike
+    // the `target/debug/fluxsyncd` sibling below, which can be a stale
+    // orphan from a manual copy. `CARGO_MANIFEST_DIR` is a build-machine
+    // path, so in a shipped `.app` this simply doesn't exist and we fall
+    // through to the bundle layout.
+    let managed = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries")
+        .join("fluxsyncd-aarch64-apple-darwin");
+    if managed.is_file() {
+        return Ok(managed);
     }
 
     if let Ok(self_exe) = std::env::current_exe() {

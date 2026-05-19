@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Inbound peer images are written here, then shared as content://
+         URIs for the OS clipboard. Maps to Context.getCacheDir()/images. -->
+    <cache-path
+        name="fluxsync_images"
+        path="images/" />
+</paths>

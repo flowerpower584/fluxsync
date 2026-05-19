@@ -560,11 +560,13 @@ fn state_history_item_serializes_snake_case() {
         source: HistorySource::Local,
         sensitive: false,
         lamport: 0,
+        hash: String::new(),
     };
     let j = serde_json::to_value(&item).unwrap();
     assert!(j.get("kind").is_some());
     assert!(j.get("preview").is_some());
     assert!(j.get("time").is_some());
+    assert!(j.get("hash").is_some());
 }
 
 #[test]

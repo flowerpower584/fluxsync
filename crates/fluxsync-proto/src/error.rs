@@ -20,6 +20,9 @@ pub enum ProtoError {
     #[error("chunk index {idx} >= total {total}")]
     ChunkIndexOutOfRange { idx: u16, total: u16 },
 
+    #[error("nak missing list too large: {0} entries (max 512)")]
+    NakMissingTooLarge(usize),
+
     #[error("battery level {0} > 100")]
     BatteryLevel(u8),
 
