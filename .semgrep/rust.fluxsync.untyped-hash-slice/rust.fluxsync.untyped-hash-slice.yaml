@@ -1,0 +1,23 @@
+rules:
+  - id: rust.fluxsync.untyped-hash-slice
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      Function takes an untyped `&[u8]` and returns a fixed-size array,
+      then guards the input with `if $ARG.len() < N { return ...; }`.
+      The check works but reveals a missing compile-time length contract:
+      a future caller passing a short slice gets a silent default return
+      (empty strings, zero bytes) instead of a compile error. Replace
+      `&[u8]` with `&[u8; HANDSHAKE_HASH_LEN]` (or the relevant const) so
+      length is enforced at compile time and the runtime guard can be
+      deleted entirely. See FluxSync_DIFFERENTIAL_REVIEW_2026-05-23.md (H1).
+      Note: Semgrep rust currently does not distinguish `pub fn` from
+      `fn`, so this rule fires on private helpers too. Treat any private
+      hit as either a refactor target or move the test fixture out.
+    patterns:
+      - pattern: |
+          fn $FN(...) -> [$T; $N] {
+            ...
+            if $ARG.len() < $L { return $D; }
+            ...
+          }

@@ -1,7 +1,9 @@
 //! End-to-end handshake + transport tests using `pair_for_test`.
 
 use fluxsync_crypto::test_util::pair_for_test;
-use fluxsync_crypto::{fingerprint, Identity, FINGERPRINT_WORDS, WORDLIST};
+use fluxsync_crypto::{
+    fingerprint, fingerprint_from_handshake_hash, Identity, FINGERPRINT_WORDS, WORDLIST,
+};
 
 #[test]
 fn round_trip_handshake_and_message() {
@@ -135,5 +137,45 @@ fn wordlist_size_invariant() {
         WORDLIST.len(),
         1024,
         "wordlist must be exactly 1024 entries"
+    );
+}
+
+#[test]
+fn fs052_both_peers_agree_on_handshake_sas() {
+    // FS-052: the verbal SAS shown to the user at pair time must be
+    // derived from the Noise handshake hash `h`, and `h` is identical on
+    // both sides once the IK exchange completes. A MITM that re-keys the
+    // session would change `h` for one side and break the verbal compare.
+    let a = Identity::generate();
+    let b = Identity::generate();
+    let (a_sess, b_sess) = pair_for_test(&a, &b).expect("pair");
+
+    let a_hash = a_sess.handshake_hash();
+    let b_hash = b_sess.handshake_hash();
+    assert_eq!(a_hash, b_hash, "Noise `h` must match across peers");
+
+    let a_words = fingerprint_from_handshake_hash(a_hash);
+    let b_words = fingerprint_from_handshake_hash(b_hash);
+    assert_eq!(a_words, b_words, "SAS words must match across peers");
+    assert_eq!(a_words.len(), FINGERPRINT_WORDS);
+    for w in a_words {
+        assert!(WORDLIST.contains(&w), "{w} missing from WORDLIST");
+    }
+}
+
+#[test]
+fn fs052_handshake_sas_differs_across_sessions() {
+    // Two independent handshakes with the same identities must yield
+    // different SAS — IK mixes fresh ephemerals into `h` each time, so a
+    // captured SAS cannot be reused to silence the verbal compare on a
+    // later pair.
+    let a = Identity::generate();
+    let b = Identity::generate();
+    let (a1, _b1) = pair_for_test(&a, &b).expect("pair 1");
+    let (a2, _b2) = pair_for_test(&a, &b).expect("pair 2");
+    assert_ne!(
+        a1.handshake_hash(),
+        a2.handshake_hash(),
+        "fresh ephemerals must change `h` per session"
     );
 }

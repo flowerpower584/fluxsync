@@ -96,6 +96,21 @@ enum PairSub {
         #[arg(long)]
         addr: Option<String>,
     },
+    /// FS-052: list peers that landed in the trusted set via the TOFU
+    /// window but have not yet been verbally confirmed. Each row carries
+    /// the 6-word SAS to compare with the peer device.
+    Pending,
+    /// FS-052: confirm or reject a pending pair by peer-id.
+    Confirm {
+        /// Hex peer-id from `pair pending`.
+        peer_id: String,
+        /// Keep the peer in the trusted set.
+        #[arg(long, conflicts_with = "reject")]
+        accept: bool,
+        /// Revoke the peer (drops live session + removes from peers.json).
+        #[arg(long, conflicts_with = "accept")]
+        reject: bool,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -108,6 +123,7 @@ async fn main() -> Result<()> {
         Pull,
         PairShow,
         PairQr,
+        PairPending,
         Ack(&'static str),
     }
 
@@ -204,6 +220,37 @@ async fn main() -> Result<()> {
                 }
                 (one_shot(&ipc_path, req).await?, Kind::Ack("peer trusted"))
             }
+            PairSub::Pending => (
+                one_shot(&ipc_path, json!({"id": 1, "op": "pair_pending"})).await?,
+                Kind::PairPending,
+            ),
+            PairSub::Confirm {
+                peer_id,
+                accept,
+                reject,
+            } => {
+                if !accept && !reject {
+                    return Err(anyhow!("must pass --accept or --reject"));
+                }
+                let label = if accept {
+                    "pair confirmed"
+                } else {
+                    "pair rejected"
+                };
+                (
+                    one_shot(
+                        &ipc_path,
+                        json!({
+                            "id": 1,
+                            "op": "pair_confirm",
+                            "peer_id": peer_id,
+                            "accept": accept,
+                        }),
+                    )
+                    .await?,
+                    Kind::Ack(label),
+                )
+            }
         },
     };
 
@@ -221,9 +268,57 @@ async fn main() -> Result<()> {
         Kind::Pull => render::render_pull(&value),
         Kind::PairShow => render::render_pair_show(&value)?,
         Kind::PairQr => render_pair_qr(&value)?,
+        Kind::PairPending => render_pair_pending(&value),
         Kind::Ack(action) => render::render_ack(&value, action),
     }
     Ok(())
+}
+
+/// Render FS-052 pending-pair listing: one row per unconfirmed peer with
+/// the SAS the user must compare against the other device.
+fn render_pair_pending(resp: &Value) {
+    if resp.get("ok").and_then(Value::as_bool) != Some(true) {
+        let err = resp.get("err").and_then(Value::as_str).unwrap_or("unknown");
+        eprintln!("error: {err}");
+        return;
+    }
+    let entries = resp
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if entries.is_empty() {
+        println!("No pending pairs.");
+        return;
+    }
+    println!("Pending pairs — verify the SAS matches on the OTHER device,");
+    println!("then run: fluxctl pair confirm <peer-id> --accept | --reject");
+    println!();
+    for e in entries {
+        let id = e.get("peer_id").and_then(Value::as_str).unwrap_or("?");
+        let name = e.get("name").and_then(Value::as_str).unwrap_or("");
+        let addr = e
+            .get("addr")
+            .and_then(Value::as_str)
+            .unwrap_or("(unknown)");
+        let words = e
+            .get("sas_words")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        let ttl_ms = e.get("expires_in_ms").and_then(Value::as_u64).unwrap_or(0);
+        println!("peer-id : {id}");
+        println!("name    : {name}");
+        println!("addr    : {addr}");
+        println!("sas     : {words}");
+        println!("expires : {}s", ttl_ms / 1000);
+        println!();
+    }
 }
 
 /// Render the pair URI as a terminal-friendly QR (Unicode half-blocks)

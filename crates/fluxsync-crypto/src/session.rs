@@ -6,6 +6,10 @@ const NONCE_PREFIX_LEN: usize = 8;
 /// Width of the anti-replay sliding window, in frames.
 const REPLAY_WINDOW: u64 = 64;
 
+/// Length of the Noise handshake hash `h` captured at session install,
+/// for `Noise_IK_25519_ChaChaPoly_BLAKE2s` (BLAKE2s output = 32 bytes).
+pub const HANDSHAKE_HASH_LEN: usize = 32;
+
 /// Established Noise IK transport session. Wraps `snow::TransportState`.
 ///
 /// FluxSync runs Noise transport over **UDP**, which is unordered and
@@ -23,14 +27,29 @@ const REPLAY_WINDOW: u64 = 64;
 pub struct Session {
     transport: snow::TransportState,
     replay: ReplayWindow,
+    handshake_hash: [u8; HANDSHAKE_HASH_LEN],
 }
 
 impl Session {
-    pub(crate) fn new(transport: snow::TransportState) -> Self {
+    pub(crate) fn new(
+        transport: snow::TransportState,
+        handshake_hash: [u8; HANDSHAKE_HASH_LEN],
+    ) -> Self {
         Self {
             transport,
             replay: ReplayWindow::default(),
+            handshake_hash,
         }
+    }
+
+    /// Return the Noise handshake hash `h` captured at session install.
+    /// Both peers derive the same value once the handshake completes;
+    /// FS-052 uses it as the input to a session-binding SAS so a MITM that
+    /// rekeys against a known pubkey produces different words for the
+    /// verbal compare.
+    #[must_use]
+    pub fn handshake_hash(&self) -> &[u8; HANDSHAKE_HASH_LEN] {
+        &self.handshake_hash
     }
 
     /// Encrypt a single payload for a lossy transport.
@@ -102,6 +121,15 @@ impl Session {
 /// `bitmap` bit `i` records that `highest - i` was accepted; bit 0 is
 /// `highest` itself. Nonces older than [`REPLAY_WINDOW`] behind `highest`
 /// are rejected, as are any already marked.
+///
+/// **Constant-time review (FS-057):** all branches in `is_fresh` /
+/// `accept` are driven by the wire nonce, which is sent in clear in the
+/// frame prefix and is therefore *not* secret. Tag authentication
+/// (`read_message`) happens *after* `is_fresh` clears the frame, so the
+/// only secret-dependent compare in the whole decrypt path is the
+/// ChaCha20-Poly1305 tag check inside `snow` (which uses
+/// `chacha20poly1305`'s `subtle::ConstantTimeEq`). No timing channel on
+/// keys or plaintext leaks from this module.
 #[derive(Default)]
 struct ReplayWindow {
     highest: u64,

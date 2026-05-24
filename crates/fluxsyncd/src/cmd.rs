@@ -118,6 +118,18 @@ pub enum CmdOp {
     SetPreferLan {
         value: bool,
     },
+    /// FS-052: list peers that were auto-trusted under the TOFU window
+    /// but have not yet been verbally confirmed by the user. Each entry
+    /// carries the 6-word session-binding SAS so the user can match it
+    /// against what the other end displays.
+    PairPending {},
+    /// FS-052: confirm or reject a pending pair. `accept = true` keeps
+    /// the peer in the trusted set; `accept = false` revokes it (drops
+    /// the live session and removes the entry from `peers.json`).
+    PairConfirm {
+        peer_id: String,
+        accept: bool,
+    },
 }
 
 /// Response envelope on the `cmd` channel. `id` echoes the request.
@@ -158,7 +170,30 @@ pub enum CmdData {
     ItemBytes {
         bytes: String,
     },
+    /// FS-052: pending-pair listing.
+    PendingPairs(Vec<PendingPairEntry>),
     Pong,
+}
+
+/// FS-052: one unconfirmed TOFU pair waiting on user verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPairEntry {
+    /// Hex of the peer's `BLAKE3(static_pub)`.
+    pub peer_id: String,
+    /// Best-known name (typically the `New Peer` placeholder until the
+    /// `Msg::Hello` lands the real device name).
+    pub name: String,
+    /// 6 verbal SAS words derived from the Noise handshake hash `h`.
+    /// Identical on both peers; differs across handshakes (fresh
+    /// ephemerals) and across MITM attempts.
+    pub sas_words: Vec<String>,
+    /// Last-seen UDP source for this pair. `None` if the entry was
+    /// reloaded from disk and the live address is not yet known.
+    pub addr: Option<String>,
+    /// Milliseconds remaining until the daemon-side pending entry
+    /// expires. `None` if the entry has no expiry (e.g. a peer that
+    /// already landed in the trusted set but never got a user confirm).
+    pub expires_in_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,0 +1,39 @@
+rules:
+  - id: rust.fluxsync.unbounded-network-map-insert
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      HashMap `insert` / `entry().or_insert_with` inside a known
+      network-handling async fn (`run_responder`, `transport_recv_loop`,
+      `dispatch_inbound_frame`, `handle_driver_cmd`) with no nearby
+      `if $MAP.len() ... { ... }` cap. A pre-confirm or paired-attacker
+      peer can flood the map and exhaust memory + disk (when paired with
+      `save_peers`). Add a length guard before insert. See
+      FluxSync_VARIANT_ANALYSIS_2026-05-23.md (V1, V2) and
+      FluxSync_DIFFERENTIAL_REVIEW_2026-05-23.md (M2).
+    patterns:
+      - pattern-either:
+          - pattern: $MAP.insert($K, $V)
+          - pattern: $MAP.entry($K).or_insert($V)
+          - pattern: $MAP.entry($K).or_insert_with($CB)
+          - pattern: $MAP.entry($K).or_insert_with_key($CB)
+          - pattern: $MAP.entry($K).or_default()
+      - pattern-inside: |
+          async fn $FN(...) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $FN
+          regex: ^(run_responder|transport_recv_loop|dispatch_inbound_frame|handle_driver_cmd)$
+      - pattern-not-inside: |
+          if $MAP.len() >= $LIMIT { ... }
+      - pattern-not-inside: |
+          if $MAP.len() > $LIMIT { ... }
+      - pattern-not-inside: |
+          if $MAP.len() < $LIMIT { ... }
+      - pattern-not-inside: |
+          if $MAP.len() <= $LIMIT { ... }
+      - pattern-not-inside: |
+          if !$MAP.contains_key($K2) && $MAP.len() >= $LIMIT { ... }
+      - pattern-not-inside: |
+          if !$MAP.contains_key($K2) && $MAP.len() > $LIMIT { ... }
