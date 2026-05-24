@@ -146,8 +146,15 @@ async fn browse_loop(
                         if !is_valid_hex_id(peer_id) { continue; }
                         let Some(static_pub) = props.get_property_val_str("static_pub") else { continue };
                         if !is_valid_hex_id(static_pub) { continue; }
-                        let addr = info.get_addresses().iter().next().copied();
-                        let Some(ip) = addr else { continue };
+                        // mdns-sd 0.19: `get_addresses` returns
+                        // `&HashSet<ScopedIp>` (was `HashSet<IpAddr>`).
+                        // Unwrap to plain `IpAddr` via `to_ip_addr()`.
+                        let Some(ip) = info
+                            .get_addresses()
+                            .iter()
+                            .next()
+                            .map(|sip| sip.to_ip_addr())
+                        else { continue };
                         let port = info.get_port();
                         let sock_addr = std::net::SocketAddr::new(ip, port);
                         let name = info.get_fullname()
