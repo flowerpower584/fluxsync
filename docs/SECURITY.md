@@ -92,3 +92,46 @@ Email Dethie at the address in `Cargo.toml`, PGP-encrypted if you have the key (
 - All key material crosses the FFI boundary as opaque `[u8]`; the Kotlin side never sees plaintext clipboard either, because the daemon is the one that decrypts and writes to the system clipboard.
 - `unsafe` is forbidden outside the FFI shim file in `fluxsync-mobile-ffi/src/lib.rs`. Every `unsafe` block carries a `// SAFETY:` comment explaining the invariant.
 - `cargo deny` runs in CI to refuse known-vulnerable crates and incompatible licenses.
+
+---
+
+## 7. Implementation status (v0.5.x)
+
+This document describes the **target** security posture. Some items above are not yet wired in the shipping code. Below is the honest delta between design intent (§1–§6) and what `main` actually does today. Each gap has a tracking ID and a planned milestone.
+
+### Done
+
+- Noise IK handshake on every session (`fluxsync-crypto::handshake`, daemon `handshake::run_{initiator,responder}`).
+- ChaCha20-Poly1305 AEAD; no plaintext code path; FSM destroys session on tag failure.
+- Pinned static-key auth: responder bails with `trusted peer key mismatch` if the remote `s` does not match the stored pubkey (`handshake.rs:131-135`).
+- 6-word verbal fingerprint derivation (`fluxsync-crypto::fingerprint`, ~60 bits) — **displayed** in `fluxctl pair` output.
+- Peer revocation via `fluxctl revoke <peer-id>` (`fluxctl/main.rs:157`), removes the static pubkey from the local registry.
+- mDNS is discovery-only; daemon ignores broadcasts unless the advertised `peer_id` is already trusted.
+- **FS-058 (v0.6.0)**: per-source-IP handshake rate-limiter (token bucket, capacity 5, refill ~1/6 s, bounded source table 1024). `PendingSet` capped at 64 with inline + background reaper; `TrustedSet` capped at 256 to bound `peers.json` disk growth; chunk-header reassembly map mirrors the chunk-arm cap=5. Together these close the M2/V1/V2 DoS surface flagged in `FluxSync_DIFFERENTIAL_REVIEW_2026-05-23.md` + `FluxSync_VARIANT_ANALYSIS_2026-05-23.md`.
+- **FS-059 (v0.6.0)**: handshake source-IP filter — by default `lan_only_handshakes = true` refuses `HandshakeInit` datagrams from non-local sources (RFC 1918 / loopback / link-local / IPv6 ULA / link-local only).
+- **FS-053 partial (v0.6.0)**: identity `secret_bytes()` / `from_secret_bytes()` now return / accept `Zeroizing<[u8; 32]>`; intermediate file-read buffers in `keystore::load_or_create_identity` and `mobile-ffi` decode path are also wrapped, so secret material on the stack/heap is scrubbed on drop. Keychain migration (replacing `~/.fluxsync/identity.bin`) still pending.
+- **FS-057 (v0.6.0)**: constant-time review of `ReplayWindow` recorded inline in `session.rs`. All branches are driven by the wire nonce (public); tag check is delegated to `snow` → `chacha20poly1305` which uses `subtle::ConstantTimeEq`. No timing channel on key or plaintext.
+- **H1 / M1 (v0.6.0)**: `fingerprint_from_handshake_hash` takes `&[u8; HANDSHAKE_HASH_LEN]` so the length is enforced at the type level; the release-mode silent-empty fallback is gone.
+- **M3 (v0.6.0)**: daemon-level tests for `PairConfirm` accept / reject / unknown-peer / bad-hex (`crates/fluxsyncd/tests/pair_confirm.rs`).
+- **Lock ordering** (FS-058 L2): the responder takes `trusted` first, then `pending`. Nothing in the codebase takes them in the reverse order. Holding `trusted` while touching `pending` is fine; holding `pending` while taking `trusted` would risk a deadlock — do not introduce that direction.
+- **Supply chain** (v0.6.0): `cargo audit` reports 0 vulnerabilities; 2 unmaintained advisories (`bincode 1.3`, `paste 1.0`) come in via `uniffi 0.27` and are tracked for the uniffi 0.28+ bump. `cargo deny check` (advisories + bans + licenses + sources) is green.
+
+### Pending (security-relevant gaps)
+
+| ID      | Gap                                                                                                                            | Doc claim that overstates reality                          | Target |
+|---------|--------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------|--------|
+| FS-052  | TOFU pairing window (90 s after `CmdOp::PairShow`) auto-accepts the **first** incoming Noise IK and inserts it into the trusted set. **Partial mitigation landed v0.5.x**: every TOFU acceptance is now recorded in a daemon-side `PendingSet` with a 6-word SAS derived from the Noise handshake hash `h` (not the long-term pubkey, FS-056), and surfaced via `fluxctl pair pending`. The user can compare the SAS verbally and run `fluxctl pair confirm <peer-id> --reject` to immediately revoke + tear down the session. **Still pending for v0.6**: a hard gate that blocks `Msg::Item` processing until the user runs `--accept`, so a drive-by attacker that races into the window cannot exfiltrate clipboard data before the user has a chance to compare the SAS. | §2.2 "refuse to finalize unless the user types `y` on both sides" | v0.6 |
+| FS-053  | Long-term X25519 secret is stored in `~/.fluxsync/identity.bin` (mode `0600`), **not** in the OS keychain. No keychain code paths exist yet (`keyring` crate not in `Cargo.toml`). Backup leaks (Time Machine, iCloud, Google Drive), same-user malware, and disk forensics all extract the key trivially. | §1 "stored in OS keychain", §2.4 entire mitigation, §4 boundary table | v0.6 |
+| FS-054  | No Noise rekey policy. A long-lived session reuses the same chaining key until process exit. PFS for past sessions still holds (ephemerals are discarded), but compromising a live session unlocks all of its traffic. | implicit in §1                                              | v0.7 |
+| FS-055  | No signed audit log of pair / revoke / handshake decisions. Cannot detect "device paired without me knowing". | not yet claimed                                            | v0.7 |
+| FS-056  | ✅ **Landed v0.5.x.** The pairing-time SAS exposed by `fluxctl pair pending` is now derived from the Noise handshake hash `h` (`fluxsync_crypto::fingerprint_from_handshake_hash`), not from the long-term pubkey. Each handshake mixes in fresh ephemerals, so a MITM that re-keys against a known pubkey gets different words and the verbal compare detects it. The pubkey-derived fingerprint shown by `fluxctl pair show` is unchanged — it still authenticates the long-term identity carried by the QR. | adjacent to §2.2                                            | done |
+
+### Reading guide
+
+If you are auditing FluxSync at `main` today, read §1–§6 as the **2026 roadmap**, and §7 as the **current state**. The drift is tracked; the doc will collapse back into a single source once FS-052 and FS-053 ship.
+
+For the systematic STRIDE breakdown per attack surface (mDNS, pairing, Noise, transport, keystore, IPC), see [`THREAT-MODEL.md`](./THREAT-MODEL.md).
+
+### Reporting a status mismatch
+
+If you find another claim in §1–§6 that does not match the code on `main`, please file an issue with the heading `docs: status drift — <section>` and quote the line. We would rather under-promise in the doc than have a reviewer find the next gap on their own.

@@ -17,8 +17,9 @@ pub mod ipc;
 pub mod keystore;
 pub mod logs;
 pub mod metrics;
+pub mod rate_limit;
 pub mod transport;
 pub mod wall;
 
-pub use config::{DaemonConfig, TestPair};
+pub use config::{DaemonConfig, TestPair, TestPendingPair};
 pub use driver::run;

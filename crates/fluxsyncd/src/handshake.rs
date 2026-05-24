@@ -15,7 +15,7 @@
 
 use anyhow::{anyhow, Result};
 use fluxsync_core::Event;
-use fluxsync_crypto::{Identity, Initiator, Responder};
+use fluxsync_crypto::{fingerprint_from_handshake_hash, Identity, Initiator, Responder};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -61,6 +61,35 @@ pub const PAIRING_WINDOW: Duration = Duration::from_secs(90);
 /// finite pairing window after they generate their QR code; otherwise
 /// stays `None` and the responder enforces strict trust.
 pub type PairingWindow = Arc<Mutex<Option<Instant>>>;
+
+/// FS-052: one TOFU-accepted pair that has not yet been verbally
+/// confirmed by the user. Holds the session-binding SAS so the IPC
+/// layer can show it; on confirm the entry is dropped, on reject the
+/// peer is revoked.
+#[derive(Debug, Clone)]
+pub struct PendingPair {
+    pub static_pub: [u8; 32],
+    pub name: String,
+    pub sas_words: [String; 6],
+    pub from: SocketAddr,
+    pub expires_at: Instant,
+}
+
+/// Map of unconfirmed TOFU pairs, keyed by `peer_id = BLAKE3(static_pub)`.
+pub type PendingSet = Arc<Mutex<HashMap<[u8; 32], PendingPair>>>;
+
+/// FS-058: hard cap on `PendingSet`. The set holds *unconfirmed* pairs, so
+/// in healthy use it never exceeds the number of peers the user is
+/// pairing in the current window (1–2). The cap is wide enough to absorb
+/// honest retries on lossy LAN, narrow enough to make the map a no-op
+/// DoS target.
+pub const MAX_PENDING_PAIRS: usize = 64;
+
+/// FS-058: hard cap on `TrustedSet`. The trusted map is persisted to
+/// `peers.json`, so without a cap an attacker who spams TOFU during an
+/// open pairing window can grow the on-disk file without bound (V1).
+/// 256 is far above any plausible legitimate device count.
+pub const MAX_TRUSTED_PEERS: usize = 256;
 
 /// Run the initiator side. Sends msg1, then awaits one msg2 on the
 /// `incoming` channel. Times out after 5 s.
@@ -122,10 +151,19 @@ pub async fn run_responder(
     pairing_window: PairingWindow,
     event_tx: mpsc::UnboundedSender<Event>,
     keystore_dir: Option<std::path::PathBuf>,
+    pending: PendingSet,
 ) -> Result<()> {
     let (session, msg2, remote_static) = Responder::step(&identity, &init_msg)?;
 
+    // FS-052: SAS derived from the Noise handshake hash `h`. Both peers
+    // compute the same six words once IK completes; a MITM that swaps in
+    // its own key gets a different `h` and therefore different words, so
+    // the user sees the mismatch during the verbal compare.
+    let sas_words: [String; 6] = fingerprint_from_handshake_hash(session.handshake_hash())
+        .map(|w| w.to_string());
+
     let peer_id = peer_id_for(&remote_static);
+    let mut newly_tofu = false;
     let entry = {
         let mut trusted_guard = trusted.lock().await;
         if let Some(existing) = trusted_guard.get(&peer_id).cloned() {
@@ -145,12 +183,25 @@ pub async fn run_responder(
                     &peer_id[..6]
                 );
             }
+            // FS-058 V1: refuse TOFU if the trusted set is already at its
+            // hard cap. Without this, an attacker who flooded TOFU during
+            // a past pairing window could keep adding entries that survive
+            // restart via `peers.json`. The user still has a clear path
+            // forward — they unpair the offending peer or wipe the file.
+            if trusted_guard.len() >= MAX_TRUSTED_PEERS {
+                anyhow::bail!(
+                    "TOFU refused: trusted set at cap ({MAX_TRUSTED_PEERS}); unpair an unused peer first"
+                );
+            }
             let new_peer = tofu_trusted_peer(remote_static);
             tracing::info!(
                 peer = ?&peer_id[..6],
-                "TOFU: trusting new peer during pairing window"
+                sas = ?sas_words,
+                "TOFU: trusting new peer during pairing window — \
+                 USER MUST CONFIRM via `fluxctl pair confirm` before this is durable"
             );
             trusted_guard.insert(peer_id, new_peer.clone());
+            newly_tofu = true;
 
             // PERSIST to disk so we remember this peer after restart.
             // The disk name copies `new_peer.name` so the live session and
@@ -175,6 +226,39 @@ pub async fn run_responder(
         }
     };
 
+    // FS-052: record the SAS + expiry so the IPC layer can surface a
+    // `fluxctl pair pending` listing. Inserted only for freshly-TOFU'd
+    // peers — re-handshakes from already-trusted peers do not need a new
+    // verbal compare.
+    if newly_tofu {
+        let mut pending_guard = pending.lock().await;
+        // FS-058 M2: drop expired entries first, then enforce hard cap by
+        // evicting the soonest-to-expire entry. Reaper task also sweeps
+        // on a timer, but doing it inline guarantees the cap holds even
+        // if the reaper is starved.
+        let now = Instant::now();
+        pending_guard.retain(|_, p| p.expires_at > now);
+        if pending_guard.len() >= MAX_PENDING_PAIRS {
+            if let Some(victim) = pending_guard
+                .iter()
+                .min_by_key(|(_, p)| p.expires_at)
+                .map(|(k, _)| *k)
+            {
+                pending_guard.remove(&victim);
+            }
+        }
+        pending_guard.insert(
+            peer_id,
+            PendingPair {
+                static_pub: remote_static,
+                name: entry.name.clone(),
+                sas_words: sas_words.clone(),
+                from,
+                expires_at: now + PAIRING_WINDOW,
+            },
+        );
+    }
+
     // Install before sending msg2 so a duplicate inbound HandshakeInit
     // (replay or honest retry) can't end up replacing the session we
     // just committed to. If install loses, drop msg2 too — peer will
@@ -195,6 +279,36 @@ pub async fn run_responder(
     let _ = event_tx.send(Event::HandshakeOk);
     Ok(())
 }
+
+/// FS-058: background sweep that drops expired entries from `PendingSet`.
+/// Runs every `PENDING_REAPER_INTERVAL`. Exits cleanly when the
+/// cancellation token is fired, so the daemon shutdown path stays clean.
+pub async fn run_pending_reaper(
+    pending: PendingSet,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let mut tick = tokio::time::interval(PENDING_REAPER_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            _ = tick.tick() => {
+                let now = Instant::now();
+                let mut g = pending.lock().await;
+                let before = g.len();
+                g.retain(|_, p| p.expires_at > now);
+                let after = g.len();
+                if before != after {
+                    tracing::debug!(reaped = before - after, "PendingSet reaper");
+                }
+            }
+        }
+    }
+}
+
+/// How often [`run_pending_reaper`] sweeps `PendingSet`.
+pub const PENDING_REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Stable peer id = `BLAKE3(static_pub)`. Re-uses the workspace's
 /// shared hash helper so producers can't accidentally diverge.

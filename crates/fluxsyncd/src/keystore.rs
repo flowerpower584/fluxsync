@@ -77,8 +77,11 @@ pub fn load_or_create_identity(dir: &Path) -> Result<Identity> {
                 bytes.len()
             ));
         }
-        let mut arr = [0u8; 32];
+        let mut arr = zeroize::Zeroizing::new([0u8; 32]);
         arr.copy_from_slice(&bytes);
+        // The file-read buffer also held a copy of the secret — wrap so
+        // Drop scrubs it before the Vec storage is freed.
+        let _scrub = zeroize::Zeroizing::new(bytes);
         tracing::info!(path = %path.display(), "loaded identity");
         Ok(Identity::from_secret_bytes(arr))
     } else {

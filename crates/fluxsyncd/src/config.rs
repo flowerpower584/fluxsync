@@ -40,6 +40,16 @@ pub struct DaemonConfig {
     pub start_on: bool,
     pub last_peer_addr: Option<SocketAddr>,
     pub test_pair: Option<TestPair>,
+    /// Test injection: pre-populate the `PendingSet` so a test can drive
+    /// `PairConfirm` without running the real handshake. Production
+    /// binaries always set this to `None`.
+    pub test_pending_pair: Option<TestPendingPair>,
+    /// FS-059: reject `HandshakeInit` datagrams whose source IP is not on
+    /// a private / link-local / loopback range. Default `true` because the
+    /// product is LAN clipboard sync — a handshake from a routable WAN
+    /// address is almost certainly hostile. Users who genuinely want
+    /// public-internet pairing (VPN, IPv6 ULAs, etc.) can flip this off.
+    pub lan_only_handshakes: bool,
 }
 
 impl DaemonConfig {
@@ -63,6 +73,27 @@ impl DaemonConfig {
             start_on: false,
             last_peer_addr: None,
             test_pair: None,
+            test_pending_pair: None,
+            lan_only_handshakes: true,
+        }
+    }
+}
+
+/// FS-059: classify a source `IpAddr` as "on a local network we should
+/// accept handshakes from". Accepts:
+/// * loopback (127.0.0.0/8, ::1)
+/// * IPv4 private (RFC 1918) and link-local (169.254/16)
+/// * IPv6 unique-local (fc00::/7) and link-local (fe80::/10)
+#[must_use]
+pub fn is_local_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
         }
     }
 }
@@ -73,6 +104,16 @@ pub struct TestPair {
     pub peer_addr: SocketAddr,
     pub peer_name: String,
     pub peer_id: [u8; 32],
+}
+
+/// Test-only injection of an entry into the `PendingSet`.
+pub struct TestPendingPair {
+    pub peer_id: [u8; 32],
+    pub static_pub: [u8; 32],
+    pub name: String,
+    pub sas_words: [String; 6],
+    pub from: SocketAddr,
+    pub expires_in: std::time::Duration,
 }
 
 fn hostname_or(default: &str) -> String {

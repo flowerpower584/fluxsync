@@ -43,6 +43,8 @@ hex = "0.4"
 # too. Image clipboard sync needs decode/hash on every platform.
 image = { version = "0.25", default-features = false, features = ["png"] }
 sentry = { version = "0.48.1", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
+# FS-053: scrub secret-key buffers on the way to disk / keystore.
+zeroize = "1.8"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["fs", "hostname"] }

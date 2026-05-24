@@ -18,10 +18,11 @@
 use crate::cmd::{Channel, CmdData, CmdOp, CmdRequest, CmdResponse, PeerEntry, Subscribe};
 use crate::config::{DaemonConfig, TestPair};
 use crate::discovery::{self, DiscoveryEvent};
-use crate::handshake::{self, PairingWindow, TrustedPeer, TrustedSet};
+use crate::handshake::{self, PairingWindow, PendingSet, TrustedPeer, TrustedSet};
 use crate::ipc::{IpcConn, IpcServer};
 use crate::logs::LogTail;
 use crate::metrics::{DisconnectReason, MetricsTracker};
+use crate::rate_limit::HandshakeRateLimiter;
 use crate::transport::{RecvFrame, Transport};
 use anyhow::{anyhow, Context, Result};
 use base32::Alphabet;
@@ -71,6 +72,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         start_on,
         last_peer_addr: _,
         test_pair,
+        test_pending_pair,
+        lan_only_handshakes,
     } = cfg;
 
     // ── App + channels ────────────────────────────────────────────
@@ -123,6 +126,25 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // to `now + 5 min`; outside the window the responder enforces strict
     // trust against `trusted_peer_keys` / previously-paired peers.
     let pairing_window: PairingWindow = Arc::new(Mutex::new(None));
+
+    // FS-052: peers auto-trusted under TOFU but not yet verbally
+    // confirmed by the user. Each entry carries the 6-word SAS computed
+    // from the Noise handshake hash so `fluxctl pair pending` /
+    // `fluxctl pair confirm` can surface and resolve them.
+    let pending_pairs: PendingSet = Arc::new(Mutex::new(HashMap::new()));
+
+    if let Some(tpp) = test_pending_pair {
+        pending_pairs.lock().await.insert(
+            tpp.peer_id,
+            crate::handshake::PendingPair {
+                static_pub: tpp.static_pub,
+                name: tpp.name,
+                sas_words: tpp.sas_words,
+                from: tpp.from,
+                expires_at: Instant::now() + tpp.expires_in,
+            },
+        );
+    }
 
     // Last clipboard payload we wrote to the OS clipboard (i.e., received
     // from the peer). The clipboard watcher dedups against this so it
@@ -231,12 +253,23 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let kd = keystore_dir.clone();
         let metrics = metrics.clone();
         let inflight = inflight.clone();
+        let pending_pairs_for_recv = pending_pairs.clone();
         tasks.spawn(async move {
             transport_recv_loop(
                 transport, identity, trusted, window, pending, event_tx, shutdown, kd, metrics,
-                inflight,
+                inflight, pending_pairs_for_recv, lan_only_handshakes,
             )
             .await
+        });
+    }
+
+    // FS-058: background reaper that drops expired PendingSet entries.
+    {
+        let pending = pending_pairs.clone();
+        let s = shutdown.clone();
+        tasks.spawn(async move {
+            handshake::run_pending_reaper(pending, s).await;
+            Ok(())
         });
     }
 
@@ -437,6 +470,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             udp_port,
                             &metrics,
                             &inflight,
+                            &pending_pairs,
                         ).await;
                     }
                 }
@@ -849,6 +883,7 @@ async fn handle_driver_cmd(
     udp_port: u16,
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
+    pending_pairs: &PendingSet,
 ) {
     let DriverCmd::Run { op, reply, req_id } = cmd else {
         return;
@@ -1131,6 +1166,76 @@ async fn handle_driver_cmd(
             CmdResponse::ok(req_id, None)
         }
 
+        // FS-052: list peers that landed in `trusted` under the TOFU
+        // window but have not yet been verbally confirmed.
+        CmdOp::PairPending {} => {
+            let now = Instant::now();
+            let entries: Vec<crate::cmd::PendingPairEntry> = {
+                let mut g = pending_pairs.lock().await;
+                // Expire stale entries before answering so callers never
+                // see a pair the daemon would refuse to confirm anyway.
+                g.retain(|_, p| p.expires_at > now);
+                g.iter()
+                    .map(|(peer_id, p)| crate::cmd::PendingPairEntry {
+                        peer_id: hex::encode(peer_id),
+                        name: p.name.clone(),
+                        sas_words: p.sas_words.to_vec(),
+                        addr: Some(p.from.to_string()),
+                        expires_in_ms: Some(
+                            p.expires_at
+                                .saturating_duration_since(now)
+                                .as_millis()
+                                .min(u128::from(u64::MAX)) as u64,
+                        ),
+                    })
+                    .collect()
+            };
+            CmdResponse::ok(req_id, Some(CmdData::PendingPairs(entries)))
+        }
+
+        // FS-052: resolve a pending pair. Accept = drop from the pending
+        // map (peer keeps its trusted slot). Reject = revoke, same path
+        // as `CmdOp::Revoke`, so an attacker that raced into the trusted
+        // set is purged from `peers.json` and the live session is torn
+        // down.
+        CmdOp::PairConfirm { peer_id, accept } => {
+            let Ok(bytes) = hex::decode(&peer_id) else {
+                return reply_err(reply, req_id, "bad hex peer_id");
+            };
+            let arr: [u8; 32] = match bytes.try_into() {
+                Ok(a) => a,
+                Err(_) => return reply_err(reply, req_id, "expected 32-byte peer_id"),
+            };
+            let was_pending = pending_pairs.lock().await.remove(&arr).is_some();
+            if !was_pending {
+                return reply_err(reply, req_id, "no pending pair with that peer_id");
+            }
+            if !accept {
+                trusted.lock().await.remove(&arr);
+                if let Some(dir) = keystore_dir {
+                    if let Err(e) = save_current_peers(dir, trusted, transport).await {
+                        tracing::warn!(error = %e, "failed to persist rejection to keystore");
+                    }
+                }
+                let actions = app.handle(Event::ManualUnpair, &**wall);
+                dispatch(
+                    actions,
+                    app,
+                    transport,
+                    trusted,
+                    keystore_dir,
+                    state_watch_tx,
+                    logs_bcast_tx,
+                    log_tail,
+                    last_written_hashes,
+                    metrics,
+                    inflight,
+                )
+                .await;
+            }
+            CmdResponse::ok(req_id, None)
+        }
+
         CmdOp::PairShow {} => {
             // Refuse to open the TOFU window while already paired: a
             // re-share of the QR would otherwise let a LAN attacker
@@ -1375,10 +1480,15 @@ async fn transport_recv_loop(
     keystore_dir: Option<PathBuf>,
     metrics: Arc<Mutex<MetricsTracker>>,
     inflight: InflightMap,
+    pending_pairs: PendingSet,
+    lan_only_handshakes: bool,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
     let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    // FS-058: per-source-IP handshake limiter. Local-mutable; recv loop is
+    // single-task so no Arc<Mutex<>> needed.
+    let mut handshake_limiter = HandshakeRateLimiter::new();
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(5));
     let mut retransmit_interval = tokio::time::interval(RETRANSMIT_INTERVAL);
     let mut nak_interval = tokio::time::interval(NAK_INTERVAL);
@@ -1507,6 +1617,28 @@ async fn transport_recv_loop(
                 };
                 match frame {
                     RecvFrame::HandshakeInit { from, msg } => {
+                        // FS-059: refuse handshakes from public-internet
+                        // sources by default. LAN clipboard sync has no
+                        // legitimate WAN peer; a routable IP here is
+                        // almost certainly a scanner.
+                        if lan_only_handshakes && !crate::config::is_local_ip(from.ip()) {
+                            tracing::warn!(
+                                src = %from,
+                                "HandshakeInit dropped: non-local source"
+                            );
+                            continue;
+                        }
+                        // FS-058: per-source-IP rate-limit. Drop excess
+                        // HandshakeInit datagrams BEFORE spawning the
+                        // responder so neither the Noise step nor the
+                        // PendingSet/trusted map are exposed to the flood.
+                        if !handshake_limiter.check(from.ip()) {
+                            tracing::warn!(
+                                src = %from,
+                                "HandshakeInit dropped: source rate-limited"
+                            );
+                            continue;
+                        }
                         if transport.session.lock().await.is_some() {
                             // [FIX] Session Stability: NEVER accept a re-handshake while
                             // a session is active. The Android re-initiates handshakes
@@ -1530,8 +1662,9 @@ async fn transport_recv_loop(
                         let window = pairing_window.clone();
                         let evt = event_tx.clone();
                         let kd = keystore_dir.clone();
+                        let pending = pending_pairs.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handshake::run_responder(id, msg, from, tr, trusted, window, evt, kd).await {
+                            if let Err(e) = handshake::run_responder(id, msg, from, tr, trusted, window, evt, kd, pending).await {
                                 tracing::warn!(error = %e, "responder failed");
                             }
                         });
@@ -1612,13 +1745,13 @@ fn image_rgba_hash(width: u32, height: u32, rgba: &[u8]) -> [u8; 32] {
 /// `fetch_item` IPC op, which reads this map. Bounded to the last few
 /// images so a 16 MiB cap can't grow memory without limit. Desktop never
 /// reads it (it writes images straight to the OS clipboard).
-static IMAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<VecDeque<(String, Vec<u8>)>>> =
-    std::sync::OnceLock::new();
+type ImageCache = std::sync::Mutex<VecDeque<(String, Vec<u8>)>>;
+static IMAGE_CACHE: std::sync::OnceLock<ImageCache> = std::sync::OnceLock::new();
 
 /// Max image payloads retained in [`IMAGE_CACHE`]. 4 × 16 MiB worst case.
 const IMAGE_CACHE_CAP: usize = 4;
 
-fn image_cache() -> &'static std::sync::Mutex<VecDeque<(String, Vec<u8>)>> {
+fn image_cache() -> &'static ImageCache {
     IMAGE_CACHE.get_or_init(|| std::sync::Mutex::new(VecDeque::with_capacity(IMAGE_CACHE_CAP)))
 }
 
@@ -1961,6 +2094,18 @@ async fn dispatch_inbound_frame(
             if item.payload.is_empty() {
                 // Header for a chunked transfer
                 let mut map = reassembly.lock().await;
+                // FS-058 V2: mirror the chunk-arm cap. A flood of headers
+                // for new items must not grow `reassembly` unbounded —
+                // evict the least-recently-updated entry first.
+                if !map.contains_key(&item.hash) && map.len() >= 5 {
+                    let oldest = map
+                        .iter()
+                        .min_by_key(|(_, r)| r.last_update)
+                        .map(|(k, _)| *k);
+                    if let Some(k) = oldest {
+                        map.remove(&k);
+                    }
+                }
                 let r = map.entry(item.hash).or_insert_with(|| Reassembly {
                     metadata: Some((item.lamport, item.kind, item.sensitive)),
                     chunks: Vec::new(),

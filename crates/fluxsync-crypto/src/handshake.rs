@@ -1,7 +1,17 @@
 use crate::error::CryptoError;
 use crate::identity::Identity;
-use crate::session::Session;
+use crate::session::{Session, HANDSHAKE_HASH_LEN};
 use crate::NOISE_PATTERN;
+
+/// Snapshot the Noise handshake hash `h` from a finished `HandshakeState`
+/// before consuming it into transport mode. `Noise_IK_25519_ChaChaPoly_BLAKE2s`
+/// guarantees `h` is exactly 32 bytes; anything else is a snow API break
+/// and surfaces as `CryptoError::Handshake`.
+fn snapshot_hash(state: &snow::HandshakeState) -> Result<[u8; HANDSHAKE_HASH_LEN], CryptoError> {
+    let h = state.get_handshake_hash();
+    h.try_into()
+        .map_err(|_| CryptoError::Handshake(format!("handshake hash not {HANDSHAKE_HASH_LEN} bytes")))
+}
 
 /// Buffer size for handshake messages. Noise IK messages are small (~96 B
 /// for `Noise_IK_25519_ChaChaPoly_BLAKE2s`); 1 KiB is generous.
@@ -25,7 +35,7 @@ impl Initiator {
             .map_err(|e: snow::Error| CryptoError::PatternParse(e.to_string()))?;
         let secret = identity.raw_secret();
         let mut state = snow::Builder::new(pattern)
-            .local_private_key(&secret)
+            .local_private_key(&*secret)
             .remote_public_key(peer_static_pub)
             .build_initiator()
             .map_err(|e| CryptoError::Builder(e.to_string()))?;
@@ -45,11 +55,12 @@ impl Initiator {
         self.state
             .read_message(msg2, &mut payload)
             .map_err(|e| CryptoError::Handshake(e.to_string()))?;
+        let hash = snapshot_hash(&self.state)?;
         let transport = self
             .state
             .into_transport_mode()
             .map_err(|e| CryptoError::Transport(e.to_string()))?;
-        Ok(Session::new(transport))
+        Ok(Session::new(transport, hash))
     }
 }
 
@@ -74,7 +85,7 @@ impl Responder {
             .map_err(|e: snow::Error| CryptoError::PatternParse(e.to_string()))?;
         let secret = identity.raw_secret();
         let mut state = snow::Builder::new(pattern)
-            .local_private_key(&secret)
+            .local_private_key(&*secret)
             .build_responder()
             .map_err(|e| CryptoError::Builder(e.to_string()))?;
 
@@ -95,10 +106,11 @@ impl Responder {
             .map_err(|e| CryptoError::Handshake(e.to_string()))?;
         buf.truncate(n);
 
+        let hash = snapshot_hash(&state)?;
         let transport = state
             .into_transport_mode()
             .map_err(|e| CryptoError::Transport(e.to_string()))?;
 
-        Ok((Session::new(transport), buf, remote_static))
+        Ok((Session::new(transport, hash), buf, remote_static))
     }
 }

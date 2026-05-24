@@ -135,9 +135,16 @@ impl FluxsyncHandle {
             let bytes = B64
                 .decode(identity_secret_b64.as_bytes())
                 .map_err(|e| FluxError::Identity(format!("base64: {e}")))?;
-            let arr: [u8; 32] = bytes
-                .try_into()
-                .map_err(|_| FluxError::Identity("expected 32 bytes".into()))?;
+            // Wrap the decoded Vec in `Zeroizing` so the heap allocation
+            // is scrubbed once we've copied the bytes into the fixed
+            // array. `try_into()` would otherwise leave a 32-byte
+            // unscrubbed clone behind in the converted array path.
+            let bytes = zeroize::Zeroizing::new(bytes);
+            if bytes.len() != 32 {
+                return Err(FluxError::Identity("expected 32 bytes".into()));
+            }
+            let mut arr = zeroize::Zeroizing::new([0u8; 32]);
+            arr.copy_from_slice(&bytes);
             Identity::from_secret_bytes(arr)
         };
 

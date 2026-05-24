@@ -30,6 +30,10 @@ snow = "0.9"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 thiserror = { workspace = true }
+# FS-053 / FS-057: secret-byte scrub. `Zeroizing<[u8; 32]>` wraps the few
+# return values that must leave this crate as plain arrays so callers
+# can't forget to wipe them. The derive feature enables `ZeroizeOnDrop`.
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 # blake3 split per target: android cross-build avoids the C/NEON build
 # script, which would require an Android NDK toolchain just to typecheck.

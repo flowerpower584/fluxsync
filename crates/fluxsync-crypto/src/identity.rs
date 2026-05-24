@@ -1,6 +1,7 @@
 use blake3::Hasher;
 use rand_core::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 /// Long-term identity keypair.
 ///
@@ -8,6 +9,12 @@ use x25519_dalek::{PublicKey, StaticSecret};
 /// `x25519-dalek` semantics), so callers do not need to scrub the secret
 /// themselves. The `Clone` derive is fine here — both halves are 32 bytes
 /// and the secret is never written to disk by this crate.
+///
+/// FS-053: APIs that hand the raw secret out (`secret_bytes`,
+/// `raw_secret`) return `Zeroizing<[u8; 32]>` so the bytes are wiped
+/// when the caller's binding goes out of scope. Callers handing the
+/// bytes to the OS keychain should do so directly from the
+/// `Zeroizing` value rather than copying into a plain array.
 #[derive(Clone)]
 pub struct Identity {
     secret: StaticSecret,
@@ -24,21 +31,24 @@ impl Identity {
     }
 
     /// Reconstruct an `Identity` from a previously persisted 32-byte secret.
-    /// Bytes are clamped on the way in (X25519 convention).
+    ///
+    /// The input is taken by `Zeroizing` so the caller cannot accidentally
+    /// keep the unscrubbed copy on the stack after this returns. Bytes are
+    /// clamped on the way in (X25519 convention).
     #[must_use]
-    pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
-        let secret = StaticSecret::from(bytes);
+    pub fn from_secret_bytes(bytes: Zeroizing<[u8; 32]>) -> Self {
+        let secret = StaticSecret::from(*bytes);
         let public = PublicKey::from(&secret).to_bytes();
         Self { secret, public }
     }
 
     /// Owned copy of the secret for keychain storage.
     ///
-    /// The caller is responsible for handing the bytes to the keychain
-    /// quickly and zeroizing any intermediate buffer.
+    /// Returned as `Zeroizing<[u8; 32]>`; the bytes are wiped when the
+    /// returned value is dropped, so callers cannot forget to scrub.
     #[must_use]
-    pub fn secret_bytes(&self) -> [u8; 32] {
-        self.secret.to_bytes()
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.secret.to_bytes())
     }
 
     /// 32-byte X25519 public key. Safe to share over the wire.
@@ -55,7 +65,7 @@ impl Identity {
         *h.finalize().as_bytes()
     }
 
-    pub(crate) fn raw_secret(&self) -> [u8; 32] {
-        self.secret.to_bytes()
+    pub(crate) fn raw_secret(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.secret.to_bytes())
     }
 }
