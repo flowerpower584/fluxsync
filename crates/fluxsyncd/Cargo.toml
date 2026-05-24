@@ -60,8 +60,14 @@ nix = { version = "0.28", features = ["fs", "hostname"] }
 # it arboard falls back to Xwayland, which bridges text but drops
 # image/png — so Wayland → peer image sync silently fails. The feature
 # is target-gated inside arboard, a no-op on macOS/Windows.
+#
+# `keyring` ships native backends for macOS Keychain, Windows Credential
+# Manager and Linux Secret Service. Android isn't supported by the crate
+# (Android Keystore needs JNI, handled separately in fluxsync-mobile-ffi
+# or — for now — falls back to the in-app file path on Android).
 [target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]
 fluxsync-crypto = { path = "../fluxsync-crypto", features = ["test-util"] }

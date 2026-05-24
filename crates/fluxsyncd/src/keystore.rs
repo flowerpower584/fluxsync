@@ -4,17 +4,25 @@
 //! Layout (rooted at the keystore directory, default `~/.fluxsync`):
 //!
 //! ```text
-//! identity.bin   — raw 32-byte X25519 secret. Mode 0600 on unix.
+//! identity.bin   — (legacy) raw 32-byte X25519 secret. Mode 0600 on unix.
+//!                 Auto-migrated to the OS keychain on first boot of
+//!                 v0.6.0+ and best-effort wiped from disk.
 //! peers.json     — JSON list of {peer_id_hex, static_pub_hex, name}.
 //! ```
 //!
-//! Both files are written atomically (`*.tmp` + rename) so a crash
-//! mid-write cannot leave a half-baked secret on disk.
+//! Identity storage (FS-053):
 //!
-//! v0.1.2: this is plain-file storage. v0.1.3 will move the secret to
-//! the OS keychain (Keychain on macOS, Secret Service on Linux,
-//! Credential Manager on Windows). The on-disk peers.json stays —
-//! pubkeys aren't secret.
+//! * non-Android desktops: stored in the OS-native credential store via
+//!   the `keyring` crate (Keychain on macOS, Credential Manager on
+//!   Windows, Secret Service / kwallet on Linux).
+//! * Android: still on-disk under the app's private data dir (which is
+//!   already isolated by the OS). The `keyring` crate has no Android
+//!   backend; a future migration to Android Keystore via JNI is tracked
+//!   separately.
+//!
+//! `peers.json` is written atomically (`*.tmp` + fsync + rename) so a
+//! crash mid-write cannot corrupt the registry. The fallback identity
+//! file on Android uses the same atomic write.
 
 use anyhow::{anyhow, Context, Result};
 use fluxsync_crypto::Identity;
@@ -24,6 +32,18 @@ use std::path::Path;
 
 const IDENTITY_FILE: &str = "identity.bin";
 const PEERS_FILE: &str = "peers.json";
+
+/// Service name used for the keychain entry. Keep stable: changing it
+/// after the first release would orphan every existing user's identity.
+#[cfg(not(target_os = "android"))]
+const KEYCHAIN_SERVICE: &str = "fluxsyncd";
+
+/// Account name on the keychain entry. We only ever store one secret
+/// per service today (the long-term Noise identity), so a constant
+/// works. If we add a second secret later (e.g. group key), pick a new
+/// account name rather than overloading this one.
+#[cfg(not(target_os = "android"))]
+const KEYCHAIN_ACCOUNT: &str = "identity";
 
 /// One entry in `peers.json`. The `peer_id_hex` field is redundant
 /// (`BLAKE3(static_pub)`) but stored explicitly so a human can grep
@@ -58,33 +78,99 @@ pub fn ensure_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Load the daemon's identity from `identity.bin`, or generate and
-/// persist a fresh one if the file is missing.
+/// Load the daemon's identity from the OS keychain (or the legacy file
+/// on Android / fallback) and generate + persist a fresh one if none is
+/// found.
 ///
-/// Returns an error (rather than silently overwriting) if the file
-/// exists but is the wrong length — that case usually means a corrupted
-/// keystore, and clobbering it would invalidate every paired peer.
+/// Boot-time flow on desktops (FS-053):
+///
+/// 1. Try the keychain entry (`KEYCHAIN_SERVICE` / `KEYCHAIN_ACCOUNT`).
+/// 2. If empty, look for the legacy `identity.bin`:
+///    * if present → import it into the keychain, then best-effort
+///      wipe the file (overwrite with zeros + remove). This is the
+///      one-shot migration path; subsequent boots take branch 1.
+///    * if absent → generate a fresh keypair and store it in the
+///      keychain.
+/// 3. If the keychain backend is unavailable (no `dbus` on Linux, no
+///    login keychain unlocked, etc.) we surface the error rather than
+///    silently fall back to a file: the user must fix the backend or
+///    explicitly re-run with `--no-keychain` (future flag) once we add
+///    it.
+///
+/// On Android the keychain crate has no backend, so we keep the
+/// existing file-based path. The app's private data directory is
+/// already isolated by the OS sandbox.
+///
+/// Returns an error (rather than silently overwriting) if the legacy
+/// file exists but is the wrong length — corrupted store, clobbering
+/// would invalidate every paired peer.
 pub fn load_or_create_identity(dir: &Path) -> Result<Identity> {
     ensure_dir(dir)?;
-    let path = dir.join(IDENTITY_FILE);
-    if path.exists() {
-        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        if bytes.len() != 32 {
-            return Err(anyhow!(
-                "identity file {} has length {}, expected 32 (refusing to overwrite — \
-                 delete it manually if you really want a fresh identity)",
-                path.display(),
-                bytes.len()
-            ));
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
+            .context("open OS keychain entry for fluxsyncd identity")?;
+
+        match entry.get_password() {
+            Ok(hex) => {
+                let id = decode_identity_hex(&hex)?;
+                tracing::info!(
+                    service = KEYCHAIN_SERVICE,
+                    account = KEYCHAIN_ACCOUNT,
+                    "loaded identity from OS keychain"
+                );
+                let legacy = dir.join(IDENTITY_FILE);
+                if legacy.exists() {
+                    // The keychain wins; a stray legacy file is just
+                    // an old copy from before the migration landed.
+                    // Wipe it so a backup grab can't lift the secret.
+                    secure_wipe_identity_file(&legacy);
+                }
+                return Ok(id);
+            }
+            Err(keyring::Error::NoEntry) => {
+                // First boot on this machine, or a fresh user.
+                let legacy = dir.join(IDENTITY_FILE);
+                let id = if legacy.exists() {
+                    let imported = read_legacy_identity(&legacy)?;
+                    store_identity_in_keychain(&entry, &imported)?;
+                    secure_wipe_identity_file(&legacy);
+                    tracing::info!(
+                        path = %legacy.display(),
+                        "migrated identity from legacy identity.bin to OS keychain"
+                    );
+                    imported
+                } else {
+                    let fresh = Identity::generate();
+                    store_identity_in_keychain(&entry, &fresh)?;
+                    tracing::info!(
+                        service = KEYCHAIN_SERVICE,
+                        account = KEYCHAIN_ACCOUNT,
+                        "generated and persisted new identity in OS keychain"
+                    );
+                    fresh
+                };
+                return Ok(id);
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "OS keychain unavailable ({e}); refusing to fall back to plaintext \
+                     identity.bin. Fix the backend (unlock Keychain / start dbus / \
+                     enable Credential Manager) and retry."
+                ));
+            }
         }
-        let mut arr = zeroize::Zeroizing::new([0u8; 32]);
-        arr.copy_from_slice(&bytes);
-        // The file-read buffer also held a copy of the secret — wrap so
-        // Drop scrubs it before the Vec storage is freed.
-        let _scrub = zeroize::Zeroizing::new(bytes);
-        tracing::info!(path = %path.display(), "loaded identity");
-        Ok(Identity::from_secret_bytes(arr))
-    } else {
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let path = dir.join(IDENTITY_FILE);
+        if path.exists() {
+            let id = read_legacy_identity(&path)?;
+            tracing::info!(path = %path.display(), "loaded identity from app-private file");
+            return Ok(id);
+        }
         let id = Identity::generate();
         let secret = id.secret_bytes();
         write_secret_atomic(&path, &secret)?;
@@ -93,7 +179,88 @@ pub fn load_or_create_identity(dir: &Path) -> Result<Identity> {
     }
 }
 
-#[cfg(unix)]
+/// Read + validate a legacy `identity.bin`. Buffer is wrapped in
+/// `Zeroizing` so the secret never lingers in freed memory.
+fn read_legacy_identity(path: &Path) -> Result<Identity> {
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    if bytes.len() != 32 {
+        return Err(anyhow!(
+            "identity file {} has length {}, expected 32 (refusing to overwrite — \
+             delete it manually if you really want a fresh identity)",
+            path.display(),
+            bytes.len()
+        ));
+    }
+    let mut arr = zeroize::Zeroizing::new([0u8; 32]);
+    arr.copy_from_slice(&bytes);
+    // The Vec backing `bytes` also held a copy of the secret — wrap so
+    // Drop scrubs it before the buffer is freed.
+    let _scrub = zeroize::Zeroizing::new(bytes);
+    Ok(Identity::from_secret_bytes(arr))
+}
+
+#[cfg(not(target_os = "android"))]
+fn store_identity_in_keychain(entry: &keyring::Entry, id: &Identity) -> Result<()> {
+    let secret = id.secret_bytes();
+    let hex_secret = zeroize::Zeroizing::new(hex::encode(secret.as_ref()));
+    entry
+        .set_password(&hex_secret)
+        .context("write fluxsyncd identity to OS keychain")
+}
+
+#[cfg(not(target_os = "android"))]
+fn decode_identity_hex(hex_str: &str) -> Result<Identity> {
+    let decoded = hex::decode(hex_str.trim()).context("decode keychain identity hex")?;
+    if decoded.len() != 32 {
+        return Err(anyhow!(
+            "keychain identity has length {}, expected 32 (corrupted entry; \
+             delete it from the OS keychain to regenerate)",
+            decoded.len()
+        ));
+    }
+    let mut arr = zeroize::Zeroizing::new([0u8; 32]);
+    arr.copy_from_slice(&decoded);
+    // Wrap the Vec storage so its copy of the secret is scrubbed too.
+    let _scrub = zeroize::Zeroizing::new(decoded);
+    Ok(Identity::from_secret_bytes(arr))
+}
+
+/// Best-effort secure wipe of a legacy on-disk identity.
+///
+/// We overwrite the file in place with zeros, fsync, then unlink. On
+/// COW filesystems (APFS, Btrfs, ZFS) the prior bytes can still survive
+/// in snapshots/backups, so this is **not** a forensic wipe — it just
+/// reduces the window where a casual `cat identity.bin` returns the
+/// real secret. The threat model documents that anyone with disk-level
+/// access predating the migration may still have a copy.
+#[cfg(not(target_os = "android"))]
+fn secure_wipe_identity_file(path: &Path) {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let result = (|| -> std::io::Result<()> {
+        let mut f = fs::OpenOptions::new().write(true).open(path)?;
+        f.seek(SeekFrom::Start(0))?;
+        f.write_all(&[0u8; 32])?;
+        f.sync_all()?;
+        drop(f);
+        fs::remove_file(path)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => tracing::info!(path = %path.display(), "wiped legacy identity.bin"),
+        Err(e) => tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "failed to wipe legacy identity.bin; remove it manually"
+        ),
+    }
+}
+
+/// Atomic, mode-0600 write of the legacy `identity.bin`. Compiled only
+/// when the file-fallback path can run: Android at runtime, plus tests
+/// on any unix host (so the migration logic can be exercised by `cargo
+/// test` on macOS/Linux without going through the real keychain).
+#[cfg(any(target_os = "android", all(unix, test)))]
 fn write_secret_atomic(path: &Path, bytes: &[u8; 32]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -107,22 +274,6 @@ fn write_secret_atomic(path: &Path, bytes: &[u8; 32]) -> Result<()> {
             .mode(0o600)
             .open(&tmp)
             .with_context(|| format!("create {}", tmp.display()))?;
-        f.write_all(bytes)
-            .with_context(|| format!("write {}", tmp.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync {}", tmp.display()))?;
-    }
-    fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_secret_atomic(path: &Path, bytes: &[u8; 32]) -> Result<()> {
-    use std::io::Write;
-    let tmp = path.with_extension("bin.tmp");
-    {
-        let mut f = fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(bytes)
             .with_context(|| format!("write {}", tmp.display()))?;
         f.sync_all()
@@ -190,7 +341,8 @@ pub fn upsert_peer(peers: &mut Vec<StoredPeer>, new: StoredPeer) {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_peers, save_peers, upsert_peer, StoredPeer, PEERS_FILE};
+    use super::{load_peers, save_peers, upsert_peer, StoredPeer, IDENTITY_FILE, PEERS_FILE};
+    use super::{read_legacy_identity, write_secret_atomic};
 
     fn peer(name: &str) -> StoredPeer {
         StoredPeer {
@@ -255,5 +407,85 @@ mod tests {
             },
         );
         assert_eq!(peers.len(), 2, "a distinct peer_id must be a new entry");
+    }
+
+    /// FS-053: a legacy 32-byte `identity.bin` round-trips through
+    /// `read_legacy_identity` — used by the keychain migration path.
+    #[test]
+    fn fs053_read_legacy_identity_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(IDENTITY_FILE);
+        let secret = [0x42u8; 32];
+        write_secret_atomic(&path, &secret).expect("write legacy identity");
+
+        let id = read_legacy_identity(&path).expect("read legacy identity");
+        assert_eq!(
+            id.secret_bytes().as_ref(),
+            &secret,
+            "round-trip must preserve the raw 32-byte secret"
+        );
+    }
+
+    /// FS-053: corrupt files (wrong length) must error, not silently
+    /// regenerate — otherwise migration would invalidate every paired peer.
+    #[test]
+    fn fs053_read_legacy_identity_rejects_wrong_length() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(IDENTITY_FILE);
+        std::fs::write(&path, [0u8; 16]).expect("write short identity");
+
+        // `Identity` does not implement `Debug` (so secrets never leak
+        // into panic messages), so we cannot use `expect_err`. Match
+        // explicitly instead.
+        match read_legacy_identity(&path) {
+            Ok(_) => panic!("must reject wrong-length identity"),
+            Err(err) => assert!(
+                err.to_string().contains("length 16"),
+                "error must name the actual length, got: {err}"
+            ),
+        }
+    }
+
+    /// FS-053: `secure_wipe_identity_file` overwrites then removes the
+    /// legacy file. Verifies the file is gone after the call; the
+    /// overwrite step is best-effort on COW filesystems and not asserted.
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn fs053_secure_wipe_removes_legacy_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(IDENTITY_FILE);
+        write_secret_atomic(&path, &[0x55u8; 32]).expect("write legacy identity");
+        assert!(path.exists(), "fixture must be on disk");
+
+        super::secure_wipe_identity_file(&path);
+        assert!(
+            !path.exists(),
+            "secure_wipe must remove the legacy identity.bin"
+        );
+    }
+
+    /// FS-053: keychain hex decoder must reject malformed payloads
+    /// (truncated entry, non-hex chars) so a tampered keychain item
+    /// cannot smuggle in a short key.
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    fn fs053_decode_identity_hex_validates_length() {
+        // Wrong byte length after decode.
+        match super::decode_identity_hex("deadbeef") {
+            Ok(_) => panic!("short hex must fail"),
+            Err(err) => assert!(err.to_string().contains("length 4"), "got: {err}"),
+        }
+
+        // Garbage hex.
+        let bad = "zzzz".repeat(16);
+        match super::decode_identity_hex(&bad) {
+            Ok(_) => panic!("non-hex must fail"),
+            Err(_) => {}
+        }
+
+        // Round-trip a real 64-char hex.
+        let raw = [0xa5u8; 32];
+        let id = super::decode_identity_hex(&hex::encode(raw)).expect("valid hex must decode");
+        assert_eq!(id.secret_bytes().as_ref(), &raw);
     }
 }
