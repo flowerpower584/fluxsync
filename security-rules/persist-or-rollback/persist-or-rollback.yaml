@@ -1,0 +1,60 @@
+rules:
+  - id: persist-or-rollback
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      VULN-001 regression: persist-failure of `save_peers*` is swallowed by
+      a tracing log without rolling back the in-memory trust mutation. On
+      next daemon restart the on-disk peers.json will silently re-apply or
+      undo the change, breaking the in-mem ↔ disk consistency invariant.
+      Use `save_peers_with_retry` / `save_peers_with_retry_stored`, snapshot
+      the mutated set before the change, restore it on Err, and surface
+      the error to the caller (e.g. `reply_err` or `anyhow::bail!`).
+    metadata:
+      category: security
+      cwe: "CWE-460: Improper Cleanup on Thrown Exception"
+      confidence: HIGH
+      references:
+        - "VULN-001 variants V1/V2/V3/V4/V6/V7/V8 (FluxSync 2026-05-23)"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if let Err($E) = save_peers(...).await {
+                  tracing::warn!(...);
+              }
+          - pattern: |
+              if let Err($E) = save_peers(...).await {
+                  tracing::error!(...);
+              }
+          - pattern: |
+              if let Err($E) = save_peers(...) {
+                  tracing::warn!(...);
+              }
+          - pattern: |
+              if let Err($E) = save_peers(...) {
+                  tracing::error!(...);
+              }
+          - pattern: |
+              if let Err($E) = save_current_peers(...).await {
+                  tracing::warn!(...);
+              }
+          - pattern: |
+              if let Err($E) = save_current_peers(...).await {
+                  tracing::error!(...);
+              }
+          - pattern: |
+              if let Err($E) = crate::keystore::save_peers(...) {
+                  tracing::warn!(...);
+              }
+          - pattern: |
+              if let Err($E) = crate::keystore::save_peers(...) {
+                  tracing::error!(...);
+              }
+          - pattern: |
+              if let Err($E) = crate::keystore::save_peers(...).await {
+                  tracing::warn!(...);
+              }
+          - pattern: |
+              if let Err($E) = crate::keystore::save_peers(...).await {
+                  tracing::error!(...);
+              }
