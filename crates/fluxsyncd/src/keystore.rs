@@ -113,7 +113,12 @@ pub fn load_or_create_identity(dir: &Path) -> Result<Identity> {
             .context("open OS keychain entry for fluxsyncd identity")?;
 
         match entry.get_password() {
-            Ok(hex) => {
+            Ok(raw) => {
+                // ZA-0001: `keyring::Entry::get_password` returns a plain
+                // `String` whose heap buffer is freed without zeroization.
+                // Wrap immediately so the hex-encoded secret is scrubbed
+                // on drop before the allocator reuses the slab.
+                let hex = zeroize::Zeroizing::new(raw);
                 let id = decode_identity_hex(&hex)?;
                 tracing::info!(
                     service = KEYCHAIN_SERVICE,
