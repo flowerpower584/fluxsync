@@ -206,6 +206,10 @@ pub async fn run_responder(
             // PERSIST to disk so we remember this peer after restart.
             // The disk name copies `new_peer.name` so the live session and
             // a post-restart load can never disagree (FS-030).
+            // VULN-001 variant V6: if persist fails, roll back the in-mem
+            // TOFU insert and refuse the handshake. Otherwise the peer is
+            // trusted for the live session but silently forgotten across
+            // restart, leaving the user with stale UI state.
             if let Some(ref dir) = keystore_dir {
                 let mut stored = crate::keystore::load_peers(dir).unwrap_or_default();
                 crate::keystore::upsert_peer(
@@ -217,8 +221,14 @@ pub async fn run_responder(
                         last_addr: Some(from.to_string()),
                     },
                 );
-                if let Err(e) = crate::keystore::save_peers(dir, &stored) {
-                    tracing::warn!(error = %e, "failed to persist trusted peer to peers.json");
+                if let Err(e) =
+                    crate::driver::save_peers_with_retry_stored(dir, &stored).await
+                {
+                    trusted_guard.remove(&peer_id);
+                    anyhow::bail!(
+                        "TOFU refused: failed to persist new trusted peer after retries: {e}; \
+                         in-memory trust rolled back, ask the peer to re-handshake once disk recovers"
+                    );
                 }
             }
 
@@ -280,11 +290,27 @@ pub async fn run_responder(
     Ok(())
 }
 
-/// FS-058: background sweep that drops expired entries from `PendingSet`.
-/// Runs every `PENDING_REAPER_INTERVAL`. Exits cleanly when the
-/// cancellation token is fired, so the daemon shutdown path stays clean.
+/// FS-058 + FS-052 strict gate (VULN-002 fix): background sweep that
+/// drops expired entries from `PendingSet` **and revokes the matching
+/// `TrustedSet` entry** so a pending pair the user never confirmed does
+/// not silently become permanent trust on the next daemon restart.
+///
+/// Behaviour on each expiry:
+/// 1. Remove from `pending`.
+/// 2. Remove from `trusted`.
+/// 3. If the live session belongs to that peer, tear it down so further
+///    frames are decryption-failed (and the FSM re-discovers).
+/// 4. Persist the updated `peers.json` via [`crate::driver::save_peers_with_retry`].
+///    If persistence ultimately fails the in-memory revoke still holds for
+///    this daemon lifetime; we log at `error` level so it is visible.
+///
+/// Exits cleanly when the cancellation token is fired, so the daemon
+/// shutdown path stays clean.
 pub async fn run_pending_reaper(
     pending: PendingSet,
+    trusted: TrustedSet,
+    transport: std::sync::Arc<crate::transport::Transport>,
+    keystore_dir: Option<std::path::PathBuf>,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     let mut tick = tokio::time::interval(PENDING_REAPER_INTERVAL);
@@ -295,13 +321,82 @@ pub async fn run_pending_reaper(
             () = shutdown.cancelled() => return,
             _ = tick.tick() => {
                 let now = Instant::now();
-                let mut g = pending.lock().await;
-                let before = g.len();
-                g.retain(|_, p| p.expires_at > now);
-                let after = g.len();
-                if before != after {
-                    tracing::debug!(reaped = before - after, "PendingSet reaper");
+                // Snapshot expired entries so we can re-pend them if the
+                // persistence step fails (VULN-001 variant V7).
+                let expired_pending: Vec<([u8; 32], PendingPair)> = {
+                    let mut g = pending.lock().await;
+                    let mut out = Vec::new();
+                    let now_copy = now;
+                    g.retain(|peer_id, p| {
+                        let alive = p.expires_at > now_copy;
+                        if !alive {
+                            out.push((*peer_id, p.clone()));
+                        }
+                        alive
+                    });
+                    out
+                };
+                if expired_pending.is_empty() {
+                    continue;
                 }
+                let expired: Vec<[u8; 32]> =
+                    expired_pending.iter().map(|(id, _)| *id).collect();
+                let removed_trust: Vec<([u8; 32], TrustedPeer)> = {
+                    let mut t = trusted.lock().await;
+                    let mut out = Vec::new();
+                    for id in &expired {
+                        if let Some(p) = t.remove(id) {
+                            out.push((*id, p));
+                            tracing::warn!(
+                                peer = ?&id[..6],
+                                "FS-052: pending expired without --accept; revoking from trusted set"
+                            );
+                        }
+                    }
+                    out
+                };
+                // Tear down the live session if it belongs to one of the
+                // revoked peers — otherwise the attacker's already-installed
+                // session would keep accepting Hello/Heartbeat frames.
+                let dropped_peer_id = {
+                    let cur = *transport.last_peer_id.lock().await;
+                    match cur {
+                        Some(cur) if expired.contains(&cur) => {
+                            transport.drop_session().await;
+                            Some(cur)
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(dir) = keystore_dir.as_ref() {
+                    if let Err(e) =
+                        crate::driver::save_peers_with_retry(dir, &trusted, &transport).await
+                    {
+                        // Roll back: re-insert into trusted + re-pend so the
+                        // next reaper tick retries. Without this, in-mem is
+                        // revoked while disk still trusts → restart re-trusts.
+                        {
+                            let mut t = trusted.lock().await;
+                            for (id, p) in &removed_trust {
+                                t.insert(*id, p.clone());
+                            }
+                        }
+                        {
+                            let mut g = pending.lock().await;
+                            for (id, p) in &expired_pending {
+                                g.entry(*id).or_insert_with(|| p.clone());
+                            }
+                        }
+                        tracing::error!(
+                            error = %e,
+                            count = expired.len(),
+                            dropped_session = ?dropped_peer_id.map(|p| hex_encode(&p)),
+                            "FS-052: failed to persist pending-expiry revoke; in-memory revoke rolled back. Session was already dropped (peer must re-handshake) but trust will be retried next reaper tick."
+                        );
+                        continue;
+                    }
+                }
+                tracing::debug!(reaped = expired.len(), "PendingSet reaper");
             }
         }
     }

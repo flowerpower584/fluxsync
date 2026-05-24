@@ -264,11 +264,17 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     }
 
     // FS-058: background reaper that drops expired PendingSet entries.
+    // FS-052 strict gate (VULN-002): on expiry, revoke the matching
+    // trusted entry + drop the live session + persist `peers.json` so a
+    // pending peer the user never confirmed cannot survive across reboot.
     {
         let pending = pending_pairs.clone();
+        let trusted_r = trusted.clone();
+        let transport_r = transport.clone();
+        let kd = keystore_dir.clone();
         let s = shutdown.clone();
         tasks.spawn(async move {
-            handshake::run_pending_reaper(pending, s).await;
+            handshake::run_pending_reaper(pending, trusted_r, transport_r, kd, s).await;
             Ok(())
         });
     }
@@ -509,7 +515,7 @@ async fn dispatch(
     app: &mut App,
     transport: &Arc<Transport>,
     trusted: &TrustedSet,
-    _keystore_dir: Option<&std::path::PathBuf>,
+    keystore_dir: Option<&std::path::PathBuf>,
     state_watch_tx: &watch::Sender<State>,
     logs_bcast_tx: &broadcast::Sender<LogEntry>,
     log_tail: &Arc<LogTail>,
@@ -804,8 +810,30 @@ async fn dispatch(
                 }
 
                 tracing::info!("DropPeer: clearing all trusted peers from memory");
+                // VULN-001 variant V8: snapshot+rollback to keep in-mem and
+                // peers.json consistent. Without this, a Ghost Timeout could
+                // wipe live trust while disk still trusts the peer; on next
+                // daemon start the peer would be re-trusted silently.
+                let snapshot = trusted.lock().await.clone();
                 trusted.lock().await.clear();
-                transport.drop_session().await;
+                let persisted = if let Some(dir) = keystore_dir {
+                    match save_peers_with_retry(dir, trusted, transport).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "DropPeer: failed to persist cleared peer set; rolling back in-memory clear so on-disk and in-memory trust stay consistent. Session NOT dropped; FSM will retry on next Ghost Timeout."
+                            );
+                            *trusted.lock().await = snapshot;
+                            false
+                        }
+                    }
+                } else {
+                    true
+                };
+                if persisted {
+                    transport.drop_session().await;
+                }
             }
             Action::SendHandshake { .. } => {
                 metrics.lock().await.on_handshake_start();
@@ -1062,10 +1090,22 @@ async fn handle_driver_cmd(
         CmdOp::DebugCapture {} | CmdOp::Shutdown {} => CmdResponse::ok(req_id, None),
         CmdOp::Unpair {} => {
             tracing::info!("Manual unpair requested via IPC");
+            // VULN-001 variant V1: snapshot+retry+rollback. Without this,
+            // a disk failure during unpair would clear live trust while
+            // peers.json still trusts every peer; a daemon restart would
+            // silently re-trust them.
+            let snapshot = trusted.lock().await.clone();
             trusted.lock().await.clear();
             if let Some(dir) = keystore_dir {
-                if let Err(e) = save_current_peers(dir, trusted, transport).await {
-                    tracing::warn!(error = %e, "failed to persist unpair to keystore");
+                if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
+                    *trusted.lock().await = snapshot;
+                    return reply_err(
+                        reply,
+                        req_id,
+                        &format!(
+                            "persist failed after {PEERS_PERSIST_ATTEMPTS} attempts: {e}; unpair rolled back, retry once disk recovers"
+                        ),
+                    );
                 }
             }
             let actions = app.handle(Event::ManualUnpair, &**wall);
@@ -1134,10 +1174,22 @@ async fn handle_driver_cmd(
                 Ok(a) => a,
                 Err(_) => return reply_err(reply, req_id, "expected 32-byte peer_id"),
             };
-            trusted.lock().await.remove(&arr);
+            // VULN-001 variant V2: revoke must succeed on disk before
+            // we tell the caller it's done; otherwise daemon restart would
+            // re-trust the peer we just promised to drop.
+            let removed_trusted = trusted.lock().await.remove(&arr);
             if let Some(dir) = keystore_dir {
-                if let Err(e) = save_current_peers(dir, trusted, transport).await {
-                    tracing::warn!(error = %e, "failed to persist revocation to keystore");
+                if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
+                    if let Some(p) = removed_trusted {
+                        trusted.lock().await.insert(arr, p);
+                    }
+                    return reply_err(
+                        reply,
+                        req_id,
+                        &format!(
+                            "persist failed after {PEERS_PERSIST_ATTEMPTS} attempts: {e}; revoke rolled back, retry once disk recovers"
+                        ),
+                    );
                 }
             }
             let actions = app.handle(Event::ManualUnpair, &**wall);
@@ -1206,15 +1258,31 @@ async fn handle_driver_cmd(
                 Ok(a) => a,
                 Err(_) => return reply_err(reply, req_id, "expected 32-byte peer_id"),
             };
-            let was_pending = pending_pairs.lock().await.remove(&arr).is_some();
-            if !was_pending {
+            let removed_pending = pending_pairs.lock().await.remove(&arr);
+            if removed_pending.is_none() {
                 return reply_err(reply, req_id, "no pending pair with that peer_id");
             }
             if !accept {
-                trusted.lock().await.remove(&arr);
+                let removed_trusted = trusted.lock().await.remove(&arr);
                 if let Some(dir) = keystore_dir {
-                    if let Err(e) = save_current_peers(dir, trusted, transport).await {
-                        tracing::warn!(error = %e, "failed to persist rejection to keystore");
+                    if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
+                        // VULN-001 fix: roll back the in-memory removal
+                        // so on-disk and in-memory state stay consistent.
+                        // Otherwise a restart would re-trust the peer we
+                        // just told the user we revoked.
+                        if let Some(p) = removed_trusted {
+                            trusted.lock().await.insert(arr, p);
+                        }
+                        if let Some(p) = removed_pending {
+                            pending_pairs.lock().await.insert(arr, p);
+                        }
+                        return reply_err(
+                            reply,
+                            req_id,
+                            &format!(
+                                "persist failed after {PEERS_PERSIST_ATTEMPTS} attempts: {e}; reject rolled back, retry once disk recovers"
+                            ),
+                        );
                     }
                 }
                 let actions = app.handle(Event::ManualUnpair, &**wall);
@@ -1309,6 +1377,10 @@ async fn handle_driver_cmd(
             );
 
             // Persist the new peer to disk immediately.
+            // VULN-001 variant V3: if disk write fails, in-mem trust would
+            // silently vanish on next restart. Roll back the insert and
+            // surface the failure so the user knows the pairing is not
+            // durable.
             if let Some(dir) = keystore_dir {
                 let mut stored = crate::keystore::load_peers(dir).unwrap_or_default();
                 // Dedup by peer_id_hex
@@ -1320,8 +1392,15 @@ async fn handle_driver_cmd(
                     name: name.clone(),
                     last_addr: None,
                 });
-                if let Err(e) = crate::keystore::save_peers(dir, &stored) {
-                    tracing::warn!(error = %e, "failed to persist peer to keystore");
+                if let Err(e) = save_peers_with_retry_stored(dir, &stored).await {
+                    trusted.lock().await.remove(&peer_id);
+                    return reply_err(
+                        reply,
+                        req_id,
+                        &format!(
+                            "persist failed after {PEERS_PERSIST_ATTEMPTS} attempts: {e}; pair rolled back, retry once disk recovers"
+                        ),
+                    );
                 }
             }
 
@@ -1387,6 +1466,9 @@ async fn handle_driver_cmd(
             );
 
             // Persist the new peer to disk immediately.
+            // VULN-001 variant V4: same shape as PairFromUri — rollback
+            // in-mem insert + reply_err on persist failure so the caller
+            // knows the trust is not durable.
             if let Some(dir) = keystore_dir {
                 let mut stored = crate::keystore::load_peers(dir).unwrap_or_default();
                 // Dedup by peer_id_hex
@@ -1398,8 +1480,15 @@ async fn handle_driver_cmd(
                     name: name.clone(),
                     last_addr: None,
                 });
-                if let Err(e) = crate::keystore::save_peers(dir, &stored) {
-                    tracing::warn!(error = %e, "failed to persist peer to keystore");
+                if let Err(e) = save_peers_with_retry_stored(dir, &stored).await {
+                    trusted.lock().await.remove(&peer_id);
+                    return reply_err(
+                        reply,
+                        req_id,
+                        &format!(
+                            "persist failed after {PEERS_PERSIST_ATTEMPTS} attempts: {e}; pair rolled back, retry once disk recovers"
+                        ),
+                    );
                 }
             }
 
@@ -1693,7 +1782,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, &event_tx, &transport, &reassembly, &metrics, &inflight).await,
+                            Ok(f) => dispatch_inbound_frame(f, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -2081,6 +2170,62 @@ async fn save_current_peers(
     crate::keystore::save_peers(dir, &stored)
 }
 
+/// FS-052 / VULN-001 fix: persist `trusted` to `peers.json` with up to
+/// `PEERS_PERSIST_ATTEMPTS` tries (exponential backoff 100/200/400 ms).
+/// Used by paths whose security invariant depends on the on-disk state
+/// matching the in-memory state — namely `PairConfirm --reject` and the
+/// FS-052 strict pending-expiry revoke. Silently swallowing the write
+/// would re-trust the attacker on next daemon restart.
+pub(crate) async fn save_peers_with_retry(
+    dir: &Path,
+    trusted: &TrustedSet,
+    transport: &Transport,
+) -> Result<()> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..PEERS_PERSIST_ATTEMPTS {
+        match save_current_peers(dir, trusted, transport).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "save_peers failed; retrying");
+                last_err = Some(e);
+                if attempt + 1 < PEERS_PERSIST_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(100u64 << attempt)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("save_peers exhausted retries")))
+}
+
+/// Max attempts for [`save_peers_with_retry`]. Three is enough to ride
+/// out a transient ENOSPC / EBUSY / fs-quota hiccup without making the
+/// IPC reply hang forever on a broken disk.
+const PEERS_PERSIST_ATTEMPTS: u32 = 3;
+
+/// Variant of [`save_peers_with_retry`] that persists an already-built
+/// `Vec<StoredPeer>` instead of snapshotting the live `TrustedSet`. Used
+/// by the pair-insert paths (PairFromUri / PairAccept) where the caller
+/// needs to write a dedup'd list it computed inline.
+pub(crate) async fn save_peers_with_retry_stored(
+    dir: &Path,
+    stored: &[crate::keystore::StoredPeer],
+) -> Result<()> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..PEERS_PERSIST_ATTEMPTS {
+        match crate::keystore::save_peers(dir, stored) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "save_peers_stored failed; retrying");
+                last_err = Some(e);
+                if attempt + 1 < PEERS_PERSIST_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(100u64 << attempt)).await;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("save_peers_stored exhausted retries")))
+}
+
 async fn dispatch_inbound_frame(
     frame: Frame,
     event_tx: &mpsc::UnboundedSender<Event>,
@@ -2088,7 +2233,29 @@ async fn dispatch_inbound_frame(
     reassembly: &Arc<Mutex<HashMap<[u8; 32], Reassembly>>>,
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
+    pending_pairs: &PendingSet,
 ) {
+    // FS-052 strict gate (VULN-002 fix): if the active session's peer
+    // landed via TOFU and has not been verbally confirmed yet, drop all
+    // data-bearing frames (`ClipboardItem`, `Chunk`) until the user runs
+    // `fluxctl pair confirm --accept`. Hello / Heartbeat / Ack / Nak /
+    // Bye keep flowing so the link stays diagnosable and the FSM still
+    // reacts to peer disconnects. Matches the design intent stated in
+    // `docs/THREAT-MODEL.md` §3 row B-S: *"a hard gate that blocks
+    // Msg::Item processing until the user runs --accept"*.
+    let blocks_until_confirmed = matches!(frame.msg, Msg::ClipboardItem(_) | Msg::Chunk(_));
+    if blocks_until_confirmed {
+        let cur_peer = *transport.last_peer_id.lock().await;
+        if let Some(id) = cur_peer {
+            if pending_pairs.lock().await.contains_key(&id) {
+                tracing::warn!(
+                    peer = ?&id[..6],
+                    "FS-052 gate: dropping clipboard frame — peer not yet verbally confirmed"
+                );
+                return;
+            }
+        }
+    }
     match frame.msg {
         Msg::ClipboardItem(item) => {
             if item.payload.is_empty() {
@@ -2815,12 +2982,14 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new()));
         let inflight = Arc::new(Mutex::new(HashMap::new()));
         let metrics = Arc::new(Mutex::new(MetricsTracker::new()));
+        let pending_pairs: crate::handshake::PendingSet =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let frame = Frame {
             version: PROTOCOL_VERSION,
             msg: Msg::Bye,
         };
-        dispatch_inbound_frame(frame, &event_tx, &transport, &reassembly, &metrics, &inflight).await;
+        dispatch_inbound_frame(frame, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs).await;
 
         assert!(
             matches!(event_rx.try_recv(), Ok(Event::PeerLost)),
