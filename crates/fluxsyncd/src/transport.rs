@@ -73,6 +73,13 @@ pub struct Transport {
     /// (the clipboard watcher) sleep instead of busy-ticking while
     /// unpaired (FS-048).
     pub session_notify: Arc<Notify>,
+    /// Serializes every `peers.json` read-modify-write window so that a
+    /// concurrent reaper revoke and pair-insert (or two pair-inserts)
+    /// cannot interleave and clobber each other. Held across the entire
+    /// `load → modify → save` sequence inside the keystore helpers.
+    /// (Fixes the F-001 race surfaced by the 2026-05-24 differential
+    /// review of VULN-001 fixes.)
+    pub(crate) peers_disk_lock: Arc<Mutex<()>>,
 }
 
 #[must_use]
@@ -123,6 +130,7 @@ impl Transport {
                 session_established_at_ms: Arc::new(AtomicU64::new(0)),
                 metrics: Arc::new(Mutex::new(crate::metrics::MetricsTracker::new())),
                 session_notify: Arc::new(Notify::new()),
+                peers_disk_lock: Arc::new(Mutex::new(())),
             },
             actual_port,
         ))
@@ -266,15 +274,29 @@ impl Transport {
                     let mut p = self.peer_addr.lock().await;
                     if Some(from) != *p {
                         let now = now_ms();
-                        let last_roam = self.last_roam_ms.load(Ordering::Relaxed);
-                        if roam_allowed(now, last_roam) {
+                        // F-CT1: CAS on `last_roam_ms` so two concurrent
+                        // recv() paths (post-multi-socket work) cannot both
+                        // pass the rate-limit check by reading the same
+                        // stale timestamp. Acquire/AcqRel pair the load
+                        // with the compare-exchange release.
+                        let last_roam = self.last_roam_ms.load(Ordering::Acquire);
+                        let allowed = roam_allowed(now, last_roam)
+                            && self
+                                .last_roam_ms
+                                .compare_exchange(
+                                    last_roam,
+                                    now,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                )
+                                .is_ok();
+                        if allowed {
                             tracing::warn!(
                                 old = ?*p, new = ?from,
                                 "roaming: updating peer address"
                             );
                             *p = Some(from);
                             *self.last_peer_addr.lock().await = Some(from);
-                            self.last_roam_ms.store(now, Ordering::Relaxed);
                             {
                                 let mut h = self.roaming_history.lock().await;
                                 if !h.contains(&from) {
@@ -286,7 +308,7 @@ impl Transport {
                         } else {
                             tracing::warn!(
                                 current = ?*p, rejected = ?from,
-                                "roaming: rejecting peer-address change (rate-limited)"
+                                "roaming: rejecting peer-address change (rate-limited or CAS lost)"
                             );
                         }
                     }

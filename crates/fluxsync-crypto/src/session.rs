@@ -80,25 +80,26 @@ impl Session {
     /// dropped or reordered datagram no longer poisons the session — only
     /// that one frame is lost.
     pub fn decrypt(&mut self, framed: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        // F-CT2: every public-boundary failure path returns the same
+        // opaque "decryption failed" message so a log/Sentry reader
+        // cannot use the error class to probe the replay-window bitmap
+        // (oracle: replay-error means nonce N already accepted, AEAD
+        // error means nonce N still fresh). Add a verbose-log opt-in
+        // later if on-host debugging needs the specific cause — keep
+        // the crate `tracing`-free for now.
+        const OPAQUE: &str = "decryption failed";
+
         let Some(nonce_bytes) = framed.first_chunk::<NONCE_PREFIX_LEN>() else {
-            return Err(CryptoError::Decrypt(
-                "frame shorter than nonce prefix".into(),
-            ));
+            return Err(CryptoError::Decrypt(OPAQUE.into()));
         };
         let nonce = u64::from_le_bytes(*nonce_bytes);
         let ciphertext = match framed.get(NONCE_PREFIX_LEN..) {
             Some(c) if c.len() >= 16 => c,
-            _ => {
-                return Err(CryptoError::Decrypt(
-                    "frame shorter than nonce prefix + Poly1305 tag".into(),
-                ))
-            }
+            _ => return Err(CryptoError::Decrypt(OPAQUE.into())),
         };
 
         if !self.replay.is_fresh(nonce) {
-            return Err(CryptoError::Decrypt(format!(
-                "replayed or stale frame nonce {nonce}"
-            )));
+            return Err(CryptoError::Decrypt(OPAQUE.into()));
         }
 
         self.transport.set_receiving_nonce(nonce);
@@ -106,7 +107,7 @@ impl Session {
         let n = self
             .transport
             .read_message(ciphertext, &mut buf)
-            .map_err(|e| CryptoError::Decrypt(e.to_string()))?;
+            .map_err(|_| CryptoError::Decrypt(OPAQUE.into()))?;
         buf.truncate(n);
 
         // Only burn a replay slot once the frame is proven authentic — a

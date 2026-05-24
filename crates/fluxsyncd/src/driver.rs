@@ -1380,19 +1380,23 @@ async fn handle_driver_cmd(
             // VULN-001 variant V3: if disk write fails, in-mem trust would
             // silently vanish on next restart. Roll back the insert and
             // surface the failure so the user knows the pairing is not
-            // durable.
+            // durable. F-001/F-002 hardening: upsert under the
+            // `peers_disk_lock` so a concurrent reaper revoke cannot race
+            // against the load, and propagate parse errors instead of
+            // silently overwriting a corrupt `peers.json`.
             if let Some(dir) = keystore_dir {
-                let mut stored = crate::keystore::load_peers(dir).unwrap_or_default();
-                // Dedup by peer_id_hex
-                let peer_id_hex = hex::encode(peer_id);
-                stored.retain(|p| p.peer_id_hex != peer_id_hex);
-                stored.push(crate::keystore::StoredPeer {
-                    peer_id_hex,
-                    static_pub_hex: hex::encode(static_pub),
-                    name: name.clone(),
-                    last_addr: None,
-                });
-                if let Err(e) = save_peers_with_retry_stored(dir, &stored).await {
+                if let Err(e) = upsert_peer_persist(
+                    dir,
+                    transport,
+                    crate::keystore::StoredPeer {
+                        peer_id_hex: hex::encode(peer_id),
+                        static_pub_hex: hex::encode(static_pub),
+                        name: name.clone(),
+                        last_addr: None,
+                    },
+                )
+                .await
+                {
                     trusted.lock().await.remove(&peer_id);
                     return reply_err(
                         reply,
@@ -1468,19 +1472,21 @@ async fn handle_driver_cmd(
             // Persist the new peer to disk immediately.
             // VULN-001 variant V4: same shape as PairFromUri — rollback
             // in-mem insert + reply_err on persist failure so the caller
-            // knows the trust is not durable.
+            // knows the trust is not durable. F-001/F-002 hardening: see
+            // PairFromUri above for the lock + parse-error rationale.
             if let Some(dir) = keystore_dir {
-                let mut stored = crate::keystore::load_peers(dir).unwrap_or_default();
-                // Dedup by peer_id_hex
-                let peer_id_hex = hex::encode(peer_id);
-                stored.retain(|p| p.peer_id_hex != peer_id_hex);
-                stored.push(crate::keystore::StoredPeer {
-                    peer_id_hex,
-                    static_pub_hex: hex::encode(static_pub),
-                    name: name.clone(),
-                    last_addr: None,
-                });
-                if let Err(e) = save_peers_with_retry_stored(dir, &stored).await {
+                if let Err(e) = upsert_peer_persist(
+                    dir,
+                    transport,
+                    crate::keystore::StoredPeer {
+                        peer_id_hex: hex::encode(peer_id),
+                        static_pub_hex: hex::encode(static_pub),
+                        name: name.clone(),
+                        last_addr: None,
+                    },
+                )
+                .await
+                {
                     trusted.lock().await.remove(&peer_id);
                     return reply_err(
                         reply,
@@ -2181,6 +2187,9 @@ pub(crate) async fn save_peers_with_retry(
     trusted: &TrustedSet,
     transport: &Transport,
 ) -> Result<()> {
+    // F-001 fix: serialize every peers.json write so a concurrent
+    // pair-insert cannot read a stale snapshot and clobber this revoke.
+    let _disk_guard = transport.peers_disk_lock.lock().await;
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..PEERS_PERSIST_ATTEMPTS {
         match save_current_peers(dir, trusted, transport).await {
@@ -2202,20 +2211,41 @@ pub(crate) async fn save_peers_with_retry(
 /// IPC reply hang forever on a broken disk.
 const PEERS_PERSIST_ATTEMPTS: u32 = 3;
 
-/// Variant of [`save_peers_with_retry`] that persists an already-built
-/// `Vec<StoredPeer>` instead of snapshotting the live `TrustedSet`. Used
-/// by the pair-insert paths (PairFromUri / PairAccept) where the caller
-/// needs to write a dedup'd list it computed inline.
-pub(crate) async fn save_peers_with_retry_stored(
+/// Atomic upsert of a single [`crate::keystore::StoredPeer`] into
+/// `peers.json`: takes the disk lock, reads the on-disk list, upserts
+/// `entry` by `peer_id_hex`, and persists with retry. Used by the
+/// pair-insert paths (PairFromUri / PairAccept / TOFU) where the new
+/// entry carries data (e.g. `last_addr`) that the in-memory
+/// `TrustedSet` does not retain.
+///
+/// Replaces the old `save_peers_with_retry_stored` + inline
+/// `load_peers().unwrap_or_default()` pattern. Two fixes folded in:
+///
+/// * **F-001** — the load/modify/save sequence runs entirely under
+///   `transport.peers_disk_lock`, so a concurrent reaper revoke cannot
+///   race against the load and have its write overwritten.
+/// * **F-002** — `load_peers` parse failure now propagates instead of
+///   being swallowed by `unwrap_or_default()` (which would silently
+///   nuke every other trusted peer from disk).
+pub(crate) async fn upsert_peer_persist(
     dir: &Path,
-    stored: &[crate::keystore::StoredPeer],
+    transport: &Transport,
+    entry: crate::keystore::StoredPeer,
 ) -> Result<()> {
+    let _disk_guard = transport.peers_disk_lock.lock().await;
+    let mut stored = crate::keystore::load_peers(dir).with_context(|| {
+        format!(
+            "read {}/peers.json before upsert; refusing to overwrite a corrupt file",
+            dir.display()
+        )
+    })?;
+    crate::keystore::upsert_peer(&mut stored, entry);
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..PEERS_PERSIST_ATTEMPTS {
-        match crate::keystore::save_peers(dir, stored) {
+        match crate::keystore::save_peers(dir, &stored) {
             Ok(()) => return Ok(()),
             Err(e) => {
-                tracing::warn!(attempt, error = %e, "save_peers_stored failed; retrying");
+                tracing::warn!(attempt, error = %e, "upsert_peer_persist save failed; retrying");
                 last_err = Some(e);
                 if attempt + 1 < PEERS_PERSIST_ATTEMPTS {
                     tokio::time::sleep(Duration::from_millis(100u64 << attempt)).await;
@@ -2223,7 +2253,7 @@ pub(crate) async fn save_peers_with_retry_stored(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow!("save_peers_stored exhausted retries")))
+    Err(last_err.unwrap_or_else(|| anyhow!("upsert_peer_persist exhausted retries")))
 }
 
 async fn dispatch_inbound_frame(

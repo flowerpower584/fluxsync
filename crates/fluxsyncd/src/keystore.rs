@@ -104,6 +104,10 @@ pub fn ensure_dir(dir: &Path) -> Result<()> {
 /// Returns an error (rather than silently overwriting) if the legacy
 /// file exists but is the wrong length — corrupted store, clobbering
 /// would invalidate every paired peer.
+// `return` statements below are required: each platform branch lives in
+// its own `#[cfg(...)]` block, and clippy::pedantic does not see through
+// conditional compilation when judging needless-return.
+#[allow(clippy::needless_return)]
 pub fn load_or_create_identity(dir: &Path) -> Result<Identity> {
     ensure_dir(dir)?;
 
@@ -483,9 +487,8 @@ mod tests {
 
         // Garbage hex.
         let bad = "zzzz".repeat(16);
-        match super::decode_identity_hex(&bad) {
-            Ok(_) => panic!("non-hex must fail"),
-            Err(_) => {}
+        if super::decode_identity_hex(&bad).is_ok() {
+            panic!("non-hex must fail");
         }
 
         // Round-trip a real 64-char hex.

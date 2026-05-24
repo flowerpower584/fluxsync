@@ -211,18 +211,22 @@ pub async fn run_responder(
             // trusted for the live session but silently forgotten across
             // restart, leaving the user with stale UI state.
             if let Some(ref dir) = keystore_dir {
-                let mut stored = crate::keystore::load_peers(dir).unwrap_or_default();
-                crate::keystore::upsert_peer(
-                    &mut stored,
+                // F-001/F-002 hardening: upsert under the peers.json disk
+                // lock so a concurrent reaper revoke cannot race the load,
+                // and propagate parse errors so a corrupt peers.json is
+                // refused (refusing the TOFU) instead of silently wiping
+                // every other trusted peer from disk.
+                if let Err(e) = crate::driver::upsert_peer_persist(
+                    dir,
+                    &transport,
                     crate::keystore::StoredPeer {
                         peer_id_hex: hex_encode(&peer_id),
                         static_pub_hex: hex_encode(&remote_static),
                         name: new_peer.name.clone(),
                         last_addr: Some(from.to_string()),
                     },
-                );
-                if let Err(e) =
-                    crate::driver::save_peers_with_retry_stored(dir, &stored).await
+                )
+                .await
                 {
                     trusted_guard.remove(&peer_id);
                     anyhow::bail!(
