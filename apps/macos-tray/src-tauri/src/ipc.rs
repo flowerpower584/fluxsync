@@ -103,7 +103,12 @@ fn is_daemon_alive() -> bool {
     }
     #[cfg(windows)]
     {
-        tokio::net::windows::named_pipe::ClientOptions::new()
+        // Named Pipes accept std::fs open. Don't use tokio here — this fn
+        // runs from sync context before the Tauri tokio runtime is up;
+        // tokio's ClientOptions panics with "no reactor running".
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
             .open(&p)
             .is_ok()
     }

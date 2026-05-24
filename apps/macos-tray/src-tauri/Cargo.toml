@@ -33,6 +33,10 @@ serde_json = "1"
 anyhow = "1"
 dirs = "5"
 
+# Decode .ico for Windows tray icon (Tauri's image-png feature doesn't cover .ico).
+[target.'cfg(target_os = "windows")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["ico", "png"] }
+
 # QR encoder used by the pair window. `default-features = false`
 # strips PNG/image rendering — we only need the SVG renderer for the
 # WebView.

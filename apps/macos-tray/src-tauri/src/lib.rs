@@ -364,13 +364,26 @@ pub fn run() {
                 ],
             )?;
 
-            // Embed the tray PNG at compile time. `build.rs` generates
-            // it before the macro expands, so this always resolves to a
-            // real 32×32 black-on-transparent template image rather than
-            // depending on whatever Tauri picks for `default_window_icon`.
-            const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
-            let tray_icon = tauri::image::Image::from_bytes(TRAY_ICON_PNG)
-                .expect("decode embedded tray icon");
+            // macOS uses the 32×32 template PNG (matches menu-bar tint).
+            // Windows needs an .ico — PNG → HICON conversion in Tauri v2
+            // fails silently and the NotifyIcon never registers, so the
+            // tray icon is invisible. Linux/other = coloured PNG.
+            #[cfg(target_os = "macos")]
+            let tray_icon = tauri::image::Image::from_bytes(
+                include_bytes!("../icons/icon.png"),
+            ).expect("decode tray icon");
+            #[cfg(target_os = "windows")]
+            let tray_icon = {
+                let ico_bytes = include_bytes!("../icons/icon.ico");
+                let img = ::image::load_from_memory(ico_bytes)
+                    .expect("decode tray .ico").to_rgba8();
+                let (w, h) = img.dimensions();
+                tauri::image::Image::new_owned(img.into_raw(), w, h)
+            };
+            #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+            let tray_icon = tauri::image::Image::from_bytes(
+                include_bytes!("../icons/128x128.png"),
+            ).expect("decode tray icon");
 
             // `mut` is only consumed by the macOS-only block below.
             #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]

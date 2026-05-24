@@ -46,6 +46,14 @@
       "binaries/fluxsyncd"
     ],
     "targets": ["dmg", "app", "nsis", "deb", "appimage"],
+    "windows": {
+      "webviewInstallMode": { "type": "offlineInstaller" },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "startMenuFolder": "FluxSync"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
