@@ -1,34 +1,354 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=420, initial-scale=1" />
-  <title>FluxSync — Pair</title>
-  <link rel="stylesheet" href="shared.css" />
-  <link rel="stylesheet" href="styles.css" />
+<meta charset="utf-8" />
+<meta name="viewport" content="width=420,initial-scale=1" />
+<title>FluxSync — Pair</title>
+<style>
+  :root{
+    --bg:#0B0B0C; --surface:#131316; --line:#1F1F22; --line-2:#2A2A2C;
+    --fg:#FAFAFA; --muted:#A1A1AA; --muted-2:#71717A; --muted-3:#5A5A5E;
+    --primary:#3FAE5A; --primary-d:#34944A;
+    --danger:#D43F3F; --warn:#D9A441;
+    --ui:-apple-system,BlinkMacSystemFont,"Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Monaco,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%;overflow:hidden}
+  body{
+    background:var(--surface);color:var(--fg);
+    font-family:var(--ui);font-size:15px;line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--primary);color:#fff}
+  code{font-family:var(--mono);font-size:.9em}
+
+  .app{height:100vh;display:flex;flex-direction:column;background:var(--surface)}
+
+  .tb{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:0 16px;height:40px;
+    border-bottom:1px solid var(--line);
+    background:#0F0F11;flex-shrink:0;
+    -webkit-app-region:drag;user-select:none;
+  }
+  .tb .title{
+    font-size:13.5px;font-weight:600;letter-spacing:-0.01em;
+    color:var(--fg);display:flex;align-items:center;gap:8px;
+    padding-left:60px;
+  }
+  .tb .title .back{
+    color:var(--muted-2);font-size:14px;cursor:pointer;
+    -webkit-app-region:no-drag;
+    padding:2px 6px;display:none;
+  }
+  .tb.has-back .title .back{display:inline}
+  .tb .title .back:hover{color:var(--fg)}
+
+  .body{
+    flex:1;padding:24px 24px 20px;
+    display:flex;flex-direction:column;gap:14px;
+    overflow-y:auto;
+  }
+  .body h2.h{margin:0;font-size:22px;font-weight:700;letter-spacing:-0.02em;line-height:1.15}
+  .body .lede{margin:0;font-size:14px;color:var(--muted);line-height:1.5}
+  .divider{height:1px;background:var(--line);margin:2px 0}
+  .spacer{flex:1;min-height:4px}
+
+  .screen{display:none;flex-direction:column;gap:16px;flex:1;min-height:0}
+  .screen.active{display:flex}
+
+  /* tile */
+  .tile{
+    border:1px solid var(--line-2);
+    padding:18px 18px;cursor:pointer;background:transparent;
+    transition:border-color .15s,background .15s;
+    display:flex;flex-direction:column;gap:6px;
+    font:inherit;color:inherit;text-align:left;width:100%;
+  }
+  .tile:hover{border-color:var(--muted-2);background:rgba(255,255,255,0.02)}
+  .tile.primary{background:var(--primary);border-color:var(--primary)}
+  .tile.primary:hover{background:var(--primary-d);border-color:var(--primary-d)}
+  .tile.disabled{opacity:0.45;cursor:not-allowed}
+  .tile.disabled:hover{border-color:var(--line-2);background:transparent}
+  .tile .pill{
+    font-family:var(--mono);font-size:10px;color:var(--muted-2);
+    letter-spacing:0.08em;text-transform:uppercase;font-weight:500;
+  }
+  .tile.primary .pill{color:rgba(255,255,255,0.85)}
+  .tile .name{font-size:17px;font-weight:700;letter-spacing:-0.015em;color:var(--fg);line-height:1.2}
+  .tile.primary .name{color:#fff}
+  .tile .desc{font-size:13px;color:var(--muted);line-height:1.45}
+  .tile.primary .desc{color:rgba(255,255,255,0.85)}
+
+  /* btn */
+  .btn{
+    border:1px solid var(--line-2);background:transparent;color:var(--fg);
+    font-family:var(--ui);font-size:14px;font-weight:600;
+    padding:12px 16px;cursor:pointer;
+    transition:border-color .15s,background .15s,color .15s;
+    display:inline-flex;align-items:center;justify-content:center;gap:8px;
+    width:100%;letter-spacing:-0.01em;
+  }
+  .btn:disabled{opacity:0.5;cursor:not-allowed}
+  .btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+  .btn.primary:hover:not(:disabled){background:var(--primary-d);border-color:var(--primary-d)}
+  .btn.danger{color:var(--danger);border-color:rgba(212,63,63,0.4)}
+  .btn.danger:hover{background:rgba(212,63,63,0.08);border-color:var(--danger)}
+  .btn.ghost{color:var(--muted)}
+  .btn.ghost:hover{color:var(--fg);border-color:var(--muted-2)}
+  .btn.ghost.armed{color:var(--danger);border-color:rgba(212,63,63,0.4)}
+
+  /* QR */
+  .qr-large{
+    padding:10px;background:#FAFAFA;border:1px solid var(--line-2);
+    width:max-content;align-self:center;
+  }
+  .qr-large{padding:8px}
+  .qr-large svg{display:block;width:200px;height:200px}
+  .qr-large.loading{
+    width:200px;height:200px;background:#0F0F11;
+    color:var(--muted-2);font-family:var(--mono);font-size:11px;
+    display:flex;align-items:center;justify-content:center;
+    padding:0;border-color:var(--line-2);
+  }
+
+  /* fingerprint words */
+  .fp-box{
+    border:1px solid var(--line-2);background:#0F0F11;
+    padding:12px 10px;
+    display:grid;grid-template-columns:repeat(3,1fr);gap:10px 4px;
+  }
+  .fp-box .w{
+    font-family:var(--mono);font-size:15px;color:var(--fg);
+    font-weight:600;letter-spacing:-0.005em;text-align:center;
+  }
+
+  /* wait */
+  .wait{
+    display:flex;align-items:center;gap:10px;
+    font-family:var(--mono);font-size:11.5px;color:var(--muted);
+  }
+  .wait .pulse{
+    width:8px;height:8px;border-radius:50%;background:var(--primary);
+    animation:pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse{
+    0%,100%{box-shadow:0 0 0 0 rgba(63,174,90,0.4)}
+    50%{box-shadow:0 0 0 6px rgba(63,174,90,0)}
+  }
+
+  /* addr hint */
+  .addr-hint{
+    font-family:var(--mono);font-size:10.5px;color:var(--muted-2);
+    letter-spacing:0.06em;text-align:center;text-transform:uppercase;
+  }
+
+  /* success */
+  .success-mark{
+    align-self:center;
+    width:56px;height:56px;border-radius:50%;
+    background:rgba(63,174,90,0.12);border:1.5px solid var(--primary);
+    color:var(--primary);
+    display:flex;align-items:center;justify-content:center;
+    font-size:26px;line-height:1;margin:8px 0;
+  }
+  .peer-info{
+    text-align:center;display:flex;flex-direction:column;gap:6px;padding:4px 0;
+  }
+  .peer-info .name{font-size:19px;font-weight:700;letter-spacing:-0.015em}
+  .peer-info .ip{font-family:var(--mono);font-size:11.5px;color:var(--muted-2)}
+
+  /* error */
+  .err{
+    background:rgba(212,63,63,0.08);border:1px solid rgba(212,63,63,0.4);
+    color:#FF7777;padding:10px 12px;font-size:12px;line-height:1.4;
+    font-family:var(--mono);
+  }
+
+  /* PR2: PIN block under QR + standalone in show screen */
+  .pin-block{
+    border:1px solid var(--line-2);background:#0F0F11;
+    padding:14px 12px;display:flex;flex-direction:column;gap:6px;align-items:center;
+  }
+  .pin-block .label{
+    font-family:var(--mono);font-size:10.5px;color:var(--muted-2);
+    letter-spacing:0.06em;text-transform:uppercase;
+  }
+  .pin-block .code{
+    font-family:var(--mono);font-size:30px;font-weight:700;letter-spacing:0.25em;
+    color:var(--fg);line-height:1.1;
+  }
+  .pin-block .countdown{
+    font-family:var(--mono);font-size:10.5px;color:var(--muted-2);
+  }
+
+  /* PR2: PIN entry — 6 boxes */
+  .pin-input{
+    display:flex;gap:8px;justify-content:center;
+  }
+  .pin-input input{
+    width:42px;height:54px;background:#0F0F11;color:var(--fg);
+    border:1px solid var(--line-2);font-family:var(--mono);
+    font-size:24px;font-weight:700;text-align:center;letter-spacing:0;
+    outline:none;transition:border-color .15s,background .15s;
+  }
+  .pin-input input:focus{border-color:var(--primary);background:#141416}
+  .pin-input.shake{animation:shake .35s ease-in-out}
+  @keyframes shake{
+    0%,100%{transform:translateX(0)}
+    25%{transform:translateX(-6px)}
+    75%{transform:translateX(6px)}
+  }
+  .pin-hint{
+    font-size:12px;color:var(--muted-2);text-align:center;font-family:var(--mono);
+  }
+  .pin-hint.danger{color:#FF7777}
+
+  /* PR2: verify-words gate */
+  .verify-note{
+    font-size:13px;color:var(--muted);text-align:center;line-height:1.5;
+  }
+  .verify-actions{
+    display:flex;gap:10px;
+  }
+  .verify-actions .btn{flex:1}
+</style>
 </head>
 <body>
-  <div class="pair">
-    <div class="appbar">
-      <div class="brand">
-        <div class="glyph"></div>
-        <div>
-          <div class="name">Pair a device</div>
-          <div class="ver">SHOW THIS QR ON THE OTHER PHONE / MAC</div>
+<div class="app">
+
+  <div class="tb" id="tb">
+    <span class="title"><span class="back" id="back-btn">←</span> <span id="tb-title">Pair a device</span></span>
+  </div>
+
+  <div class="body">
+
+    <div class="screen active" data-screen="entry">
+      <h2 class="h">Pair a device</h2>
+      <p class="lede">Two devices to connect. Choose which one starts.</p>
+
+      <button class="tile primary" id="show-this-btn">
+        <div class="pill">Step 1 of 2</div>
+        <div class="name">Show this device</div>
+        <div class="desc">Display a QR code for the other device to scan.</div>
+      </button>
+
+      <button class="tile" id="enter-code-btn">
+        <div class="pill">Step 1 of 2</div>
+        <div class="name">Enter peer code</div>
+        <div class="desc">Type the 6-digit code shown by another device.</div>
+      </button>
+
+      <div class="spacer"></div>
+      <p class="lede" style="font-size:12.5px;color:var(--muted-2);text-align:center">
+        Both devices must be on the same network.
+      </p>
+    </div>
+
+    <div class="screen" data-screen="show">
+      <h2 class="h">Pair this device</h2>
+      <p class="lede">Scan with the FluxSync app on your other device.</p>
+
+      <div class="qr-large loading" id="qr-card">Generating…</div>
+
+      <div class="divider"></div>
+
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <p class="lede" style="font-size:11px;color:var(--muted-2);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.06em;text-align:center;margin:0">
+          Verification words
+        </p>
+        <div class="fp-box" id="fp-box">
+          <div class="w" style="color:var(--muted-3)">—</div>
+          <div class="w" style="color:var(--muted-3)">—</div>
+          <div class="w" style="color:var(--muted-3)">—</div>
+          <div class="w" style="color:var(--muted-3)">—</div>
+          <div class="w" style="color:var(--muted-3)">—</div>
+          <div class="w" style="color:var(--muted-3)">—</div>
         </div>
       </div>
+
+      <div class="pin-block" id="pin-block" style="display:none">
+        <div class="label">Or enter this code on the other device</div>
+        <div class="code" id="pin-code">— — — — — —</div>
+        <div class="countdown" id="pin-countdown">Expires in 90 s</div>
+      </div>
+
+      <div class="spacer"></div>
+      <div class="wait"><span class="pulse"></span><span>Waiting for peer…</span></div>
+      <div id="pair-error" class="err" style="display:none"></div>
+      <button class="btn ghost" id="unpair-btn">Unpair all devices</button>
     </div>
-    <div id="pair-error" class="err" style="display:none"></div>
-    <div class="qr-card" id="qr-card">
-      <span style="color:#71717A;font-family:'JetBrains Mono',monospace;font-size:11px">Generating…</span>
+
+    <div class="screen" data-screen="pin-entry">
+      <h2 class="h">Enter peer code</h2>
+      <p class="lede">Type the 6-digit code shown on the other device.</p>
+
+      <div class="pin-input" id="pin-input">
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
+      </div>
+
+      <p class="pin-hint" id="pin-hint">Both devices must be on the same network.</p>
+      <div id="pin-error" class="err" style="display:none"></div>
+
+      <div class="spacer"></div>
+      <button class="btn primary" id="pin-submit-btn" disabled>Connect</button>
     </div>
-    <div class="fp-words" id="fp-words"></div>
-    <div class="addr" id="addr-hint"></div>
-    <button class="unpair-btn" id="unpair-btn"
-            title="Remove every trusted peer and reset pairing">
-      Unpair all devices
-    </button>
+
+    <div class="screen" data-screen="pin-progress">
+      <div class="spacer"></div>
+      <div class="wait" style="justify-content:center"><span class="pulse"></span><span>Connecting…</span></div>
+      <p class="lede" style="text-align:center;font-size:13px">Negotiating secure channel.</p>
+      <div class="spacer"></div>
+    </div>
+
+    <div class="screen" data-screen="verify">
+      <h2 class="h">Verify connection</h2>
+      <p class="verify-note">
+        Both devices should show the same words. Confirm with the other person.
+      </p>
+
+      <div class="fp-box" id="verify-fp">
+        <div class="w" style="color:var(--muted-3)">—</div>
+        <div class="w" style="color:var(--muted-3)">—</div>
+        <div class="w" style="color:var(--muted-3)">—</div>
+        <div class="w" style="color:var(--muted-3)">—</div>
+        <div class="w" style="color:var(--muted-3)">—</div>
+        <div class="w" style="color:var(--muted-3)">—</div>
+      </div>
+
+      <div id="verify-error" class="err" style="display:none"></div>
+      <div class="spacer"></div>
+      <div class="verify-actions">
+        <button class="btn danger" id="verify-reject-btn">Don't match</button>
+        <button class="btn primary" id="verify-accept-btn">Words match</button>
+      </div>
+    </div>
+
+    <div class="screen" data-screen="paired">
+      <div class="spacer" style="flex:0.4"></div>
+      <div class="success-mark">✓</div>
+      <p class="lede" style="font-size:14px;text-align:center;margin:0">Successfully paired with</p>
+      <div class="peer-info">
+        <div class="name" id="paired-name">peer</div>
+        <div class="ip" id="paired-id">peer 0x…</div>
+      </div>
+      <div class="divider"></div>
+      <p class="lede" style="font-size:13px;text-align:center;line-height:1.5">
+        Anything you copy on either device will now appear on the other.
+      </p>
+      <div class="spacer"></div>
+      <button class="btn primary" id="done-btn">Done</button>
+    </div>
+
   </div>
-  <script type="module" src="pair.js"></script>
+</div>
+
+<script type="module" src="pair.js"></script>
 </body>
 </html>

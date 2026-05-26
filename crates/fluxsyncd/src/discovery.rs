@@ -34,10 +34,69 @@ pub enum DiscoveryEvent {
         static_pub_hex: String,
         name: String,
         addr: std::net::SocketAddr,
+        /// PR2: 6-digit pairing PIN advertised by the peer's
+        /// `PairShow`. `None` when the peer has no open pair window —
+        /// PIN-method pairing requires a `Some(_)`.
+        pair_pin: Option<String>,
     },
     Removed {
         fullname: String,
     },
+}
+
+/// Build the `ServiceInfo` we publish on mDNS. Centralised so the
+/// initial register and any PIN-driven re-publish (PR2) build the
+/// exact same record minus the rotating `pair_pin` TXT.
+fn build_service_info(
+    instance_name: &str,
+    peer_id_hex: &str,
+    static_pub_hex: &str,
+    bind_ip: IpAddr,
+    udp_port: u16,
+    pair_pin: Option<&str>,
+) -> Result<ServiceInfo> {
+    let mut props: HashMap<String, String> = HashMap::new();
+    props.insert("peer_id".into(), peer_id_hex.into());
+    props.insert("static_pub".into(), static_pub_hex.into());
+    if let Some(pin) = pair_pin {
+        props.insert("pair_pin".into(), pin.into());
+    }
+    let host_name = format!("{instance_name}.local.");
+    ServiceInfo::new(
+        SERVICE_TYPE,
+        instance_name,
+        &host_name,
+        bind_ip,
+        udp_port,
+        Some(props),
+    )
+    .context("build ServiceInfo")
+}
+
+/// PR2: re-publish the service record so the rotating `pair_pin` TXT
+/// reaches the LAN. Call with `pair_pin = None` to clear the PIN when
+/// the pair window closes. mdns-sd treats `register` as idempotent —
+/// re-registering with the same instance name updates the TXT in place
+/// and triggers a fresh announcement.
+pub fn republish_with_pin(
+    daemon: &ServiceDaemon,
+    instance_name: &str,
+    peer_id_hex: &str,
+    static_pub_hex: &str,
+    bind_ip: IpAddr,
+    udp_port: u16,
+    pair_pin: Option<&str>,
+) -> Result<()> {
+    let info = build_service_info(
+        instance_name,
+        peer_id_hex,
+        static_pub_hex,
+        bind_ip,
+        udp_port,
+        pair_pin,
+    )?;
+    daemon.register(info).context("mdns re-register")?;
+    Ok(())
 }
 
 /// Register self under mDNS and start a browse loop, forwarding events
@@ -54,20 +113,14 @@ pub fn start(
 ) -> Result<ServiceDaemon> {
     let daemon = ServiceDaemon::new().context("create mdns daemon")?;
 
-    let mut props: HashMap<String, String> = HashMap::new();
-    props.insert("peer_id".into(), peer_id_hex.into());
-    props.insert("static_pub".into(), static_pub_hex.into());
-    let host_name = format!("{instance_name}.local.");
-    let info = ServiceInfo::new(
-        SERVICE_TYPE,
+    let info = build_service_info(
         instance_name,
-        &host_name,
+        peer_id_hex,
+        static_pub_hex,
         bind_ip,
         udp_port,
-        Some(props),
-    )
-    .context("build ServiceInfo")?;
-
+        None,
+    )?;
     daemon.register(info).context("mdns register")?;
 
     let self_peer_id = peer_id_hex.to_string();
@@ -162,11 +215,20 @@ async fn browse_loop(
                             .next()
                             .unwrap_or("")
                             .to_string();
+                        // PR2: PIN may be absent (peer has no open pair
+                        // window) or stale (peer just rotated). Validate
+                        // length+digits cheaply so a malformed TXT can't
+                        // poison the cache.
+                        let pair_pin = props
+                            .get_property_val_str("pair_pin")
+                            .filter(|s| s.len() == 6 && s.bytes().all(|b| b.is_ascii_digit()))
+                            .map(str::to_string);
                         let _ = tx.send(DiscoveryEvent::Resolved {
                             peer_id_hex: peer_id.to_string(),
                             static_pub_hex: static_pub.to_string(),
                             name,
                             addr: sock_addr,
+                            pair_pin,
                         });
                     }
                     ServiceEvent::ServiceRemoved(_, fullname) => {

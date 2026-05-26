@@ -23,6 +23,7 @@ use crate::cmd::{Channel, CmdData, CmdOp, CmdRequest, CmdResponse, PeerEntry, Su
 use crate::config::{DaemonConfig, TestPair};
 use crate::discovery::{self, DiscoveryEvent};
 use crate::handshake::{self, PairingWindow, PendingSet, TrustedPeer, TrustedSet};
+use fluxsync_crypto::gen_pair_pin;
 use crate::ipc::{IpcConn, IpcServer};
 use crate::logs::LogTail;
 use crate::metrics::{DisconnectReason, MetricsTracker};
@@ -52,6 +53,53 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 const BASE32_ALPHA: Alphabet = Alphabet::Rfc4648 { padding: false };
+
+// ─────────────────────────────────────────────────────────────────
+// PR2 — PIN-method pairing state
+// ─────────────────────────────────────────────────────────────────
+
+/// PR2: the PIN currently advertised on mDNS. `Some` while the TOFU
+/// pair window is open, `None` after expiry / pair success.
+#[derive(Debug, Clone)]
+pub struct PinAd {
+    pub pin: String,
+    pub expires_at: Instant,
+}
+
+pub type PinAdvertisement = Arc<Mutex<Option<PinAd>>>;
+
+/// PR2: discovery cache. Every peer the daemon has seen on mDNS in
+/// the last [`DISCOVERY_CACHE_TTL`], regardless of trust state.
+/// `PairFromPin` reads this to resolve an as-yet-untrusted peer.
+#[derive(Debug, Clone)]
+pub struct ResolvedPeer {
+    pub static_pub: [u8; 32],
+    pub addr: SocketAddr,
+    pub name: String,
+    pub pair_pin: Option<String>,
+    pub last_seen: Instant,
+}
+
+pub type DiscoveryCache = Arc<Mutex<HashMap<[u8; 32], ResolvedPeer>>>;
+
+/// PR2: cache TTL. mdns-sd re-resolves periodically so an honest peer
+/// is refreshed well before this; the TTL only fires for peers that
+/// physically left the LAN.
+pub const DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(120);
+
+/// PR2: mDNS daemon + identity fields needed to re-publish the
+/// service record when the PIN rotates.
+#[derive(Clone)]
+pub struct MdnsContext {
+    pub daemon: mdns_sd::ServiceDaemon,
+    pub instance_name: String,
+    pub peer_id_hex: String,
+    pub static_pub_hex: String,
+    pub bind_ip: std::net::IpAddr,
+    pub udp_port: u16,
+}
+
+pub type MdnsCtx = Arc<Mutex<Option<MdnsContext>>>;
 
 /// Drive a daemon to completion, returning once `shutdown` fires and
 /// every background task has joined.
@@ -136,6 +184,14 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // from the Noise handshake hash so `fluxctl pair pending` /
     // `fluxctl pair confirm` can surface and resolve them.
     let pending_pairs: PendingSet = Arc::new(Mutex::new(HashMap::new()));
+
+    // PR2: PIN-method pairing state. `pin_advert` holds the current
+    // PIN + expiry; `disc_cache` lets `PairFromPin` resolve an
+    // untrusted peer by its TXT `pair_pin`; `mdns_ctx` is populated
+    // once mDNS is up so the PIN-rotation watchdog can re-publish.
+    let pin_advert: PinAdvertisement = Arc::new(Mutex::new(None));
+    let disc_cache: DiscoveryCache = Arc::new(Mutex::new(HashMap::new()));
+    let mdns_ctx: MdnsCtx = Arc::new(Mutex::new(None));
 
     if let Some(tpp) = test_pending_pair {
         pending_pairs.lock().await.insert(
@@ -327,16 +383,28 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
             shutdown.clone(),
         ) {
             Ok(daemon) => {
-                _mdns_daemon = Some(daemon);
+                _mdns_daemon = Some(daemon.clone());
+                // PR2: record mDNS context so PIN rotations can re-publish
+                // without re-binding the daemon.
+                *mdns_ctx.lock().await = Some(MdnsContext {
+                    daemon: daemon.clone(),
+                    instance_name: peer_name_self.clone(),
+                    peer_id_hex: peer_id_hex.clone(),
+                    static_pub_hex: static_pub_hex.clone(),
+                    bind_ip,
+                    udp_port,
+                });
                 let identity = identity.clone();
                 let trusted = trusted.clone();
                 let transport = transport.clone();
                 let pending = pending_initiator_tx.clone();
                 let event_tx = event_tx.clone();
                 let shutdown = shutdown.clone();
+                let disc_cache = disc_cache.clone();
                 tasks.spawn(async move {
                     discovery_dispatcher(
-                        disc_rx, identity, trusted, transport, pending, event_tx, shutdown,
+                        disc_rx, identity, trusted, transport, pending, event_tx,
+                        disc_cache, shutdown,
                     )
                     .await
                 });
@@ -491,6 +559,9 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &metrics,
                             &inflight,
                             &pending_pairs,
+                            &pin_advert,
+                            &disc_cache,
+                            &mdns_ctx,
                         ).await;
                     }
                 }
@@ -918,6 +989,9 @@ async fn handle_driver_cmd(
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
     pending_pairs: &PendingSet,
+    pin_advert: &PinAdvertisement,
+    disc_cache: &DiscoveryCache,
+    mdns_ctx: &MdnsCtx,
 ) {
     let DriverCmd::Run { op, reply, req_id } = cmd else {
         return;
@@ -1331,6 +1405,38 @@ async fn handle_driver_cmd(
             // a stale QR or a drive-by LAN handshake can't be exploited.
             *pairing_window.lock().await = Some(Instant::now() + handshake::PAIRING_WINDOW);
             tracing::info!("pairing window opened (90s)");
+            // PR2: generate a fresh PIN, advertise it on mDNS, and
+            // spawn a rotation watchdog if one is not already running.
+            // The watchdog regenerates the PIN every PAIRING_WINDOW
+            // while the trusted set is still empty, then clears the
+            // TXT when the user pairs or the window times out.
+            let pin = gen_pair_pin();
+            let expires_at = Instant::now() + handshake::PAIRING_WINDOW;
+            let was_active = pin_advert.lock().await.replace(PinAd {
+                pin: pin.clone(),
+                expires_at,
+            }).is_some();
+            if let Some(ctx) = mdns_ctx.lock().await.as_ref() {
+                if let Err(e) = discovery::republish_with_pin(
+                    &ctx.daemon,
+                    &ctx.instance_name,
+                    &ctx.peer_id_hex,
+                    &ctx.static_pub_hex,
+                    ctx.bind_ip,
+                    ctx.udp_port,
+                    Some(&pin),
+                ) {
+                    tracing::warn!(error = %e, "mDNS republish_with_pin failed");
+                }
+            }
+            if !was_active {
+                spawn_pin_watchdog(
+                    pin_advert.clone(),
+                    mdns_ctx.clone(),
+                    trusted.clone(),
+                    pairing_window.clone(),
+                );
+            }
             // Showing the QR is implicit "I want to sync" — bump the
             // FSM out of Idle so when the responder fires HandshakeOk
             // the (Handshaking → Linked) transition can fire. Without
@@ -1350,6 +1456,12 @@ async fn handle_driver_cmd(
                 inflight,
             )
             .await;
+            // PR2: surface the PIN + epoch-ms expiry to the UI so the
+            // pair window can render the 6-digit code + countdown.
+            let pin_expires_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_millis() as u64 + handshake::PAIRING_WINDOW.as_millis() as u64);
             CmdResponse::ok(
                 req_id,
                 Some(CmdData::PairInfo {
@@ -1358,6 +1470,8 @@ async fn handle_driver_cmd(
                     fingerprint_words: words_vec,
                     addr_hint,
                     uri,
+                    pin: Some(pin),
+                    pin_expires_at_ms,
                 }),
             )
         }
@@ -1540,6 +1654,91 @@ async fn handle_driver_cmd(
                     Err(_) => return reply_err(reply, req_id, "bad addr"),
                 }
             }
+            CmdResponse::ok(req_id, None)
+        }
+        // PR2: PIN-method pair. Look up the discovery cache for a
+        // peer whose mDNS `pair_pin` TXT matches, then take the same
+        // path as `PairFromUri`: trust + persist + start_initiator.
+        // The UI is expected to follow up with `PairPending` +
+        // `PairConfirm` for verify-words gating — without that the
+        // pair lands in `pending_pairs` and the reaper revokes it
+        // after `PAIRING_WINDOW`.
+        CmdOp::PairFromPin { pin, name } => {
+            if pin.len() != 6 || !pin.bytes().all(|b| b.is_ascii_digit()) {
+                return reply_err(reply, req_id, "bad pin format (6 digits)");
+            }
+            let target = {
+                let cache = disc_cache.lock().await;
+                let now = Instant::now();
+                cache
+                    .values()
+                    .filter(|e| now.duration_since(e.last_seen) < DISCOVERY_CACHE_TTL)
+                    .find(|e| e.pair_pin.as_deref() == Some(pin.as_str()))
+                    .cloned()
+            };
+            let Some(target) = target else {
+                return reply_err(reply, req_id, "no_peer_with_pin");
+            };
+            let static_pub = target.static_pub;
+            let peer_id = handshake::peer_id_for(&static_pub);
+            trusted.lock().await.insert(
+                peer_id,
+                TrustedPeer {
+                    static_pub,
+                    name: name.clone(),
+                },
+            );
+            // Mirror PairFromUri's persist-or-rollback (VULN-001 V3 /
+            // F-001 hardening). PIN-method pair has identical durability
+            // requirements: on disk failure, drop the in-mem trust.
+            if let Some(dir) = keystore_dir {
+                if let Err(e) = upsert_peer_persist(
+                    dir,
+                    transport,
+                    crate::keystore::StoredPeer {
+                        peer_id_hex: hex::encode(peer_id),
+                        static_pub_hex: hex::encode(static_pub),
+                        name: name.clone(),
+                        last_addr: None,
+                    },
+                )
+                .await
+                {
+                    trusted.lock().await.remove(&peer_id);
+                    return reply_err(
+                        reply,
+                        req_id,
+                        &format!(
+                            "persist failed after {PEERS_PERSIST_ATTEMPTS} attempts: {e}; pair rolled back, retry once disk recovers"
+                        ),
+                    );
+                }
+            }
+            ensure_online(
+                app,
+                wall,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+                inflight,
+            )
+            .await;
+            start_initiator(
+                identity.clone(),
+                static_pub,
+                target.addr,
+                peer_id,
+                name,
+                transport.clone(),
+                pending_initiator_tx.clone(),
+                event_tx.clone(),
+            )
+            .await;
             CmdResponse::ok(req_id, None)
         }
     };
@@ -2588,6 +2787,7 @@ async fn discovery_dispatcher(
     transport: Arc<Transport>,
     pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
     event_tx: mpsc::UnboundedSender<Event>,
+    disc_cache: DiscoveryCache,
     shutdown: CancellationToken,
 ) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(10));
@@ -2649,12 +2849,33 @@ async fn discovery_dispatcher(
             }
             Some(disc) = rx.recv() => {
                 match disc {
-                    DiscoveryEvent::Resolved { peer_id_hex, static_pub_hex, name, addr } => {
+                    DiscoveryEvent::Resolved { peer_id_hex, static_pub_hex, name, addr, pair_pin } => {
                         let Ok(peer_id) = decode_hex32(&peer_id_hex) else { continue };
                         let Ok(static_pub) = decode_hex32(&static_pub_hex) else { continue };
                         if handshake::peer_id_for(&static_pub) != peer_id {
                             tracing::warn!("mDNS peer_id != BLAKE3(static_pub); ignoring");
                             continue;
+                        }
+                        // PR2: feed the discovery cache before the trust
+                        // gate so `PairFromPin` can resolve a not-yet-
+                        // trusted peer. Cap to avoid unbounded growth from
+                        // a hostile flood — old entries naturally age out
+                        // via `DISCOVERY_CACHE_TTL`, but a burst could
+                        // still wedge the map; 256 is far above the legit
+                        // home-LAN peer count.
+                        {
+                            let mut cache = disc_cache.lock().await;
+                            let now = Instant::now();
+                            cache.retain(|_, e| now.duration_since(e.last_seen) < DISCOVERY_CACHE_TTL);
+                            if cache.len() < 256 || cache.contains_key(&peer_id) {
+                                cache.insert(peer_id, ResolvedPeer {
+                                    static_pub,
+                                    addr,
+                                    name: name.clone(),
+                                    pair_pin: pair_pin.clone(),
+                                    last_seen: now,
+                                });
+                            }
                         }
                         let trusted_match = {
                             let g = trusted.lock().await;
@@ -2742,6 +2963,87 @@ async fn start_initiator(
         *pending_clear.lock().await = None;
         if let Err(e) = result {
             tracing::warn!(error = %e, "initiator failed");
+        }
+    });
+}
+
+/// PR2: rotation watchdog for the advertised pairing PIN.
+///
+/// While `pin_advert` is `Some(_)`, sleeps until its `expires_at`,
+/// then either:
+///   * trusted set is non-empty (someone paired) → clear PIN +
+///     republish the mDNS record without a `pair_pin` TXT and exit.
+///   * pairing_window has elapsed → same cleanup as above (user did
+///     not pair in time; stale PIN must not linger on the LAN).
+///   * otherwise → generate a fresh PIN, republish the TXT, and loop.
+///
+/// Exactly one watchdog runs per `PairShow`-opened session — callers
+/// guard the spawn behind `was_active` (the previous `pin_advert`
+/// being `Some`). On termination the task clears `pin_advert` to
+/// `None` so the next `PairShow` re-spawns cleanly.
+fn spawn_pin_watchdog(
+    pin_advert: PinAdvertisement,
+    mdns_ctx: MdnsCtx,
+    trusted: TrustedSet,
+    pairing_window: PairingWindow,
+) {
+    tokio::spawn(async move {
+        loop {
+            let sleep_until = match pin_advert.lock().await.as_ref() {
+                Some(p) => p.expires_at,
+                None => return,
+            };
+            let now = Instant::now();
+            if sleep_until > now {
+                tokio::time::sleep(sleep_until - now).await;
+            }
+            // After sleeping: decide whether to rotate or stop.
+            let trusted_empty = trusted.lock().await.is_empty();
+            let window_open = match *pairing_window.lock().await {
+                Some(deadline) => deadline > Instant::now(),
+                None => false,
+            };
+            if !trusted_empty || !window_open {
+                // Pair landed (or window closed) — strip the PIN from
+                // mDNS so a stale code can't be used by a late scanner.
+                *pin_advert.lock().await = None;
+                if let Some(ctx) = mdns_ctx.lock().await.as_ref() {
+                    if let Err(e) = discovery::republish_with_pin(
+                        &ctx.daemon,
+                        &ctx.instance_name,
+                        &ctx.peer_id_hex,
+                        &ctx.static_pub_hex,
+                        ctx.bind_ip,
+                        ctx.udp_port,
+                        None,
+                    ) {
+                        tracing::warn!(error = %e, "mDNS republish (clear PIN) failed");
+                    }
+                }
+                tracing::info!("pair PIN cleared");
+                return;
+            }
+            // Rotate: fresh PIN, new expiry, re-publish TXT.
+            let new_pin = gen_pair_pin();
+            let new_expires = Instant::now() + handshake::PAIRING_WINDOW;
+            *pin_advert.lock().await = Some(PinAd {
+                pin: new_pin.clone(),
+                expires_at: new_expires,
+            });
+            if let Some(ctx) = mdns_ctx.lock().await.as_ref() {
+                if let Err(e) = discovery::republish_with_pin(
+                    &ctx.daemon,
+                    &ctx.instance_name,
+                    &ctx.peer_id_hex,
+                    &ctx.static_pub_hex,
+                    ctx.bind_ip,
+                    ctx.udp_port,
+                    Some(&new_pin),
+                ) {
+                    tracing::warn!(error = %e, "mDNS republish (rotate PIN) failed");
+                }
+            }
+            tracing::info!("pair PIN rotated");
         }
     });
 }

@@ -2,6 +2,22 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
+(function tagHostOS() {
+  const ua = navigator.userAgent;
+  const os = /Windows/i.test(ua) ? 'windows'
+    : /Macintosh|Mac OS/i.test(ua) ? 'macos'
+    : /Linux/i.test(ua) ? 'linux'
+    : 'unknown';
+  document.body.dataset.os = os;
+  const deviceLabel = { windows: 'PC', macos: 'Mac', linux: 'Linux' }[os] || 'device';
+  const sub = document.getElementById('general-subtitle');
+  if (sub) sub.textContent = `How FluxSync behaves on this ${deviceLabel}.`;
+  if (os !== 'macos') {
+    const row = document.getElementById('row-show-in-dock');
+    if (row) row.style.display = 'none';
+  }
+})();
+
 let currentTab = 'general';
 let unlistenState = null;
 let lastState = null;

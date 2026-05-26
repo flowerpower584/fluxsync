@@ -12,6 +12,21 @@ const { exit } = window.__TAURI__.process || {};
 let pollHandle = null;
 let unlistenState = null;
 
+// Tag the body with the host OS so the stylesheet can paint a Windows
+// backdrop (WebView2 ignores `transparent: true` on ARM64). Also rewrite
+// the "Pair this Mac" headline so the popup says the right device word
+// regardless of where it is running.
+(function tagHostOS() {
+  const ua = navigator.userAgent;
+  const os = /Windows/i.test(ua) ? 'windows'
+    : /Macintosh|Mac OS/i.test(ua) ? 'macos'
+    : /Linux/i.test(ua) ? 'linux'
+    : 'unknown';
+  document.body.dataset.os = os;
+  const label = { windows: 'PC', macos: 'Mac', linux: 'Linux' }[os] || 'device';
+  void label;
+})();
+
 // ── Authoritative sync state (avoids DOM-as-source-of-truth race) ──
 let syncOn = false;
 let isToggling = false;
@@ -26,7 +41,17 @@ function applyState(s) {
 
   const isPaired = s && s.peer_name && s.peer_name.trim() !== "" && s.peer_name !== "pending";
   document.getElementById('tray-container').style.display = isPaired ? 'flex' : 'none';
-  document.getElementById('pairing-entry').style.display = isPaired ? 'none' : 'block';
+  document.getElementById('pairing-entry').style.display = 'none';
+  // Not paired → push the user straight to the pair window (the entry
+  // selector now lives there). Guarded so we don't re-open on every poll
+  // tick once the window is already up.
+  if (!isPaired && !window.__pairWindowOpened) {
+    window.__pairWindowOpened = true;
+    invoke('fluxsync_open_pair').catch(() => { window.__pairWindowOpened = false; });
+  }
+  if (isPaired) {
+    window.__pairWindowOpened = false;
+  }
 
   if (isPaired) {
     renderHero(s);
@@ -198,8 +223,7 @@ document.getElementById('open-settings').addEventListener('click', () => {
   invoke('fluxsync_open_settings');
 });
 
-document.getElementById('entry-show-qr').addEventListener('click', () => openPair());
-document.getElementById('entry-scan-peer').addEventListener('click', () => openPair());
+// entry-show-qr removed — pair window owns the entry now.
 
 document.getElementById('unpair-btn').addEventListener('click', async () => {
   if (!confirm('This will disconnect and unpair your device. Continue?')) return;

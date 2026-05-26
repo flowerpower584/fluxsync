@@ -109,24 +109,8 @@
     </footer>
   </div>
 
-  <!-- Pairing Entry (shown when not paired) -->
-  <div class="pairing-entry" id="pairing-entry" style="display:none">
-    <div class="entry-card">
-      <h2>Pair this Mac</h2>
-      <p>Both devices must be on the same Wi-Fi network. The pair takes ~30s and only happens once per peer.</p>
-      
-      <div class="entry-actions">
-        <button class="entry-btn primary" id="entry-show-qr">
-          <span class="cap mono">STEP 1 OF 2</span>
-          <span class="label">Show my QR</span>
-        </button>
-        <button class="entry-btn secondary" id="entry-scan-peer">
-          <span class="cap mono">MANUAL / INCOMING</span>
-          <span class="label">Accept from Phone</span>
-        </button>
-      </div>
-    </div>
-  </div>
+  <!-- Pairing Entry removed — pair window owns the entry flow. -->
+  <div class="pairing-entry" id="pairing-entry" style="display:none"></div>
 
   <script type="module" src="app.js"></script>
 </body>

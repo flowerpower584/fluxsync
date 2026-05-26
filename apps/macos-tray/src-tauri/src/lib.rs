@@ -17,7 +17,7 @@ use blake3;
 use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 #[tauri::command]
@@ -153,6 +153,45 @@ async fn fluxsync_pair_from_uri(uri: String, name: String) -> Result<(), String>
     .map(|_| ())
 }
 
+/// PR2: PIN-method pair. Daemon resolves the peer by matching the PIN
+/// against its mDNS discovery cache, then runs the same trust + handshake
+/// path as `pair_from_uri`. The pair window UI follows up with
+/// `pair_pending` + `pair_confirm` for SAS-words verification.
+#[tauri::command]
+async fn fluxsync_pair_from_pin(pin: String, name: String) -> Result<(), String> {
+    ipc::one_shot(json!({
+        "id": 1,
+        "op": "pair_from_pin",
+        "pin": pin,
+        "name": name,
+    }))
+    .await
+    .map(|_| ())
+}
+
+/// PR2: list peers waiting on verify-words confirmation. UI uses this
+/// after a PIN-method pair to render the SAS screen.
+#[tauri::command]
+async fn fluxsync_pair_pending() -> Result<Value, String> {
+    let resp = ipc::one_shot(json!({"id": 1, "op": "pair_pending"})).await?;
+    Ok(resp.get("data").cloned().unwrap_or(Value::Null))
+}
+
+/// PR2: confirm or reject a pending pair after the user has matched
+/// SAS words. `accept = false` revokes the peer (drops session +
+/// `peers.json` row).
+#[tauri::command]
+async fn fluxsync_pair_confirm(peer_id: String, accept: bool) -> Result<(), String> {
+    ipc::one_shot(json!({
+        "id": 1,
+        "op": "pair_confirm",
+        "peer_id": peer_id,
+        "accept": accept,
+    }))
+    .await
+    .map(|_| ())
+}
+
 #[tauri::command]
 async fn fluxsync_push(text: String) -> Result<(), String> {
     ipc::one_shot(json!({"id": 1, "op": "push", "text": text}))
@@ -181,6 +220,19 @@ fn fluxsync_open_settings(app: tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // Tray-app convention: closing a window hides it instead of
+        // tearing down the app. Without this, WebView2 on Windows shows
+        // a fallback close button (the `decorations: false` flag is not
+        // honoured on ARM64) and clicking it would otherwise destroy the
+        // WebView while leaving `fluxsyncd` running — the user perceives
+        // it as "the X does nothing" because the tray icon is still
+        // there but the popup is dead.
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
@@ -200,6 +252,9 @@ pub fn run() {
             fluxsync_set_charge_override,
             fluxsync_pair_show,
             fluxsync_pair_from_uri,
+            fluxsync_pair_from_pin,
+            fluxsync_pair_pending,
+            fluxsync_pair_confirm,
             fluxsync_push,
             fluxsync_open_pair,
             fluxsync_open_settings,
@@ -465,21 +520,26 @@ fn toggle_popup<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 /// Open the dedicated pair window (separate WebView so the user can
 /// keep the menu popup open in parallel).
 fn open_pair_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    // Pair window is now declared in tauri.conf.json (visible:false at
+    // boot). Runtime WebviewWindowBuilder cannot resolve bundled assets
+    // on Windows: any `WebviewUrl::App("pair.html")` shows a blank
+    // page. Pre-declared windows work because Tauri serves their URL
+    // through the same path the menu/settings windows already use.
+    if let Some(menu) = app.get_webview_window("menu") {
+        let _ = menu.hide();
+    }
     if let Some(w) = app.get_webview_window("pair") {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
-        return;
     }
-    let _ = WebviewWindowBuilder::new(app, "pair", WebviewUrl::App("pair.html".into()))
-        .title("FluxSync — Pair")
-        .inner_size(420.0, 540.0)
-        .resizable(false)
-        .build();
 }
 
 /// Open the dedicated settings window.
 fn open_settings_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(menu) = app.get_webview_window("menu") {
+        let _ = menu.hide();
+    }
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.show();
         let _ = w.set_focus();

@@ -34,6 +34,18 @@
         "transparent": false,
         "visible": false,
         "url": "settings.html"
+      },
+      {
+        "label": "pair",
+        "title": "FluxSync — Pair",
+        "width": 420,
+        "height": 780,
+        "resizable": true,
+        "minHeight": 540,
+        "decorations": true,
+        "transparent": false,
+        "visible": false,
+        "url": "pair.html"
       }
     ],
     "security": {

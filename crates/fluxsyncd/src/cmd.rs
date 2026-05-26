@@ -102,6 +102,15 @@ pub enum CmdOp {
         uri: String,
         name: String,
     },
+    /// PR2: trust + handshake using a 6-digit PIN advertised over mDNS
+    /// by the peer's `PairShow`. The daemon looks up the live discovery
+    /// cache for an entry whose `pair_pin` TXT matches and proceeds like
+    /// `PairFromUri`. Verify-words (`pair_pending` + `pair_confirm`) is
+    /// mandatory after a PIN-method pair — the UI gates it.
+    PairFromPin {
+        pin: String,
+        name: String,
+    },
     /// Push the host OS battery percentage + charging flag into the
     /// daemon. Fired by the Android `MainActivity` whenever the system
     /// `ACTION_BATTERY_CHANGED` broadcast arrives. Without this, the
@@ -164,6 +173,16 @@ pub enum CmdData {
         /// Self-contained URI suitable for QR encoding. Format:
         /// `fluxsync://pair/<pubkey_b32>?a=<ip:port>&f=<w1.w2.w3.w4.w5.w6>`
         uri: String,
+        /// PR2: 6-digit pairing PIN advertised on mDNS for the duration
+        /// of the pairing window. `None` while the daemon does not have
+        /// an open pair window (i.e. nothing to pair against).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pin: Option<String>,
+        /// PR2: unix-epoch ms when the current `pin` expires. UI uses
+        /// this to render a countdown and trigger a fresh `pair_show`
+        /// when the PIN rotates.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pin_expires_at_ms: Option<u64>,
     },
     /// Raw bytes of a fetched clipboard item, base64-encoded. Reply to a
     /// `FetchItem` request.

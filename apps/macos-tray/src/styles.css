@@ -11,7 +11,16 @@ html, body {
   color: var(--fs-fg);
   font-size: 12px;
   overflow: hidden;
+  min-height: 100vh;
 }
+
+/* Windows WebView2 + Tauri does not honour `transparent: true` reliably
+   on ARM64, leaving a white system backdrop behind the rounded popup.
+   Force the surface colour so the popup looks the same as on macOS.
+   Hard-code the value so the rule still wins before custom-prop cascade
+   resolves (otherwise a missing data-theme attribute leaves it white). */
+body[data-os="windows"] { background: #131316; }
+body[data-os="windows"][data-theme="light"] { background: #FFFFFF; }
 
 .mono { font-family: var(--fs-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; }
 
@@ -198,11 +207,15 @@ html, body {
 /* ── Pairing Entry ─────────────────────────────────────────────── */
 .pairing-entry {
   width: 360px;
+  min-height: 100vh;
   background: var(--fs-surface);
   border: 1px solid var(--fs-border);
   border-radius: 8px;
   padding: 32px 24px;
   box-shadow: 0 12px 40px rgba(0,0,0,0.6), 0 2px 6px rgba(0,0,0,0.3);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .entry-card h2 {
@@ -316,3 +329,31 @@ html, body {
   opacity: 0.6;
   cursor: default;
 }
+
+/* ── Pair window (pair.html) ───────────────────────────────────── */
+.pair {
+  background: var(--fs-surface);
+  padding: 18px 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--fs-fg);
+}
+.pair .appbar { display: flex; align-items: center; }
+.pair .appbar .brand { display: flex; align-items: center; gap: 10px; }
+.pair .appbar .glyph { width: 18px; height: 18px; border: 1.5px solid var(--fs-muted); border-radius: 3px; }
+.pair .appbar .name { font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
+.pair .appbar .ver { font-family: var(--fs-mono); font-size: 9px; color: var(--fs-subtle); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
+.pair .err { background: var(--fs-crit-soft); color: var(--fs-crit); border: 1px solid var(--fs-crit); border-radius: 4px; padding: 8px 10px; font-size: 12px; }
+.pair .qr-card {
+  background: #FFFFFF;
+  border-radius: 8px;
+  padding: 14px;
+  display: flex; align-items: center; justify-content: center;
+  min-height: 320px;
+}
+.pair .qr-card svg { width: 100%; max-width: 320px; height: auto; display: block; }
+.pair .fp-words { font-family: var(--fs-mono); font-size: 12px; color: var(--fs-fg); text-align: center; letter-spacing: 0.04em; }
+.pair .addr { font-family: var(--fs-mono); font-size: 10px; color: var(--fs-muted); text-align: center; letter-spacing: 0.06em; text-transform: uppercase; }
+.pair .unpair-btn { margin-top: 6px; }
+
