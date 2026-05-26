@@ -237,11 +237,28 @@ fn open_daemon_log() -> Result<std::fs::File> {
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("daemon.log");
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))
+    // M2: mode 0o600 on unix. The daemon log captures tracing JSON which
+    // can include peer identifiers, addresses, and (in DEBUG builds)
+    // clipboard-watcher state. Defaults of 0o644 leak this to every
+    // local account on shared workstations.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))
+    }
 }
 
 /// `fluxsyncd` on Unix, `fluxsyncd.exe` on Windows.

@@ -30,6 +30,14 @@ qrcode = { version = "0.14", default-features = false }
 owo-colors = "4"
 comfy-table = "7"
 
+# C2: safe wrappers for getuid() + stat to validate the IPC socket path
+# before connect — the attack surface for `fluxctl --ipc-path <…>` was a
+# silent push of clipboard text to any UNIX socket the caller could
+# reach. Restricting to sockets owned by the current UID rules out a
+# different-user attacker dropping a fake daemon on the box.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["user"] }
+
 [[bin]]
 name = "fluxctl"
 path = "src/main.rs"

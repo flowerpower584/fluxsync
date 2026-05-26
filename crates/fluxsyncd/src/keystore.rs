@@ -38,6 +38,28 @@ const PEERS_FILE: &str = "peers.json";
 #[cfg(not(target_os = "android"))]
 const KEYCHAIN_SERVICE: &str = "fluxsyncd";
 
+// C3 (open) — the `keyring` crate stores secrets as a generic password
+// with the default ACL: any process running as the current user can
+// read them without prompting. That preserves the disk-level hardening
+// from Phase 1 (no plaintext file) but does not stop a same-UID
+// malware from harvesting the Noise IK static key via
+// `security find-generic-password -s fluxsyncd -w` (macOS) or the
+// equivalent on Windows/Linux.
+//
+// Fix path (deferred to a follow-up because it requires bypassing
+// `keyring` and calling `security-framework` directly on macOS plus
+// equivalent platform code on Windows/Linux):
+//   1. macOS: `SecAccessControlCreateWithFlags` + `kSecAttrAccess`
+//      whitelisting the signed daemon binary, optionally chained with
+//      biometry (`kSecAccessControlBiometryAny`) for sensitive ops.
+//   2. Windows: bind DPAPI with `CRYPTPROTECT_AUDIT` and an entropy
+//      derived from `KnownFolderId::LocalAppData` so non-daemon
+//      processes cannot unprotect.
+//   3. Linux: Secret Service items with the `org.freedesktop.Secret.Item`
+//      attribute set to a peer-locked schema.
+//
+// Tracked in `docs/THREAT-MODEL.md` (FS-053 follow-up).
+
 /// Account name on the keychain entry. We only ever store one secret
 /// per service today (the long-term Noise identity), so a constant
 /// works. If we add a second secret later (e.g. group key), pick a new
@@ -324,10 +346,24 @@ pub fn save_peers(dir: &Path, peers: &[StoredPeer]) -> Result<()> {
     let s = serde_json::to_string_pretty(&pf)?;
     let tmp = path.with_extension("json.tmp");
     {
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
+        // M1: mode 0o600. Trust topology (peer names + pubkeys) must
+        // not be world-readable; other local accounts could enumerate
+        // who this daemon trusts and harvest stable peer-ids for
+        // correlation. Public keys are public, but the *set* is sensitive.
+        #[cfg(unix)]
+        let opts = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = fs::OpenOptions::new();
+            o.create(true).write(true).truncate(true).mode(0o600);
+            o
+        };
+        #[cfg(not(unix))]
+        let opts = {
+            let mut o = fs::OpenOptions::new();
+            o.create(true).write(true).truncate(true);
+            o
+        };
+        let mut f = opts
             .open(&tmp)
             .with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(s.as_bytes())

@@ -63,6 +63,20 @@ enum Cmd {
         #[command(subcommand)]
         sub: PairSub,
     },
+    /// Trust-store inspection (everything the daemon will *talk to*, not
+    /// just the active session). H2: `fluxctl peers` only shows the
+    /// active link; this surfaces the rest of `peers.json` so a silent
+    /// `pair from-uri` cannot hide.
+    Trust {
+        #[command(subcommand)]
+        sub: TrustSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TrustSub {
+    /// Print every peer the daemon trusts (peer-id, name, base32 pubkey).
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -124,6 +138,7 @@ async fn main() -> Result<()> {
         PairShow,
         PairQr,
         PairPending,
+        TrustList,
         Ack(&'static str),
     }
 
@@ -191,6 +206,12 @@ async fn main() -> Result<()> {
             one_shot(&ipc_path, json!({"id": 1, "op": "toggle", "on": false})).await?,
             Kind::Ack("daemon OFF"),
         ),
+        Cmd::Trust { sub } => match sub {
+            TrustSub::List => (
+                one_shot(&ipc_path, json!({"id": 1, "op": "trust_list"})).await?,
+                Kind::TrustList,
+            ),
+        },
         Cmd::Pair { sub } => match sub {
             PairSub::Show => (
                 one_shot(&ipc_path, json!({"id": 1, "op": "pair_show"})).await?,
@@ -269,9 +290,47 @@ async fn main() -> Result<()> {
         Kind::PairShow => render::render_pair_show(&value)?,
         Kind::PairQr => render_pair_qr(&value)?,
         Kind::PairPending => render_pair_pending(&value),
+        Kind::TrustList => render_trust_list(&value),
         Kind::Ack(action) => render::render_ack(&value, action),
     }
     Ok(())
+}
+
+/// H2: render the trust-store listing. One entry per persisted peer,
+/// with peer-id (full hex, suitable for `fluxctl revoke`), name, and
+/// the base32 pubkey for cross-checking against the peer's
+/// `fluxctl pair show`. Sensitive fields stay on disk only; this view
+/// is the user's primary defence against silent extra-trust.
+fn render_trust_list(resp: &Value) {
+    if resp.get("ok").and_then(Value::as_bool) != Some(true) {
+        let err = resp.get("err").and_then(Value::as_str).unwrap_or("unknown");
+        eprintln!("error: {err}");
+        return;
+    }
+    let entries = resp
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if entries.is_empty() {
+        println!("Trust store empty. Pair a device with `fluxctl pair show-qr`.");
+        return;
+    }
+    println!("Trusted peers ({n}):", n = entries.len());
+    println!();
+    for e in entries {
+        let id = e.get("peer_id_hex").and_then(Value::as_str).unwrap_or("?");
+        let name = e.get("name").and_then(Value::as_str).unwrap_or("");
+        let pk = e
+            .get("static_pub_hex")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        println!("name    : {name}");
+        println!("peer-id : {id}");
+        println!("pubkey  : {pk}");
+        println!();
+    }
+    println!("To remove an entry: fluxctl revoke <peer-id>");
 }
 
 /// Render FS-052 pending-pair listing: one row per unconfirmed peer with
@@ -361,9 +420,62 @@ fn render_pair_qr(resp: &Value) -> Result<()> {
     Ok(())
 }
 
+/// C2: validate the IPC socket path before we hand it any data.
+///
+/// Original exploit: `fluxctl --ipc-path /tmp/evil.sock push <secret>`
+/// would happily ship the secret to anyone listening on that socket
+/// because fluxctl never authenticated the other end. Worse: any local
+/// account that races a fake socket into `~/.fluxsync/sock` (or symlinks
+/// the path elsewhere) could harvest every `push` text in clear.
+///
+/// Defense-in-depth applied here:
+/// 1. `symlink_metadata` — refuse to traverse a symlink. The default
+///    path is `$HOME/.fluxsync/sock`; if it became a symlink someone
+///    is staging an attack.
+/// 2. File type must be a UNIX socket.
+/// 3. Socket owner UID must equal the caller's UID. Stops a different
+///    user on a shared machine impersonating the daemon.
+///
+/// This does *not* defend against same-UID malware that bound a fake
+/// socket and replaced the real path before fluxctl ran — that needs a
+/// daemon-side authentication challenge (separate fix).
+#[cfg(unix)]
+fn validate_ipc_socket(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("stat ipc socket {}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(anyhow!(
+            "ipc path {} is a symlink; refusing to follow (potential redirect attack). \
+             Remove the link or pass the canonical path.",
+            path.display()
+        ));
+    }
+    if !meta.file_type().is_socket() {
+        return Err(anyhow!(
+            "ipc path {} is not a UNIX socket (type {:?})",
+            path.display(),
+            meta.file_type()
+        ));
+    }
+    let me = u64::from(nix::unistd::Uid::current().as_raw());
+    let owner = u64::from(meta.uid());
+    if owner != me {
+        return Err(anyhow!(
+            "ipc socket {} owned by uid {} but caller is uid {}; refusing to send. \
+             Either run as the daemon's user or fix the socket ownership.",
+            path.display(),
+            owner,
+            me
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 async fn one_shot(path: &Path, request: Value) -> Result<Value> {
     use tokio::net::UnixStream;
+    validate_ipc_socket(path)?;
     let stream = UnixStream::connect(path)
         .await
         .with_context(|| format!("connect ipc {}", path.display()))?;

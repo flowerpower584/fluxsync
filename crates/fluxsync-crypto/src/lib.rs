@@ -26,7 +26,7 @@ pub mod test_util;
 pub use error::CryptoError;
 pub use fingerprint::{fingerprint, fingerprint_from_handshake_hash, FINGERPRINT_WORDS};
 pub use handshake::{Initiator, Responder};
-pub use identity::Identity;
+pub use identity::{validate_peer_pubkey, Identity};
 pub use session::Session;
 pub use wordlist::WORDLIST;
 

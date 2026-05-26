@@ -1112,6 +1112,24 @@ async fn handle_driver_cmd(
             let peer = peer_entry(app.snapshot(), addr);
             CmdResponse::ok(req_id, Some(CmdData::Peers(peer.into_iter().collect())))
         }
+        // H2: enumerate the persisted trust store. The `Peers` op above
+        // only reflects the live session; this one reflects every entry
+        // a malicious or unaware caller has managed to land in
+        // `peers.json` via `pair from-uri` / `pair accept`. Render this
+        // in the CLI so a silent extra-peer trust is immediately
+        // visible to the user.
+        CmdOp::TrustList {} => {
+            let g = trusted.lock().await;
+            let entries: Vec<crate::cmd::TrustedEntry> = g
+                .iter()
+                .map(|(pid, p)| crate::cmd::TrustedEntry {
+                    peer_id_hex: hex::encode(pid),
+                    static_pub_hex: hex::encode(p.static_pub),
+                    name: p.name.clone(),
+                })
+                .collect();
+            CmdResponse::ok(req_id, Some(CmdData::TrustList(entries)))
+        }
         CmdOp::SetThreshold { value } => match app.state.set_threshold(value) {
             Ok(()) => {
                 let actions = app.handle(
@@ -1254,9 +1272,19 @@ async fn handle_driver_cmd(
                 Ok(a) => a,
                 Err(_) => return reply_err(reply, req_id, "expected 32-byte peer_id"),
             };
-            // VULN-001 variant V2: revoke must succeed on disk before
-            // we tell the caller it's done; otherwise daemon restart would
-            // re-trust the peer we just promised to drop.
+            // C1: surgical removal of a single peer. The previous flow
+            // went through `Event::ManualUnpair` → `Action::DropPeer`
+            // which `trusted.clear()`s the entire trust store, so
+            // revoking one peer wiped every other paired device. We
+            // now (a) remove only the target slot from the in-memory
+            // set, (b) persist the new set under the disk lock, and
+            // (c) tear down the live session **only if** the revoked
+            // peer is the one currently linked. Other peers stay
+            // trusted and reachable.
+            //
+            // VULN-001 variant V2 still applies: revoke must succeed on
+            // disk before we acknowledge, otherwise a daemon restart
+            // would re-trust the peer we just promised to drop.
             let removed_trusted = trusted.lock().await.remove(&arr);
             if let Some(dir) = keystore_dir {
                 if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
@@ -1272,21 +1300,29 @@ async fn handle_driver_cmd(
                     );
                 }
             }
-            let actions = app.handle(Event::ManualUnpair, &**wall);
-            dispatch(
-                actions,
-                app,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-            )
-            .await;
+            // If the revoked peer is the active session, drop *its*
+            // session. `Event::PeerLost` walks Linked → Discovering
+            // via `Action::CloseSession`, which (unlike `DropPeer`)
+            // touches only the live session, not the trust store.
+            let active = app.snapshot().peer_id;
+            if active == arr {
+                transport.drop_session().await;
+                let actions = app.handle(Event::PeerLost, &**wall);
+                dispatch(
+                    actions,
+                    app,
+                    transport,
+                    trusted,
+                    keystore_dir,
+                    state_watch_tx,
+                    logs_bcast_tx,
+                    log_tail,
+                    last_written_hashes,
+                    metrics,
+                    inflight,
+                )
+                .await;
+            }
             CmdResponse::ok(req_id, None)
         }
         CmdOp::SetLaunchAtLogin { value: _ } => {
@@ -1487,7 +1523,34 @@ async fn handle_driver_cmd(
                 Ok(a) => a,
                 Err(_) => return reply_err(reply, req_id, "expected 32-byte pubkey"),
             };
+            // H1: reject all-zero + known low-order Curve25519 points
+            // before they reach `trusted`. A degenerate pubkey would
+            // pin Noise IK to predictable DH output; rejecting here is
+            // cheaper than a SAS-time failure and avoids ever writing
+            // such an entry to disk.
+            if let Err(e) = fluxsync_crypto::validate_peer_pubkey(&static_pub) {
+                return reply_err(reply, req_id, &format!("bad pubkey in uri: {e}"));
+            }
             let peer_id = handshake::peer_id_for(&static_pub);
+            // H3: cap the trust store so an attacker that lures the user
+            // into repeated `pair from-uri` runs cannot indefinitely
+            // grow peers.json. 64 distinct devices is well past any
+            // realistic personal/family setup; raise via config later if
+            // a real fleet use case shows up. The check is "len before
+            // insert" so re-pairing the same peer (same peer_id) stays
+            // legal — `upsert` just refreshes the existing slot.
+            {
+                let g = trusted.lock().await;
+                if !g.contains_key(&peer_id) && g.len() >= MAX_TRUSTED_PEERS {
+                    return reply_err(
+                        reply,
+                        req_id,
+                        &format!(
+                            "trust store full ({MAX_TRUSTED_PEERS} peers); revoke an existing peer first"
+                        ),
+                    );
+                }
+            }
             trusted.lock().await.insert(
                 peer_id,
                 TrustedPeer {
@@ -1580,7 +1643,25 @@ async fn handle_driver_cmd(
                 Ok(a) => a,
                 Err(_) => return reply_err(reply, req_id, "expected 32-byte pubkey"),
             };
+            // H1: same validation as PairFromUri. PairAccept is the
+            // manual `--addr` path; just as scriptable, just as risky.
+            if let Err(e) = fluxsync_crypto::validate_peer_pubkey(&static_pub) {
+                return reply_err(reply, req_id, &format!("bad pubkey: {e}"));
+            }
             let peer_id = handshake::peer_id_for(&static_pub);
+            // H3: trust-store cap. Same rationale as PairFromUri.
+            {
+                let g = trusted.lock().await;
+                if !g.contains_key(&peer_id) && g.len() >= MAX_TRUSTED_PEERS {
+                    return reply_err(
+                        reply,
+                        req_id,
+                        &format!(
+                            "trust store full ({MAX_TRUSTED_PEERS} peers); revoke an existing peer first"
+                        ),
+                    );
+                }
+            }
             trusted.lock().await.insert(
                 peer_id,
                 TrustedPeer {
@@ -1680,7 +1761,27 @@ async fn handle_driver_cmd(
                 return reply_err(reply, req_id, "no_peer_with_pin");
             };
             let static_pub = target.static_pub;
+            // H1: even the PIN-method path needs to validate the
+            // discovered peer's static pubkey. mDNS is unauthenticated;
+            // an attacker controlling the LAN could advertise a
+            // degenerate pubkey on a guessed PIN.
+            if let Err(e) = fluxsync_crypto::validate_peer_pubkey(&static_pub) {
+                return reply_err(reply, req_id, &format!("bad pubkey from discovery: {e}"));
+            }
             let peer_id = handshake::peer_id_for(&static_pub);
+            // H3: trust-store cap.
+            {
+                let g = trusted.lock().await;
+                if !g.contains_key(&peer_id) && g.len() >= MAX_TRUSTED_PEERS {
+                    return reply_err(
+                        reply,
+                        req_id,
+                        &format!(
+                            "trust store full ({MAX_TRUSTED_PEERS} peers); revoke an existing peer first"
+                        ),
+                    );
+                }
+            }
             trusted.lock().await.insert(
                 peer_id,
                 TrustedPeer {
@@ -2368,6 +2469,17 @@ fn load_trusted_peers(dir: &Path) -> Vec<([u8; 32], TrustedPeer)> {
                 continue;
             }
         };
+        // H1 (defense-in-depth): a peers.json copied from a vulnerable
+        // pre-fix daemon may already contain degenerate pubkeys. Filter
+        // them at boot rather than panicking later inside Noise IK.
+        if let Err(e) = fluxsync_crypto::validate_peer_pubkey(&static_pub) {
+            tracing::warn!(
+                error = %e,
+                peer = %p.peer_id_hex,
+                "skipping peers.json entry: invalid pubkey (zero or low-order)"
+            );
+            continue;
+        }
         let peer_id = handshake::peer_id_for(&static_pub);
         out.push((
             peer_id,
@@ -2376,6 +2488,20 @@ fn load_trusted_peers(dir: &Path) -> Vec<([u8; 32], TrustedPeer)> {
                 name: p.name,
             },
         ));
+    }
+    // H3: enforce the cap at load too. If a malicious or pre-fix
+    // peers.json has more than `MAX_TRUSTED_PEERS` entries, keep the
+    // first N (load order = file order = insertion order under the
+    // disk lock). This is conservative: it never silently *replaces*
+    // a peer the user might still recognize, but it stops boot-time
+    // memory blow-up.
+    if out.len() > MAX_TRUSTED_PEERS {
+        tracing::warn!(
+            total = out.len(),
+            cap = MAX_TRUSTED_PEERS,
+            "peers.json exceeds cap; truncating tail. Revoke unwanted entries via `fluxctl revoke <peer-id>`."
+        );
+        out.truncate(MAX_TRUSTED_PEERS);
     }
     out
 }
@@ -2434,6 +2560,14 @@ pub(crate) async fn save_peers_with_retry(
 /// out a transient ENOSPC / EBUSY / fs-quota hiccup without making the
 /// IPC reply hang forever on a broken disk.
 const PEERS_PERSIST_ATTEMPTS: u32 = 3;
+
+/// H3: hard cap on the trusted-peer set. A personal/family fluxsync
+/// rarely exceeds 4–6 devices; 64 leaves generous headroom while
+/// preventing an attacker (or a buggy script) from filling `peers.json`
+/// with garbage entries that survive across reboots. Re-pairing an
+/// existing peer is unaffected — the check is "new peer would exceed
+/// cap", not "any insert exceeds cap".
+pub const MAX_TRUSTED_PEERS: usize = 64;
 
 /// Atomic upsert of a single [`crate::keystore::StoredPeer`] into
 /// `peers.json`: takes the disk lock, reads the on-disk list, upserts

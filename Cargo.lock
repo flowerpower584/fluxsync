@@ -1166,6 +1166,7 @@ dependencies = [
  "anyhow",
  "clap",
  "comfy-table",
+ "nix 0.28.0",
  "owo-colors",
  "qrcode",
  "serde",

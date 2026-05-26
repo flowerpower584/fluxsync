@@ -139,6 +139,12 @@ pub enum CmdOp {
         peer_id: String,
         accept: bool,
     },
+    /// H2: list every entry in the trust store (peers.json), not just
+    /// the one peer that is currently linked. The existing `Peers`
+    /// op only reports the active session — a silent compromise that
+    /// adds a trusted peer via `pair from-uri` was invisible until
+    /// someone `cat`-ed `peers.json` by hand.
+    TrustList {},
 }
 
 /// Response envelope on the `cmd` channel. `id` echoes the request.
@@ -191,7 +197,19 @@ pub enum CmdData {
     },
     /// FS-052: pending-pair listing.
     PendingPairs(Vec<PendingPairEntry>),
+    /// H2: every persisted trusted peer.
+    TrustList(Vec<TrustedEntry>),
     Pong,
+}
+
+/// H2: one entry in the trust store (`peers.json`). Mirrors
+/// `keystore::StoredPeer` but exposed on the IPC surface so the CLI
+/// can render it without re-reading the file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustedEntry {
+    pub peer_id_hex: String,
+    pub static_pub_hex: String,
+    pub name: String,
 }
 
 /// FS-052: one unconfirmed TOFU pair waiting on user verification.

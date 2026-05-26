@@ -33,4 +33,12 @@ pub enum CryptoError {
     /// identity to the wire.
     #[error("identity secret is degenerate (all-zero or small-subgroup)")]
     DegenerateKey,
+
+    /// H1: a *peer's* static public key offered via `PairFromUri` /
+    /// `PairAccept` is either `[0u8;32]` or a known low-order Curve25519
+    /// point. Either value forces the Noise DH output to a predictable
+    /// constant; trusting such a key lets any party "speak" the peer's
+    /// identity on the wire.
+    #[error("peer static public key is invalid (zero or low-order point)")]
+    InvalidPeerPubkey,
 }
