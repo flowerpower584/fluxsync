@@ -9,11 +9,18 @@
 //! * [`WallClock`] — current time-of-day, in `HH:MM` form for the UI's
 //!   history entries and as UNIX millis for wire frames.
 
+/// Largest peer-supplied lamport value we will believe in good faith.
+/// At a sustained 1k events/s that's ~35 years of nonstop sync; anything
+/// higher is a hostile or buggy peer trying to pin our counter at
+/// `u64::MAX` so future `tick`s saturate and ordering collapses (SE-08).
+pub const LAMPORT_OBSERVE_MAX: u64 = 1 << 40;
+
 /// Lamport-style logical clock.
 pub trait Clock {
     /// Local event: bump the counter and return the new value.
     fn tick(&mut self) -> u64;
-    /// Remote event observed: max(self, seen) + 1, return the new value.
+    /// Remote event observed: max(self, seen.min(LAMPORT_OBSERVE_MAX)) + 1.
+    /// Returns the new counter value.
     fn observe(&mut self, seen: u64) -> u64;
     /// Read the current value without bumping it.
     fn now(&self) -> u64;
@@ -39,7 +46,10 @@ impl Clock for LamportClock {
     }
 
     fn observe(&mut self, seen: u64) -> u64 {
-        self.counter = self.counter.max(seen).saturating_add(1);
+        // SE-08: clamp pathological peer values. A hostile `u64::MAX`
+        // would otherwise pin us at MAX and collapse every future tick.
+        let bounded = seen.min(LAMPORT_OBSERVE_MAX);
+        self.counter = self.counter.max(bounded).saturating_add(1);
         self.counter
     }
 
@@ -108,6 +118,23 @@ mod tests {
         let mut c = LamportClock { counter: u64::MAX };
         assert_eq!(c.tick(), u64::MAX);
         assert_eq!(c.observe(0), u64::MAX);
+    }
+
+    #[test]
+    fn lamport_observe_clamps_hostile_peer_value() {
+        // SE-08: peer that sends `lamport: u64::MAX` must NOT collapse
+        // our counter at MAX. We bound `seen` to LAMPORT_OBSERVE_MAX so
+        // a few subsequent ticks still produce distinct values.
+        let mut c = LamportClock::new();
+        let after_attack = c.observe(u64::MAX);
+        assert!(after_attack <= LAMPORT_OBSERVE_MAX + 1);
+        assert!(c.tick() > after_attack);
+        // Repeated attacks cannot push us past the ceiling either.
+        let mut c2 = LamportClock::new();
+        for _ in 0..16 {
+            c2.observe(u64::MAX);
+        }
+        assert!(c2.now() <= LAMPORT_OBSERVE_MAX + 16);
     }
 
     #[test]

@@ -34,6 +34,8 @@ thiserror = { workspace = true }
 # return values that must leave this crate as plain arrays so callers
 # can't forget to wipe them. The derive feature enables `ZeroizeOnDrop`.
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+# SE-03: constant-time equality for degenerate-key check in `Identity::from_secret_bytes`.
+subtle = { version = "2.5", default-features = false }
 
 # blake3 split per target: android cross-build avoids the C/NEON build
 # script, which would require an Android NDK toolchain just to typecheck.

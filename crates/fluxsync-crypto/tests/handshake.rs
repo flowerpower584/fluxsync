@@ -126,9 +126,22 @@ fn fingerprint_changes_with_key() {
 fn identity_round_trips_through_secret_bytes() {
     let id = Identity::generate();
     let bytes = id.secret_bytes();
-    let restored = Identity::from_secret_bytes(bytes);
+    let restored = Identity::from_secret_bytes(bytes).expect("non-degenerate");
     assert_eq!(id.public_key(), restored.public_key());
     assert_eq!(id.peer_id(), restored.peer_id());
+}
+
+#[test]
+fn identity_rejects_degenerate_all_zero_secret() {
+    // SE-03: all-zero is a valid X25519 input but a degenerate identity.
+    // Refuse it so a keystore-read-error fallback can't silently ship a
+    // predictable static key to the wire.
+    let zero = zeroize::Zeroizing::new([0u8; 32]);
+    match Identity::from_secret_bytes(zero) {
+        Err(fluxsync_crypto::CryptoError::DegenerateKey) => {}
+        Err(other) => panic!("expected DegenerateKey, got {other:?}"),
+        Ok(_) => panic!("expected DegenerateKey error, got Ok"),
+    }
 }
 
 #[test]

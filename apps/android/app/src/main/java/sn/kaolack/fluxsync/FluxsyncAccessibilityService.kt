@@ -106,12 +106,15 @@ class FluxsyncAccessibilityService : AccessibilityService() {
             try {
                 val ipc = File(filesDir, "fluxsync.sock").absolutePath
                 val keystore = filesDir.absolutePath
+                // SE-05: identity source is now a typed enum. The old API
+                // accepted `keystoreDir=""` + `identitySecretB64=""` as a
+                // silent "regenerate fresh keypair" sentinel that erased
+                // pairings on any caller typo.
                 val h = FluxsyncHandle.start(
                     peerName = formatPeerName(Build.MANUFACTURER, Build.MODEL),
                     ipcPath = ipc,
-                    keystoreDir = keystore,
                     udpPort = 0.toUShort(),
-                    identitySecretB64 = ""
+                    identity = IdentitySource.Keystore(keystore)
                 )
                 FluxsyncManager.setHandle(h)
                 android.util.Log.i("FluxSync", "Daemon booted successfully by AccessibilityService")

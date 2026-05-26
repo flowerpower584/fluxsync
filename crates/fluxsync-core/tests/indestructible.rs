@@ -14,6 +14,9 @@ fn boot() -> App {
 fn h(seed: u8) -> [u8; 32] {
     [seed; 32]
 }
+fn ch(seed: u8) -> ContentHash {
+    ContentHash::from_blake3([seed; 32])
+}
 
 fn linked_app() -> App {
     let mut app = boot();
@@ -376,11 +379,15 @@ fn clipboard_dedup_suppresses_echo() {
 
 #[test]
 fn clipboard_cross_dedup_peer_then_local() {
+    // SE-14: dedup is keyed on the digest of the actual payload, not on
+    // the sender-supplied `hash` field, so we use the real BLAKE3 of
+    // "echo" on both sides — the daemon code does the same.
+    let real = DedupRing::hash(b"echo").into_bytes();
     let mut app = linked_app();
     // Receive from peer
     app.handle(
         Event::FrameReceivedClipboard {
-            hash: h(20),
+            hash: real,
             kind: Kind::Text,
             payload: "echo".to_string().into_bytes(),
             preview: "echo".into(),
@@ -392,7 +399,7 @@ fn clipboard_cross_dedup_peer_then_local() {
     // Now local clipboard fires with same hash (OS echo)
     let a = app.handle(
         Event::LocalClipboardChange {
-            hash: h(20),
+            hash: real,
             kind: Kind::Text,
             payload: "echo".to_string().into_bytes(),
             preview: "echo".into(),
@@ -403,6 +410,43 @@ fn clipboard_cross_dedup_peer_then_local() {
     );
     // Must NOT send it back
     assert!(!a.iter().any(|x| matches!(x, Action::SendItem { .. })));
+}
+
+#[test]
+fn se14_peer_supplied_hash_does_not_key_dedup() {
+    // SE-14 regression: a peer that lies about `ClipboardItem.hash`
+    // cannot pin a slot in the dedup ring. We feed a frame whose `hash`
+    // is `[0xAA; 32]` but whose payload is "real". The app must dedup
+    // against `blake3("real")`, not `[0xAA; 32]`.
+    let mut app = linked_app();
+    app.handle(
+        Event::FrameReceivedClipboard {
+            hash: [0xAA; 32], // hostile peer-supplied
+            kind: Kind::Text,
+            payload: b"real".to_vec(),
+            preview: "real".into(),
+            lamport: 1,
+            sensitive: false,
+        },
+        &wall(),
+    );
+    // Sending "fake" with the same poisoned hash MUST still go through —
+    // dedup is keyed by payload digest now.
+    let a = app.handle(
+        Event::FrameReceivedClipboard {
+            hash: [0xAA; 32],
+            kind: Kind::Text,
+            payload: b"fake".to_vec(),
+            preview: "fake".into(),
+            lamport: 2,
+            sensitive: false,
+        },
+        &wall(),
+    );
+    assert!(
+        a.iter().any(|x| matches!(x, Action::AckItem { .. })),
+        "second frame with same poisoned hash but different payload must NOT be deduped"
+    );
 }
 
 #[test]
@@ -469,15 +513,15 @@ fn clipboard_history_newest_first() {
 #[test]
 fn dedup_ring_eviction_cycle() {
     let mut ring = DedupRing::new(3);
-    assert!(ring.observe(h(1)));
-    assert!(ring.observe(h(2)));
-    assert!(ring.observe(h(3)));
+    assert!(ring.observe(ch(1)));
+    assert!(ring.observe(ch(2)));
+    assert!(ring.observe(ch(3)));
     // Full → evicts oldest
-    assert!(ring.observe(h(4)));
-    assert!(!ring.contains(&h(1)));
-    assert!(ring.contains(&h(4)));
+    assert!(ring.observe(ch(4)));
+    assert!(!ring.contains(&ch(1)));
+    assert!(ring.contains(&ch(4)));
     // Evicted item is fresh again
-    assert!(ring.observe(h(1)));
+    assert!(ring.observe(ch(1)));
 }
 
 #[test]
@@ -487,7 +531,7 @@ fn dedup_ring_stress_1000_items() {
         let mut hash = [0u8; 32];
         hash[0] = (i & 0xFF) as u8;
         hash[1] = (i >> 8) as u8;
-        ring.observe(hash);
+        ring.observe(ContentHash::from_blake3(hash));
     }
     assert_eq!(ring.len(), 50);
 }
@@ -508,12 +552,15 @@ fn lamport_monotonic_and_observe() {
 }
 
 #[test]
-fn lamport_saturates_at_max() {
+fn lamport_clamps_hostile_peer_value() {
+    // SE-08: a hostile peer that sends `lamport: u64::MAX` must NOT
+    // pin our counter at MAX. `observe` clamps `seen` to
+    // LAMPORT_OBSERVE_MAX so subsequent ticks still order distinctly.
+    use fluxsync_core::clock::LAMPORT_OBSERVE_MAX;
     let mut c = LamportClock::new();
-    // Force near max
-    c.observe(u64::MAX - 1);
-    assert_eq!(c.now(), u64::MAX);
-    assert_eq!(c.tick(), u64::MAX); // saturates
+    let after = c.observe(u64::MAX);
+    assert!(after <= LAMPORT_OBSERVE_MAX + 1);
+    assert!(c.tick() > after);
 }
 
 // ═══════════════════════════════════════════════════════════════════

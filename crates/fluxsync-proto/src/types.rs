@@ -17,6 +17,7 @@ pub enum Kind {
 /// Top-level wire envelope. Every UDP datagram, after decryption, decodes to
 /// exactly one `Frame`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Frame {
     pub version: u8,
     pub msg: Msg,
@@ -48,11 +49,13 @@ pub enum Msg {
 /// friendly names — only static pubkeys — so the responder ends up with
 /// a placeholder until this frame arrives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Hello {
     pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClipboardItem {
     pub lamport: u64,
     pub hash: [u8; 32],
@@ -63,6 +66,7 @@ pub struct ClipboardItem {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BatteryStatus {
     pub lamport: u64,
     pub level: u8,
@@ -70,12 +74,14 @@ pub struct BatteryStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Heartbeat {
     pub lamport: u64,
     pub rtt_hint: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Chunk {
     pub item_id: [u8; 32],
     pub idx: u16,
@@ -84,6 +90,7 @@ pub struct Chunk {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Ack {
     pub lamport: u64,
     pub hash: [u8; 32],
@@ -95,6 +102,7 @@ pub struct Ack {
 /// resends that too. `missing` is bounded by the sender of the Nak to
 /// stay within one datagram — see `MAX_NAK_MISSING`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Nak {
     pub item_id: [u8; 32],
     pub want_header: bool,
@@ -102,6 +110,7 @@ pub struct Nak {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandshakeInit {
     pub peer_id: [u8; 32],
     pub ephemeral_pub: [u8; 32],
@@ -110,6 +119,7 @@ pub struct HandshakeInit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandshakeResp {
     pub peer_id: [u8; 32],
     pub ephemeral_pub: [u8; 32],
@@ -120,6 +130,7 @@ pub struct HandshakeResp {
 /// Cached info about a peer the daemon has seen recently. Not part of `Msg`;
 /// lives here so `fluxsyncd` and `fluxctl` share one shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PeerInfo {
     pub peer_id: [u8; 32],
     pub name: String,

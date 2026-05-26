@@ -9,7 +9,7 @@
 //! cost.
 
 use crate::clock::{Clock, LamportClock, WallClock};
-use crate::dedup::DedupRing;
+use crate::dedup::{ContentHash, DedupRing};
 use crate::events::{Action, Event, LogEntry};
 use crate::fsm::{transition, Phase};
 use crate::policy::status_for;
@@ -125,7 +125,10 @@ impl App {
             } => {
                 let preview = preview.trim();
                 self.clock.observe(*lamport);
-                if !self.dedup.observe(*hash) {
+                // SE-14: `hash` here was computed locally by the daemon
+                // from the OS clipboard payload, so wrapping in
+                // `ContentHash::from_blake3` is sound.
+                if !self.dedup.observe(ContentHash::from_blake3(*hash)) {
                     suppress_action = true; // saw it from peer already, don't echo
                 } else if !sensitive {
                     self.push_history(HistoryItem {
@@ -142,10 +145,10 @@ impl App {
             Event::FrameReceivedClipboard {
                 hash,
                 kind,
+                payload,
                 preview,
                 sensitive,
                 lamport,
-                ..
             } => {
                 // On nettoie le texte (espaces inutiles aux extrémités)
                 let preview = preview.trim();
@@ -153,12 +156,19 @@ impl App {
                 // On synchronise notre horloge logique (Lamport) avec celle de l'Android
                 self.clock.observe(*lamport);
 
+                // SE-14: the wire `hash` field is sender-controlled, so
+                // we recompute the digest from the payload before keying
+                // the dedup ring. Trusting `*hash` would let a hostile
+                // peer pick which slot in the ring gets occupied,
+                // poisoning history with a chosen-collision payload.
+                let computed = DedupRing::hash(payload);
+
                 // Dedup by content hash. `observe` returns false when this
                 // hash was already seen — that covers three cases at once:
                 // an echo of our own local copy, a duplicate retransmit, and
                 // a malicious peer reusing a hash to poison history. In every
                 // case we drop the frame and only send an Ack.
-                if !self.dedup.observe(*hash) {
+                if !self.dedup.observe(computed) {
                     suppress_action = true;
                 } else if !sensitive {
                     self.push_history(HistoryItem {

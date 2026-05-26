@@ -43,11 +43,22 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _guard = sentry::init(("https://9c9d519251cf44cc9149f318b383f4f5@o4511345219600384.ingest.de.sentry.io/4511345258659920", sentry::ClientOptions {
-        release: sentry::release_name!(),
-        send_default_pii: true,
-        ..Default::default()
-    }));
+    // Sentry is opt-in and silent by default — FluxSync's pitch is
+    // "no servers, no accounts", so the daemon MUST NOT phone home
+    // unless the user explicitly turns it on.
+    //
+    // Activation requires two independent signals:
+    // 1. A DSN baked in at build time via the `FLUXSYNC_SENTRY_DSN`
+    //    env var. `option_env!` resolves at compile time, so forks
+    //    and self-built binaries ship with `None` and cannot leak
+    //    crashes to our project. Only releases built by the project
+    //    maintainer have a DSN compiled in.
+    // 2. The runtime env var `FLUXSYNC_TELEMETRY=1` set by the user.
+    //    Even a DSN-equipped binary stays silent until the user
+    //    explicitly opts in.
+    // `send_default_pii` is also flipped to `false`: even when
+    // enabled, we do not want IP / username / breadcrumb URLs.
+    let _guard = init_sentry();
 
     let args = Args::parse();
     init_tracing(args.verbose);
@@ -125,6 +136,25 @@ async fn main() -> Result<()> {
     });
 
     run(cfg, shutdown).await.context("daemon main loop failed")
+}
+
+/// Initialise Sentry only when both build-time and run-time opt-ins are
+/// present. Returns `None` (no-op) in every other case, including:
+/// * `FLUXSYNC_SENTRY_DSN` not set at build time (forks, source builds);
+/// * `FLUXSYNC_TELEMETRY` unset or any value other than `"1"`.
+fn init_sentry() -> Option<sentry::ClientInitGuard> {
+    if std::env::var("FLUXSYNC_TELEMETRY").ok().as_deref() != Some("1") {
+        return None;
+    }
+    let dsn = option_env!("FLUXSYNC_SENTRY_DSN")?;
+    Some(sentry::init((
+        dsn,
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            send_default_pii: false,
+            ..Default::default()
+        },
+    )))
 }
 
 fn init_tracing(verbose: bool) {

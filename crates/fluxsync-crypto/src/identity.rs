@@ -1,7 +1,10 @@
 use blake3::Hasher;
 use rand_core::OsRng;
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
+
+use crate::error::CryptoError;
 
 /// Long-term identity keypair.
 ///
@@ -35,11 +38,20 @@ impl Identity {
     /// The input is taken by `Zeroizing` so the caller cannot accidentally
     /// keep the unscrubbed copy on the stack after this returns. Bytes are
     /// clamped on the way in (X25519 convention).
-    #[must_use]
-    pub fn from_secret_bytes(bytes: Zeroizing<[u8; 32]>) -> Self {
+    ///
+    /// SE-03: rejects the all-zero key (and would be the right place to
+    /// reject other small-subgroup points). A caller that hits
+    /// `CryptoError::DegenerateKey` has almost certainly stumbled into a
+    /// keystore-read-error fallback path and should regenerate, not paper
+    /// over the failure.
+    #[allow(clippy::needless_pass_by_value)] // intentional: consume + drop scrubs caller's copy
+    pub fn from_secret_bytes(bytes: Zeroizing<[u8; 32]>) -> Result<Self, CryptoError> {
+        if bool::from(bytes.ct_eq(&[0u8; 32])) {
+            return Err(CryptoError::DegenerateKey);
+        }
         let secret = StaticSecret::from(*bytes);
         let public = PublicKey::from(&secret).to_bytes();
-        Self { secret, public }
+        Ok(Self { secret, public })
     }
 
     /// Owned copy of the secret for keychain storage.

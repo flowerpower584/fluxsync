@@ -175,6 +175,11 @@ fn test_06_duplicate_hash_poisoning() {
     );
     app.handle(Event::HandshakeOk, &wall);
 
+    // SE-14: dedup is keyed on payload digest, not on the
+    // peer-controlled `hash` field. Same forged hash + DIFFERENT payload
+    // is NOT deduped — both frames land in history. The intended
+    // behavior change is documented here: an attacker cannot pin a
+    // dedup slot ahead of time to block a future legitimate item.
     let hash = [0xEE; 32];
     app.handle(
         Event::FrameReceivedClipboard {
@@ -187,7 +192,6 @@ fn test_06_duplicate_hash_poisoning() {
         },
         &wall,
     );
-    // Malicious peer sends SAME hash with DIFFERENT content
     app.handle(
         Event::FrameReceivedClipboard {
             hash,
@@ -200,9 +204,14 @@ fn test_06_duplicate_hash_poisoning() {
         &wall,
     );
 
-    // Dedup ring should drop the second one.
-    assert_eq!(app.state.history.len(), 1);
-    assert_eq!(app.state.history[0].preview, "Real");
+    assert_eq!(app.state.history.len(), 2);
+    // The genuine first item must still be present; SE-14 only ensures
+    // the second item isn't dropped on the basis of a forged hash.
+    assert!(app
+        .state
+        .history
+        .iter()
+        .any(|h| h.preview == "Real"));
 }
 
 // =============================================================================
@@ -316,7 +325,11 @@ fn test_09_lamport_jump_to_max() {
         },
         &wall,
     );
-    assert_eq!(app.clock.now(), u64::MAX);
+    // SE-08: hostile `u64::MAX - 1` is clamped to LAMPORT_OBSERVE_MAX,
+    // not saturated at u64::MAX — subsequent local ticks still advance.
+    use fluxsync_core::clock::LAMPORT_OBSERVE_MAX;
+    assert!(app.clock.now() <= LAMPORT_OBSERVE_MAX + 2);
+    assert!(app.clock.now() > LAMPORT_OBSERVE_MAX - 1);
 }
 
 #[test]
@@ -550,9 +563,20 @@ fn test_17_dedup_collision_resistance() {
         &wall,
     );
 
-    // If the hash matches, the second one MUST be ignored regardless of content.
-    assert_eq!(app.state.history.len(), 1);
-    assert_eq!(app.state.history[0].preview, "Content A");
+    // SE-14: dedup keys on payload digest, not on peer-supplied `hash`.
+    // Two frames with the same forged hash but different payloads are
+    // both accepted — the peer no longer controls dedup-ring slots.
+    assert_eq!(app.state.history.len(), 2);
+    assert!(app
+        .state
+        .history
+        .iter()
+        .any(|h| h.preview == "Content A"));
+    assert!(app
+        .state
+        .history
+        .iter()
+        .any(|h| h.preview == "Content B"));
 }
 
 #[test]
@@ -775,7 +799,10 @@ fn test_25_local_clipboard_same_as_peer_ack_loop_prevention() {
     );
     app.handle(Event::HandshakeOk, &wall);
 
-    let hash = [0x77; 32];
+    // SE-14: dedup is keyed on payload digest, so the local-echo path
+    // only suppresses re-sending if the LocalClipboardChange's `hash`
+    // matches `blake3("Shared")` (which the daemon computes itself).
+    let hash = fluxsync_core::DedupRing::hash(b"Shared").into_bytes();
     // 1. Receive from peer
     app.handle(
         Event::FrameReceivedClipboard {
@@ -917,7 +944,21 @@ fn test_30_simulated_sha256_poisoning_in_history() {
         &wall,
     );
 
-    assert_eq!(app.state.history[0].preview, "Original");
+    // SE-14: dedup is by payload digest. The peer's "Poison" payload
+    // has a DIFFERENT real digest from "Original", so it is admitted.
+    // Both items end up in history (newest first); the test now
+    // verifies the original is still there and "Poison" did not
+    // overwrite it — the slot-pinning attack is what SE-14 prevents.
+    assert!(app
+        .state
+        .history
+        .iter()
+        .any(|h| h.preview == "Original"));
+    assert!(app
+        .state
+        .history
+        .iter()
+        .any(|h| h.preview == "Poison"));
 }
 
 #[test]
@@ -1116,10 +1157,15 @@ fn test_39_sensitive_data_then_replay_attack() {
     );
     app.handle(Event::HandshakeOk, &wall);
 
+    // SE-14: the daemon now derives the dedup key from the payload
+    // itself, so the test must use the real BLAKE3 digest of the secret
+    // — that's what the local watcher would have inserted.
+    let real = fluxsync_core::DedupRing::hash(b"MOCK_STRIPE_KEY_REDACTED").into_bytes();
+
     // 1. Copy secret locally (correctly marked sensitive)
     app.handle(
         Event::LocalClipboardChange {
-            hash: [1; 32],
+            hash: real,
             kind: Kind::Text,
             payload: "MOCK_STRIPE_KEY_REDACTED".to_string().into_bytes(),
             preview: "MOCK_STRIPE_KEY_REDACTED".into(),
@@ -1133,7 +1179,7 @@ fn test_39_sensitive_data_then_replay_attack() {
     // 2. Malicious peer tries to REPLAY the same secret but via FrameReceived (which doesn't check sensitivity!)
     app.handle(
         Event::FrameReceivedClipboard {
-            hash: [1; 32],
+            hash: real,
             kind: Kind::Text,
             payload: "MOCK_STRIPE_KEY_REDACTED".to_string().into_bytes(),
             preview: "MOCK_STRIPE_KEY_REDACTED".into(),
@@ -1143,7 +1189,7 @@ fn test_39_sensitive_data_then_replay_attack() {
         &wall,
     );
 
-    // Dedup should catch it because hash is same.
+    // Dedup should catch it because payload digest is the same.
     assert!(app.state.history.is_empty());
 }
 

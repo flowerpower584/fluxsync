@@ -160,7 +160,7 @@ pub async fn run_responder(
     // its own key gets a different `h` and therefore different words, so
     // the user sees the mismatch during the verbal compare.
     let sas_words: [String; 6] = fingerprint_from_handshake_hash(session.handshake_hash())
-        .map(|w| w.to_string());
+        .map(std::string::ToString::to_string);
 
     let peer_id = peer_id_for(&remote_static);
     let mut newly_tofu = false;
@@ -413,7 +413,7 @@ pub const PENDING_REAPER_INTERVAL: Duration = Duration::from_secs(30);
 /// shared hash helper so producers can't accidentally diverge.
 #[must_use]
 pub fn peer_id_for(static_pub: &[u8; 32]) -> [u8; 32] {
-    fluxsync_core::dedup::DedupRing::hash(static_pub)
+    fluxsync_core::dedup::DedupRing::hash(static_pub).into_bytes()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

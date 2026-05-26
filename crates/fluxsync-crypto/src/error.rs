@@ -26,4 +26,11 @@ pub enum CryptoError {
 
     #[error("remote static key not present after handshake")]
     MissingRemoteStatic,
+
+    /// SE-03: `[0u8; 32]` (or any small-subgroup point) is a valid but
+    /// degenerate X25519 secret. A caller that handed this in by mistake
+    /// (e.g. keystore-read-error fallback) would ship a predictable
+    /// identity to the wire.
+    #[error("identity secret is degenerate (all-zero or small-subgroup)")]
+    DegenerateKey,
 }

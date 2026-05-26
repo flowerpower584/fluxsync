@@ -205,7 +205,7 @@ fn read_legacy_identity(path: &Path) -> Result<Identity> {
     // The Vec backing `bytes` also held a copy of the secret — wrap so
     // Drop scrubs it before the buffer is freed.
     let _scrub = zeroize::Zeroizing::new(bytes);
-    Ok(Identity::from_secret_bytes(arr))
+    Identity::from_secret_bytes(arr).context("decode persisted identity bytes")
 }
 
 #[cfg(not(target_os = "android"))]
@@ -231,7 +231,7 @@ fn decode_identity_hex(hex_str: &str) -> Result<Identity> {
     arr.copy_from_slice(&decoded);
     // Wrap the Vec storage so its copy of the secret is scrubbed too.
     let _scrub = zeroize::Zeroizing::new(decoded);
-    Ok(Identity::from_secret_bytes(arr))
+    Identity::from_secret_bytes(arr).context("decode persisted identity bytes")
 }
 
 /// Best-effort secure wipe of a legacy on-disk identity.
@@ -487,9 +487,10 @@ mod tests {
 
         // Garbage hex.
         let bad = "zzzz".repeat(16);
-        if super::decode_identity_hex(&bad).is_ok() {
-            panic!("non-hex must fail");
-        }
+        assert!(
+            super::decode_identity_hex(&bad).is_err(),
+            "non-hex must fail"
+        );
 
         // Round-trip a real 64-char hex.
         let raw = [0xa5u8; 32];

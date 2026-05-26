@@ -9,8 +9,9 @@ use crate::NOISE_PATTERN;
 /// and surfaces as `CryptoError::Handshake`.
 fn snapshot_hash(state: &snow::HandshakeState) -> Result<[u8; HANDSHAKE_HASH_LEN], CryptoError> {
     let h = state.get_handshake_hash();
-    h.try_into()
-        .map_err(|_| CryptoError::Handshake(format!("handshake hash not {HANDSHAKE_HASH_LEN} bytes")))
+    h.try_into().map_err(|_| {
+        CryptoError::Handshake(format!("handshake hash not {HANDSHAKE_HASH_LEN} bytes"))
+    })
 }
 
 /// Buffer size for handshake messages. Noise IK messages are small (~96 B

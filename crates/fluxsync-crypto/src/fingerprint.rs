@@ -85,5 +85,4 @@ mod tests {
         // are identical — proves they cannot be transposed by accident.
         assert_ne!(pk_words, h_words);
     }
-
 }

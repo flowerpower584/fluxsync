@@ -96,13 +96,106 @@ mod sys {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
+// Windows Named Pipe with an explicit DACL — see PIPE_SDDL below.
+// All `unsafe` here wraps Win32 security-descriptor APIs and tokio's
+// raw security-attributes entry point. Every block carries a Safety
+// comment describing the invariants it relies on.
 mod sys {
     use super::{io, Path, PathBuf};
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+    /// SDDL: protected DACL (`P`) that grants `Generic All` to the
+    /// pipe's creator owner (`OW`, the current process user) and to
+    /// `LocalSystem` (`SY`). Without `P`, the DACL would inherit ACEs
+    /// from the parent that could re-add `Authenticated Users`; with
+    /// `P`, only the ACEs listed here apply.
+    ///
+    /// This replaces the named-pipe default DACL (`Authenticated
+    /// Users` get read access, `Everyone` gets read/write via the
+    /// `Anonymous` group on some configs) so a second local account
+    /// cannot send `Push` / `Unpair` / `Revoke` / `PairAccept`
+    /// requests to our IPC.
+    const PIPE_SDDL: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
+
+    /// Holds the security descriptor allocated by Win32; freed on
+    /// drop with `LocalFree` so leaving the daemon does not leak it.
+    /// The `SECURITY_ATTRIBUTES` value we hand to tokio borrows the
+    /// pointer; we keep the descriptor alive for the lifetime of
+    /// `IpcServer`.
+    struct PipeSecurity {
+        sd: *mut c_void,
+        sa: SECURITY_ATTRIBUTES,
+    }
+
+    // Safety: the pointed-at security descriptor is allocated by
+    // `LocalAlloc` (via the conversion function) and freed only on
+    // drop. The struct is never sent or shared across threads in the
+    // server loop.
+    unsafe impl Send for PipeSecurity {}
+    unsafe impl Sync for PipeSecurity {}
+
+    impl PipeSecurity {
+        fn new() -> io::Result<Self> {
+            let sddl_w: Vec<u16> = std::ffi::OsStr::new(PIPE_SDDL)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut sd: *mut c_void = ptr::null_mut();
+            // Safety: `sddl_w` is a NUL-terminated UTF-16 string; the
+            // output pointer is written by the API on success.
+            let ok = unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl_w.as_ptr(),
+                    SDDL_REVISION_1,
+                    std::ptr::addr_of_mut!(sd),
+                    ptr::null_mut(),
+                )
+            };
+            if ok == 0 || sd.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let sa = SECURITY_ATTRIBUTES {
+                nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+                    .expect("SECURITY_ATTRIBUTES fits in u32"),
+                lpSecurityDescriptor: sd,
+                bInheritHandle: 0,
+            };
+            Ok(Self { sd, sa })
+        }
+
+        fn as_ptr(&self) -> *const c_void {
+            std::ptr::from_ref::<SECURITY_ATTRIBUTES>(&self.sa).cast::<c_void>()
+        }
+    }
+
+    impl Drop for PipeSecurity {
+        fn drop(&mut self) {
+            if !self.sd.is_null() {
+                // Safety: `sd` was allocated by `LocalAlloc` inside
+                // `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
+                unsafe {
+                    LocalFree(self.sd.cast());
+                }
+            }
+        }
+    }
 
     pub struct IpcServer {
         path: PathBuf,
         next: tokio::sync::Mutex<NamedPipeServer>,
+        // Kept alive for the lifetime of the server so subsequent
+        // `accept()` calls can hand the same SECURITY_ATTRIBUTES back
+        // to `create_with_security_attributes_raw`.
+        security: PipeSecurity,
     }
 
     pub struct IpcConn {
@@ -110,20 +203,40 @@ mod sys {
     }
 
     impl IpcServer {
+        // `bind` is `async` on every platform to keep the trait surface
+        // identical with the Unix path; the Windows body itself does
+        // no awaiting.
+        #[allow(clippy::unused_async)]
         pub async fn bind(path: &Path) -> io::Result<Self> {
-            let first = ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(path)?;
+            let security = PipeSecurity::new()?;
+            // Safety: `security.as_ptr()` returns a pointer to a
+            // valid `SECURITY_ATTRIBUTES` whose lifetime exceeds the
+            // pipe handle's. tokio dereferences it during creation
+            // and does not retain it.
+            let first = unsafe {
+                ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create_with_security_attributes_raw(path, security.as_ptr().cast_mut())?
+            };
             Ok(Self {
                 path: path.to_path_buf(),
                 next: tokio::sync::Mutex::new(first),
+                security,
             })
         }
 
         pub async fn accept(&self) -> io::Result<IpcConn> {
             let mut lock = self.next.lock().await;
             lock.connect().await?;
-            let stream = std::mem::replace(&mut *lock, ServerOptions::new().create(&self.path)?);
+            // Safety: see `bind`. The same security descriptor is
+            // reused for every subsequent pipe instance.
+            let next = unsafe {
+                ServerOptions::new().create_with_security_attributes_raw(
+                    &self.path,
+                    self.security.as_ptr().cast_mut(),
+                )?
+            };
+            let stream = std::mem::replace(&mut *lock, next);
             Ok(IpcConn { stream })
         }
     }
@@ -136,11 +249,13 @@ impl IpcConn {
     /// because IPC subscribers read commands while the daemon
     /// concurrently pushes state events.
     #[cfg(unix)]
+    #[must_use]
     pub fn split(self) -> (impl AsyncRead + Unpin, impl AsyncWrite + Unpin) {
         self.stream.into_split()
     }
 
     #[cfg(windows)]
+    #[must_use]
     pub fn split(self) -> (impl AsyncRead + Unpin, impl AsyncWrite + Unpin) {
         tokio::io::split(self.stream)
     }

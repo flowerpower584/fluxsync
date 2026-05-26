@@ -67,6 +67,24 @@ pub enum FluxError {
     Invalid(String),
 }
 
+/// SE-05: source of the long-term identity, replacing the older trio of
+/// `keystore_dir` / `identity_secret_b64` empty-string sentinels.
+/// The empty-string overloads silently destroyed pairings when a caller
+/// passed `""` by mistake — a typed enum makes that misuse impossible.
+#[derive(uniffi::Enum)]
+pub enum IdentitySource {
+    /// Generate a fresh keypair on every start.
+    /// **Destroys any existing pairing** — pick this only for first-run
+    /// or "reset device" flows.
+    Generate,
+    /// Load the persisted identity from `dir`, or create+persist a new
+    /// one if none exists. This is the normal mobile path.
+    Keystore { dir: String },
+    /// Decode a base64-encoded 32-byte secret. Testing / migration only —
+    /// production callers should use `Keystore`.
+    SecretBase64 { secret: String },
+}
+
 /// One row of the Logs screen — synthesized at FFI receipt from the
 /// daemon's `LogEntry` plus a monotonic `seq` cursor so the Kotlin side
 /// can ask for "everything since seq N" without re-sending the whole
@@ -107,15 +125,14 @@ pub struct FluxsyncHandle {
 #[allow(clippy::needless_pass_by_value)] // UniFFI requires specific types for code generation
 impl FluxsyncHandle {
     /// Boot the daemon. Returns once the IPC socket is reachable and a
-    /// state-subscriber task is running. `identity_secret_b64 = ""`
-    /// regenerates a fresh keypair on every start.
+    /// state-subscriber task is running. Pass `IdentitySource::Keystore`
+    /// for the normal "remember pairing across reboots" path.
     #[uniffi::constructor]
     pub fn start(
         peer_name: String,
         ipc_path: String,
-        keystore_dir: String,
         udp_port: u16,
-        identity_secret_b64: String,
+        identity: IdentitySource,
     ) -> Result<Arc<Self>, FluxError> {
         android_logger::init_once(
             android_logger::Config::default()
@@ -124,35 +141,54 @@ impl FluxsyncHandle {
         );
         init_trace_bridge();
 
-        let identity = if identity_secret_b64.is_empty() {
-            if keystore_dir.is_empty() {
-                Identity::generate()
-            } else {
-                fluxsyncd::keystore::load_or_create_identity(std::path::Path::new(&keystore_dir))
-                    .map_err(|e| FluxError::Identity(format!("keystore: {e}")))?
+        // SE-05: reject empty peer_name so the daemon never broadcasts
+        // a blank advertisement name (the old API silently accepted it).
+        if peer_name.trim().is_empty() {
+            return Err(FluxError::Invalid("peer_name must not be empty".into()));
+        }
+
+        let (identity_obj, keystore_dir) = match identity {
+            IdentitySource::Generate => (Identity::generate(), None),
+            IdentitySource::Keystore { dir } => {
+                if dir.is_empty() {
+                    return Err(FluxError::Invalid(
+                        "IdentitySource::Keystore.dir must not be empty".into(),
+                    ));
+                }
+                let id =
+                    fluxsyncd::keystore::load_or_create_identity(std::path::Path::new(&dir))
+                        .map_err(|e| FluxError::Identity(format!("keystore: {e}")))?;
+                (id, Some(PathBuf::from(dir)))
             }
-        } else {
-            let bytes = B64
-                .decode(identity_secret_b64.as_bytes())
-                .map_err(|e| FluxError::Identity(format!("base64: {e}")))?;
-            // Wrap the decoded Vec in `Zeroizing` so the heap allocation
-            // is scrubbed once we've copied the bytes into the fixed
-            // array. `try_into()` would otherwise leave a 32-byte
-            // unscrubbed clone behind in the converted array path.
-            let bytes = zeroize::Zeroizing::new(bytes);
-            if bytes.len() != 32 {
-                return Err(FluxError::Identity("expected 32 bytes".into()));
+            IdentitySource::SecretBase64 { secret } => {
+                if secret.is_empty() {
+                    return Err(FluxError::Invalid(
+                        "IdentitySource::SecretBase64.secret must not be empty".into(),
+                    ));
+                }
+                let bytes = B64
+                    .decode(secret.as_bytes())
+                    .map_err(|e| FluxError::Identity(format!("base64: {e}")))?;
+                // Wrap the decoded Vec in `Zeroizing` so the heap
+                // allocation is scrubbed once we've copied the bytes
+                // into the fixed array.
+                let bytes = zeroize::Zeroizing::new(bytes);
+                if bytes.len() != 32 {
+                    return Err(FluxError::Identity("expected 32 bytes".into()));
+                }
+                let mut arr = zeroize::Zeroizing::new([0u8; 32]);
+                arr.copy_from_slice(&bytes);
+                let id = Identity::from_secret_bytes(arr)
+                    .map_err(|e| FluxError::Identity(format!("identity: {e}")))?;
+                (id, None)
             }
-            let mut arr = zeroize::Zeroizing::new([0u8; 32]);
-            arr.copy_from_slice(&bytes);
-            Identity::from_secret_bytes(arr)
         };
 
         let ipc_path = PathBuf::from(ipc_path);
-        let mut cfg = DaemonConfig::new(identity, udp_port, ipc_path.clone());
+        let mut cfg = DaemonConfig::new(identity_obj, udp_port, ipc_path.clone());
         cfg.peer_name_self = peer_name;
-        if !keystore_dir.is_empty() {
-            cfg.keystore_dir = Some(PathBuf::from(keystore_dir));
+        if let Some(dir) = keystore_dir {
+            cfg.keystore_dir = Some(dir);
             cfg.start_on = true; // Auto-start sync if we have a keystore
         }
 

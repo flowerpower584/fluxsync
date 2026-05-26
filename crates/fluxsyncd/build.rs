@@ -30,8 +30,7 @@ fn build_id() -> String {
     let dirty = Command::new("git")
         .args(["diff", "--quiet", "--ignore-submodules"])
         .status()
-        .map(|s| !s.success())
-        .unwrap_or(false);
+        .is_ok_and(|s| !s.success());
 
     if dirty {
         format!("{hash}-dirty")

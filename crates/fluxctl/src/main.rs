@@ -297,10 +297,7 @@ fn render_pair_pending(resp: &Value) {
     for e in entries {
         let id = e.get("peer_id").and_then(Value::as_str).unwrap_or("?");
         let name = e.get("name").and_then(Value::as_str).unwrap_or("");
-        let addr = e
-            .get("addr")
-            .and_then(Value::as_str)
-            .unwrap_or("(unknown)");
+        let addr = e.get("addr").and_then(Value::as_str).unwrap_or("(unknown)");
         let words = e
             .get("sas_words")
             .and_then(Value::as_array)

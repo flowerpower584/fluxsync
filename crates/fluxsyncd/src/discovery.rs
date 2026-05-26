@@ -153,7 +153,7 @@ async fn browse_loop(
                             .get_addresses()
                             .iter()
                             .next()
-                            .map(|sip| sip.to_ip_addr())
+                            .map(mdns_sd::ScopedIp::to_ip_addr)
                         else { continue };
                         let port = info.get_port();
                         let sock_addr = std::net::SocketAddr::new(ip, port);

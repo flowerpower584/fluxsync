@@ -198,7 +198,9 @@ async fn pair_confirm_accept_drops_pending_keeps_trusted() {
     // Wait for the test_pair injection events to settle so the App
     // snapshot reflects `peer_name = "device-peer"`.
     let linked_pre = wait_until(Duration::from_secs(1), || async {
-        linked_peer_names(&ipc).await.contains(&"device-peer".to_string())
+        linked_peer_names(&ipc)
+            .await
+            .contains(&"device-peer".to_string())
     })
     .await;
     assert!(linked_pre, "expected linked peer before PairConfirm");
@@ -228,7 +230,9 @@ async fn pair_confirm_accept_drops_pending_keeps_trusted() {
     // Trust survived: ManualUnpair was NOT fired, so the linked peer is
     // still reported.
     assert!(
-        linked_peer_names(&ipc).await.contains(&"device-peer".to_string()),
+        linked_peer_names(&ipc)
+            .await
+            .contains(&"device-peer".to_string()),
         "linked peer must survive accept"
     );
 
@@ -241,7 +245,9 @@ async fn pair_confirm_reject_drops_pending_and_revokes_trust() {
     let (ipc, shutdown, h, peer_id_hex) = spawn_daemon_with_pending().await;
 
     let linked_pre = wait_until(Duration::from_secs(1), || async {
-        linked_peer_names(&ipc).await.contains(&"device-peer".to_string())
+        linked_peer_names(&ipc)
+            .await
+            .contains(&"device-peer".to_string())
     })
     .await;
     assert!(linked_pre, "expected linked peer before PairConfirm");

@@ -111,6 +111,34 @@ pub enum RecvFrame {
     },
 }
 
+impl RecvFrame {
+    /// Source `SocketAddr` of the datagram, regardless of frame kind.
+    /// Used by the driver to apply a uniform `lan_only` filter before
+    /// any further dispatch.
+    #[must_use]
+    pub fn from(&self) -> SocketAddr {
+        match self {
+            Self::HandshakeInit { from, .. }
+            | Self::HandshakeResp { from, .. }
+            | Self::Encrypted { from, .. }
+            | Self::Other { from, .. } => *from,
+        }
+    }
+
+    /// Short label used in `tracing` events when a frame is dropped
+    /// for policy reasons — keeps the log line readable without
+    /// dumping the entire payload.
+    #[must_use]
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::HandshakeInit { .. } => "HandshakeInit",
+            Self::HandshakeResp { .. } => "HandshakeResp",
+            Self::Encrypted { .. } => "Encrypted",
+            Self::Other { .. } => "Other",
+        }
+    }
+}
+
 impl Transport {
     pub async fn bind(bind: &str, port: u16) -> Result<(Self, u16)> {
         let addr = format!("{bind}:{port}");

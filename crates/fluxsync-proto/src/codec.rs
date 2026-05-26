@@ -328,4 +328,83 @@ mod tests {
         let err = decode(truncated).unwrap_err();
         assert!(matches!(err, ProtoError::Cbor(_)));
     }
+
+    // SE-02 regression: every wire struct rejects unknown CBOR map keys.
+    // Catches a peer that smuggles extra fields past the schema — either a
+    // future-version mistake (forward-compat must be explicit) or an
+    // attacker probing the parser. We build a shadow struct with an extra
+    // `__attacker_field` and confirm `decode` errors.
+    #[test]
+    fn rejects_unknown_field_in_clipboard_item() {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct EvilItem {
+            lamport: u64,
+            hash: [u8; 32],
+            kind: Kind,
+            payload: Vec<u8>,
+            sensitive: bool,
+            wall_time_ms: u64,
+            __attacker_field: u32,
+        }
+
+        #[derive(Serialize)]
+        enum EvilMsg {
+            ClipboardItem(EvilItem),
+        }
+
+        #[derive(Serialize)]
+        struct EvilFrame {
+            version: u8,
+            msg: EvilMsg,
+        }
+
+        let evil = EvilFrame {
+            version: PROTOCOL_VERSION,
+            msg: EvilMsg::ClipboardItem(EvilItem {
+                lamport: 1,
+                hash: [0; 32],
+                kind: Kind::Text,
+                payload: b"hi".to_vec(),
+                sensitive: false,
+                wall_time_ms: 0,
+                __attacker_field: 0xDEAD_BEEF,
+            }),
+        };
+
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&evil, &mut bytes).unwrap();
+        let err = decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, ProtoError::Cbor(_)),
+            "expected CBOR deserialization error from unknown field, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_field_in_frame() {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct EvilFrame {
+            version: u8,
+            msg: Msg,
+            __attacker_field: u32,
+        }
+
+        let evil = EvilFrame {
+            version: PROTOCOL_VERSION,
+            msg: Msg::Bye,
+            __attacker_field: 0xDEAD_BEEF,
+        };
+
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&evil, &mut bytes).unwrap();
+        let err = decode(&bytes).unwrap_err();
+        assert!(
+            matches!(err, ProtoError::Cbor(_)),
+            "expected CBOR deserialization error from unknown field, got {err:?}"
+        );
+    }
 }

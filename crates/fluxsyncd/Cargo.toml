@@ -9,7 +9,11 @@ repository.workspace = true
 description = "FluxSync daemon: tokio runtime, UDP transport, IPC, clipboard, battery."
 
 [lints.rust]
-unsafe_code = "forbid"
+# `deny` (not `forbid`) so the Windows IPC module can opt-in via
+# `#[allow(unsafe_code)]` to call `CreateNamedPipeW`-style APIs with
+# explicit DACLs. Every other module stays `unsafe`-free; the allow
+# attribute is reviewed at the call site, not blanket-enabled.
+unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
@@ -77,3 +81,17 @@ tokio = { version = "1", features = ["test-util"] }
 [[bin]]
 name = "fluxsyncd"
 path = "src/main.rs"
+
+# Windows-only — used by `ipc.rs` to build an explicit DACL that
+# restricts the Named Pipe to the current process owner only (default
+# DACL grants Authenticated Users read access). Kept at the very end
+# of the manifest: putting a `[target.'cfg(...)']` table above the
+# `[[bin]]` block would silently scope `[[bin]]` to that cfg too
+# (TOML section headers inherit until the next header).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Memory",
+] }

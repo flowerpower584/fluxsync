@@ -1,3 +1,7 @@
+// Image dims (image crate caps), packet idx (u16-bounded), and saturated
+// durations are the cast sources here — all safe at runtime.
+#![allow(clippy::cast_possible_truncation)]
+
 //! Daemon driver — composes [`fluxsync_core::App`] with IPC, transport,
 //! mDNS discovery, and the Noise IK handshake.
 //!
@@ -256,8 +260,18 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let pending_pairs_for_recv = pending_pairs.clone();
         tasks.spawn(async move {
             transport_recv_loop(
-                transport, identity, trusted, window, pending, event_tx, shutdown, kd, metrics,
-                inflight, pending_pairs_for_recv, lan_only_handshakes,
+                transport,
+                identity,
+                trusted,
+                window,
+                pending,
+                event_tx,
+                shutdown,
+                kd,
+                metrics,
+                inflight,
+                pending_pairs_for_recv,
+                lan_only_handshakes,
             )
             .await
         });
@@ -456,7 +470,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                         );
                         dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight).await;
                     }
-                    run_cmd => {
+                    run_cmd @ DriverCmd::Run { .. } => {
                         handle_driver_cmd(
                             run_cmd,
                             &mut app,
@@ -573,9 +587,10 @@ async fn dispatch(
                         version: PROTOCOL_VERSION,
                         msg: Msg::ClipboardItem(item),
                     };
-                    match fluxsync_proto::encode(&frame) {
-                        Ok(bytes) => frames.push(bytes),
-                        Err(_) => tracing::error!("SendItem: CBOR encode failed"),
+                    if let Ok(bytes) = fluxsync_proto::encode(&frame) {
+                        frames.push(bytes);
+                    } else {
+                        tracing::error!("SendItem: CBOR encode failed");
                     }
                 } else {
                     // Large payload: a header frame (empty payload), then
@@ -675,63 +690,10 @@ async fn dispatch(
                 // UTF-8 for text, RGBA pixels for images) so it matches
                 // what the watcher computes on read-back — a re-encoded
                 // PNG would hash differently.
-                match kind {
-                    Kind::Image => {
-                        #[cfg(not(target_os = "android"))]
-                        match decode_png_to_rgba(&payload) {
-                            Some((w, h, rgba)) => {
-                                let hash = image_rgba_hash(w, h, &rgba);
-                                {
-                                    let mut g = last_written_hashes.lock().await;
-                                    g.push_back(hash);
-                                    if g.len() > 10 {
-                                        g.pop_front();
-                                    }
-                                }
-                                tokio::task::spawn_blocking(move || {
-                                    match arboard::Clipboard::new() {
-                                        Ok(mut cb) => {
-                                            let img = arboard::ImageData {
-                                                width: w as usize,
-                                                height: h as usize,
-                                                bytes: std::borrow::Cow::Owned(rgba),
-                                            };
-                                            if let Err(e) = cb.set_image(img) {
-                                                tracing::warn!(error = %e, "clipboard set_image failed");
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "clipboard init failed");
-                                        }
-                                    }
-                                });
-                            }
-                            None => tracing::warn!("WriteClipboard: PNG decode failed"),
-                        }
-                        #[cfg(target_os = "android")]
-                        {
-                            // Android can't put raw bytes on the OS
-                            // clipboard, so the daemon stashes the PNG under
-                            // its hex hash; the client pulls it via the
-                            // `fetch_item` IPC op once the matching history
-                            // row appears. The hash is recomputed off the
-                            // decoded RGBA so it matches `HistoryItem::hash`
-                            // (sender-side `image_rgba_hash`, stable across
-                            // the PNG round-trip).
-                            match decode_png_to_rgba(&payload) {
-                                Some((w, h, rgba)) => {
-                                    let hash = image_rgba_hash(w, h, &rgba);
-                                    cache_image(hex::encode(hash), payload);
-                                }
-                                None => {
-                                    tracing::warn!("WriteClipboard(android): PNG decode failed");
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        let text = String::from_utf8_lossy(&payload).to_string();
-                        let hash = clipboard_dedup_hash(&text);
+                if matches!(kind, Kind::Image) {
+                    #[cfg(not(target_os = "android"))]
+                    if let Some((w, h, rgba)) = decode_png_to_rgba(&payload) {
+                        let hash = image_rgba_hash(w, h, &rgba);
                         {
                             let mut g = last_written_hashes.lock().await;
                             g.push_back(hash);
@@ -739,22 +701,66 @@ async fn dispatch(
                                 g.pop_front();
                             }
                         }
-                        #[cfg(not(target_os = "android"))]
                         tokio::task::spawn_blocking(move || match arboard::Clipboard::new() {
                             Ok(mut cb) => {
-                                if let Err(e) = cb.set_text(text) {
-                                    tracing::warn!(error = %e, "clipboard set_text failed");
+                                let img = arboard::ImageData {
+                                    width: w as usize,
+                                    height: h as usize,
+                                    bytes: std::borrow::Cow::Owned(rgba),
+                                };
+                                if let Err(e) = cb.set_image(img) {
+                                    tracing::warn!(error = %e, "clipboard set_image failed");
                                 }
                             }
-                            Err(e) => tracing::warn!(error = %e, "clipboard init failed"),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "clipboard init failed");
+                            }
                         });
-                        #[cfg(target_os = "android")]
-                        {
-                            // Android writes the OS clipboard from
-                            // `MainActivity`; the daemon just records the
-                            // hash for dedup symmetry with desktop.
-                            let _ = text;
+                    } else {
+                        tracing::warn!("WriteClipboard: PNG decode failed");
+                    }
+                    #[cfg(target_os = "android")]
+                    {
+                        // Android can't put raw bytes on the OS
+                        // clipboard, so the daemon stashes the PNG under
+                        // its hex hash; the client pulls it via the
+                        // `fetch_item` IPC op once the matching history
+                        // row appears. The hash is recomputed off the
+                        // decoded RGBA so it matches `HistoryItem::hash`
+                        // (sender-side `image_rgba_hash`, stable across
+                        // the PNG round-trip).
+                        if let Some((w, h, rgba)) = decode_png_to_rgba(&payload) {
+                            let hash = image_rgba_hash(w, h, &rgba);
+                            cache_image(hex::encode(hash), payload);
+                        } else {
+                            tracing::warn!("WriteClipboard(android): PNG decode failed");
                         }
+                    }
+                } else {
+                    let text = String::from_utf8_lossy(&payload).to_string();
+                    let hash = clipboard_dedup_hash(&text);
+                    {
+                        let mut g = last_written_hashes.lock().await;
+                        g.push_back(hash);
+                        if g.len() > 10 {
+                            g.pop_front();
+                        }
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    tokio::task::spawn_blocking(move || match arboard::Clipboard::new() {
+                        Ok(mut cb) => {
+                            if let Err(e) = cb.set_text(text) {
+                                tracing::warn!(error = %e, "clipboard set_text failed");
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "clipboard init failed"),
+                    });
+                    #[cfg(target_os = "android")]
+                    {
+                        // Android writes the OS clipboard from
+                        // `MainActivity`; the daemon just records the
+                        // hash for dedup symmetry with desktop.
+                        let _ = text;
                     }
                 }
             }
@@ -938,7 +944,7 @@ async fn handle_driver_cmd(
             if !text.is_empty() {
                 let kind = kind_of(&text);
                 let sensitive = fluxsync_core::is_sensitive(&text);
-                let hash = DedupRing::hash(text.as_bytes());
+                let hash = DedupRing::hash(text.as_bytes()).into_bytes();
                 let lamport = app.clock.tick();
                 let actions = app.handle(
                     Event::LocalClipboardChange {
@@ -1710,12 +1716,31 @@ async fn transport_recv_loop(
                         continue;
                     }
                 };
+                // H2 (Phase 3 audit): uniform `lan_only` filter applied
+                // to EVERY frame, not just `HandshakeInit`. The UDP
+                // socket binds 0.0.0.0 by default so multi-NIC users
+                // get LAN reachability without configuration, but that
+                // also exposes the Noise / replay-window state to WAN
+                // probes. We drop non-local sources here, before any
+                // decrypt or Noise step touches them.
+                if lan_only_handshakes && !crate::config::is_local_ip(frame.from().ip()) {
+                    tracing::warn!(
+                        src = %frame.from(),
+                        kind = frame.kind_label(),
+                        "frame dropped: non-local source (lan_only)"
+                    );
+                    continue;
+                }
                 match frame {
                     RecvFrame::HandshakeInit { from, msg } => {
                         // FS-059: refuse handshakes from public-internet
                         // sources by default. LAN clipboard sync has no
                         // legitimate WAN peer; a routable IP here is
                         // almost certainly a scanner.
+                        // (The blanket LAN filter above already covers
+                        // this; the explicit check is retained as a
+                        // defense-in-depth assertion in case someone
+                        // later moves the filter or flips its scope.)
                         if lan_only_handshakes && !crate::config::is_local_ip(from.ip()) {
                             tracing::warn!(
                                 src = %from,
@@ -1808,7 +1833,7 @@ async fn transport_recv_loop(
 /// Dedup hash over the *trimmed* clipboard text, so the write side and
 /// the watcher (which trims before hashing) agree — see FS-026.
 fn clipboard_dedup_hash(text: &str) -> [u8; 32] {
-    DedupRing::hash(text.trim().as_bytes())
+    DedupRing::hash(text.trim().as_bytes()).into_bytes()
 }
 
 /// Build the history label for a clipboard payload. Text-like kinds show
@@ -1831,7 +1856,7 @@ fn image_rgba_hash(width: u32, height: u32, rgba: &[u8]) -> [u8; 32] {
     buf.extend_from_slice(&width.to_le_bytes());
     buf.extend_from_slice(&height.to_le_bytes());
     buf.extend_from_slice(rgba);
-    DedupRing::hash(&buf)
+    DedupRing::hash(&buf).into_bytes()
 }
 
 /// Process-global cache of recently-received image payloads, keyed by hex
@@ -3012,14 +3037,22 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new()));
         let inflight = Arc::new(Mutex::new(HashMap::new()));
         let metrics = Arc::new(Mutex::new(MetricsTracker::new()));
-        let pending_pairs: crate::handshake::PendingSet =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
 
         let frame = Frame {
             version: PROTOCOL_VERSION,
             msg: Msg::Bye,
         };
-        dispatch_inbound_frame(frame, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs).await;
+        dispatch_inbound_frame(
+            frame,
+            &event_tx,
+            &transport,
+            &reassembly,
+            &metrics,
+            &inflight,
+            &pending_pairs,
+        )
+        .await;
 
         assert!(
             matches!(event_rx.try_recv(), Ok(Event::PeerLost)),

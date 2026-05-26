@@ -7,7 +7,7 @@
 
 #![cfg(unix)]
 
-use fluxsync_mobile_ffi::FluxsyncHandle;
+use fluxsync_mobile_ffi::{FluxsyncHandle, IdentitySource};
 
 fn pick_free_udp_port() -> u16 {
     let s = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
@@ -23,9 +23,8 @@ fn ffi_roundtrip_push_text_observes_state() {
     let handle = FluxsyncHandle::start(
         "host-test".into(),
         ipc.to_string_lossy().into_owned(),
-        String::new(), // keystore_dir empty = ephemeral
         port,
-        String::new(), // empty = generate fresh keypair
+        IdentitySource::Generate,
     )
     .expect("start");
 
@@ -58,9 +57,8 @@ fn ffi_rejects_invalid_threshold() {
     let handle = FluxsyncHandle::start(
         "host-test".into(),
         ipc.to_string_lossy().into_owned(),
-        String::new(), // keystore_dir empty = ephemeral
         port,
-        String::new(),
+        IdentitySource::Generate,
     )
     .expect("start");
 
@@ -81,11 +79,28 @@ fn ffi_rejects_bad_identity_b64() {
     let res = FluxsyncHandle::start(
         "host-test".into(),
         ipc.to_string_lossy().into_owned(),
-        String::new(), // keystore_dir empty = ephemeral
         port,
-        "not-base64-!!".into(),
+        IdentitySource::SecretBase64 {
+            secret: "not-base64-!!".into(),
+        },
     );
     assert!(res.is_err(), "expected InvalidIdentity error");
+}
+
+#[test]
+fn ffi_rejects_empty_peer_name() {
+    // SE-05: empty peer_name used to be accepted silently — the daemon
+    // would then advertise a blank mDNS service. Now it errors out.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ipc = dir.path().join("ffi-pn.sock");
+    let port = pick_free_udp_port();
+    let res = FluxsyncHandle::start(
+        "   ".into(),
+        ipc.to_string_lossy().into_owned(),
+        port,
+        IdentitySource::Generate,
+    );
+    assert!(res.is_err(), "expected Invalid error for empty peer_name");
 }
 
 /// FS-051 regression: `stop()` must always return.
@@ -108,9 +123,8 @@ fn ffi_stop_is_prompt_under_repeated_cycles() {
             let handle = FluxsyncHandle::start(
                 "host-test".into(),
                 ipc.to_string_lossy().into_owned(),
-                String::new(),
                 port,
-                String::new(),
+                IdentitySource::Generate,
             )
             .expect("start");
             // Exercise the IPC path so a handler task is in flight near

@@ -236,6 +236,7 @@ fn rect_fill(buf: &mut [u8], size: u32, x1: i32, y1: i32, x2: i32, y2: i32, rgba
 /// rect. Concentric loops shrink the rectangle inward by 1px on each
 /// iteration, which matches an SVG stroke with `stroke-alignment:
 /// inside` better than centred strokes do.
+#[allow(clippy::too_many_arguments)]
 fn rect_outline(
     buf: &mut [u8],
     size: u32,

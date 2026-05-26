@@ -13,10 +13,46 @@ use std::collections::VecDeque;
 /// 50 in RAM to absorb burst-mode reconnects without re-sending duplicates.
 pub const DEDUP_CAPACITY: usize = 50;
 
+/// SE-14: a 32-byte BLAKE3 content digest. Constructible only via
+/// [`DedupRing::hash`] (or [`ContentHash::from_blake3`] for explicit
+/// migration paths) so a caller cannot pass an attacker-controlled
+/// `ClipboardItem.hash` straight into [`DedupRing::observe`] — that
+/// transposition would let a peer pick which hash keys the dedup ring,
+/// poisoning history with a chosen-collision payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContentHash([u8; 32]);
+
+impl ContentHash {
+    /// Borrow the raw digest bytes for wire serialization / tracing.
+    /// **Do not** round-trip a foreign `[u8;32]` back into `ContentHash`
+    /// through this — go through [`DedupRing::hash`].
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Explicit constructor for the rare callers that already hold a
+    /// BLAKE3 digest computed by [`DedupRing::hash`] (e.g. tests that
+    /// reuse a fixed seed array). Mirrors the same invariant: the
+    /// caller asserts these bytes ARE a BLAKE3 of some payload.
+    #[must_use]
+    pub fn from_blake3(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Consume the newtype and return the raw 32 digest bytes — for
+    /// daemon-side uses that have to write the hash into a wire field
+    /// (`ClipboardItem.hash`, `peer_id`, etc.).
+    #[must_use]
+    pub fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DedupRing {
     capacity: usize,
-    inner: VecDeque<[u8; 32]>,
+    inner: VecDeque<ContentHash>,
 }
 
 impl Default for DedupRing {
@@ -39,7 +75,10 @@ impl DedupRing {
     ///   * `true` — newly inserted; caller should treat the item as fresh.
     ///   * `false` — already present in the last `capacity` items; caller
     ///     should drop / ack the duplicate.
-    pub fn observe(&mut self, hash: [u8; 32]) -> bool {
+    ///
+    /// Accepts only [`ContentHash`] (SE-14) so a caller cannot smuggle a
+    /// peer-controlled `[u8; 32]` (e.g. `ClipboardItem.hash`) in here.
+    pub fn observe(&mut self, hash: ContentHash) -> bool {
         if self.inner.contains(&hash) {
             return false;
         }
@@ -51,7 +90,7 @@ impl DedupRing {
     }
 
     #[must_use]
-    pub fn contains(&self, hash: &[u8; 32]) -> bool {
+    pub fn contains(&self, hash: &ContentHash) -> bool {
         self.inner.contains(hash)
     }
 
@@ -68,8 +107,8 @@ impl DedupRing {
     /// Compute a BLAKE3 hash of `bytes` for use with `observe`. Centralized
     /// so producers can't accidentally use a different hash.
     #[must_use]
-    pub fn hash(bytes: &[u8]) -> [u8; 32] {
-        *blake3::hash(bytes).as_bytes()
+    pub fn hash(bytes: &[u8]) -> ContentHash {
+        ContentHash(*blake3::hash(bytes).as_bytes())
     }
 }
 
@@ -77,8 +116,8 @@ impl DedupRing {
 mod tests {
     use super::*;
 
-    fn h(seed: u8) -> [u8; 32] {
-        [seed; 32]
+    fn h(seed: u8) -> ContentHash {
+        ContentHash::from_blake3([seed; 32])
     }
 
     #[test]
@@ -133,5 +172,19 @@ mod tests {
         let c = DedupRing::hash(b"world");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn se14_cannot_observe_peer_controlled_array_directly() {
+        // SE-14 regression: `DedupRing::observe` MUST refuse a raw
+        // `[u8; 32]` from a peer wire frame. The type signature is the
+        // enforcement here — this test exists to fail the build (not at
+        // runtime) the day someone deletes the newtype.
+        let mut r = DedupRing::default();
+        let peer_supplied: [u8; 32] = [0xAA; 32];
+        // The next line MUST NOT compile if uncommented:
+        // r.observe(peer_supplied);
+        // The right shape — caller has to acknowledge "this is a digest":
+        assert!(r.observe(ContentHash::from_blake3(peer_supplied)));
     }
 }

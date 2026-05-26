@@ -44,11 +44,18 @@ pub struct DaemonConfig {
     /// `PairConfirm` without running the real handshake. Production
     /// binaries always set this to `None`.
     pub test_pending_pair: Option<TestPendingPair>,
-    /// FS-059: reject `HandshakeInit` datagrams whose source IP is not on
-    /// a private / link-local / loopback range. Default `true` because the
-    /// product is LAN clipboard sync — a handshake from a routable WAN
-    /// address is almost certainly hostile. Users who genuinely want
-    /// public-internet pairing (VPN, IPv6 ULAs, etc.) can flip this off.
+    /// FS-059 + H2 (Phase 3 audit): reject EVERY UDP datagram whose
+    /// source IP is not on a private / link-local / loopback range.
+    /// Default `true` because the product is LAN clipboard sync —
+    /// any routable WAN source is almost certainly hostile and would
+    /// otherwise reach the Noise parser, the replay window, or the
+    /// `mdns-sd` packet decoder.
+    ///
+    /// Despite the field name (kept for compat), the filter is no
+    /// longer scoped to handshakes — see `driver::run`'s receive
+    /// loop. Users who genuinely want public-internet pairing (VPN,
+    /// IPv6 ULAs, etc.) can flip this off and accept that all four
+    /// `RecvFrame` variants will then be processed from any source.
     pub lan_only_handshakes: bool,
 }
 
@@ -87,9 +94,7 @@ impl DaemonConfig {
 #[must_use]
 pub fn is_local_ip(ip: std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local()
-        }
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
         std::net::IpAddr::V6(v6) => {
             v6.is_loopback()
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
