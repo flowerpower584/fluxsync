@@ -7,7 +7,10 @@
 html, body {
   margin: 0;
   padding: 0;
-  background: transparent;
+  /* Decorated dock window (not a borderless popup): the window has a solid
+     system backdrop, so a transparent body let the white show through below
+     the content. Paint the body with the theme background. */
+  background: var(--fs-bg);
   color: var(--fs-fg);
   font-size: 12px;
   overflow: hidden;
@@ -25,17 +28,11 @@ body[data-os="windows"][data-theme="light"] { background: #FFFFFF; }
 .mono { font-family: var(--fs-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; }
 
 .tray-container {
-  width: 360px;
+  width: 100%;
+  min-height: 100vh;
   background: var(--fs-surface);
-  border: 1px solid var(--fs-border);
-  border-radius: 8px;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.18), 0 2px 6px rgba(0,0,0,0.08);
   display: flex;
   flex-direction: column;
-}
-
-[data-theme="dark"] .tray-container {
-  box-shadow: 0 12px 40px rgba(0,0,0,0.6), 0 2px 6px rgba(0,0,0,0.3);
 }
 
 /* ── Header ────────────────────────────────────────────────────── */
@@ -168,7 +165,35 @@ body[data-os="windows"][data-theme="light"] { background: #FFFFFF; }
 }
 
 /* ── History Section ───────────────────────────────────────────── */
-.history-section { padding: 10px 14px 8px; }
+.history-section { padding: 10px 14px 8px; flex: 1 1 auto; }
+
+/* ── Pairing entry (unpaired single-window state) ──────────────── */
+.pairing-entry {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px 18px;
+  text-align: center;
+}
+.pairing-entry .pair-empty-glyph { font-size: 30px; color: var(--fs-subtle); line-height: 1; }
+.pairing-entry .pair-hint { margin: 0; color: var(--fs-muted); font-size: 12px; }
+.pair-cta {
+  appearance: none;
+  border: none;
+  background: var(--fs-ok);
+  color: #fff;
+  font-family: var(--fs-ui);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 10px 22px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity .15s ease;
+}
+.pair-cta:hover { opacity: 0.9; }
 .history-list { display: flex; flex-direction: column; gap: 2px; }
 
 .history-item {

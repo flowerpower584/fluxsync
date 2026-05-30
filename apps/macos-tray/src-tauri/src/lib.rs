@@ -220,16 +220,23 @@ fn fluxsync_open_settings(app: tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        // Tray-app convention: closing a window hides it instead of
-        // tearing down the app. Without this, WebView2 on Windows shows
-        // a fallback close button (the `decorations: false` flag is not
-        // honoured on ARM64) and clicking it would otherwise destroy the
-        // WebView while leaving `fluxsyncd` running — the user perceives
-        // it as "the X does nothing" because the tray icon is still
-        // there but the popup is dead.
+        // Window-close policy. The main "menu" window is the app's primary
+        // window (dock app): clicking its close button quits FluxSync. The
+        // auxiliary "settings"/"pair" windows just hide so they can be
+        // reopened (they are pre-declared once at boot).
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
+                // Dock app: the close button never quits. The primary
+                // "menu" window parks off-screen (hide_menu keeps the
+                // WKWebView painted so re-show is instant, not white); the
+                // auxiliary windows just hide. Quit via Cmd-Q or the tray
+                // menu. Clicking the Dock icon re-shows the menu window
+                // (see RunEvent::Reopen in run()).
+                if window.label() == "menu" {
+                    hide_menu(window.app_handle());
+                } else {
+                    let _ = window.hide();
+                }
                 api.prevent_close();
             }
         })
@@ -240,10 +247,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            let _ = app.get_webview_window("menu").map(|w| {
-                let _ = w.show();
-                let _ = w.set_focus();
-            });
+            show_menu(app);
         }))
         .invoke_handler(tauri::generate_handler![
             fluxsync_status,
@@ -266,6 +270,21 @@ pub fn run() {
             fluxsync_open_url,
         ])
         .setup(|app| {
+            // Regular dock app: the main "menu" window is a normal
+            // decorated window (see tauri.conf.json) that shows on launch
+            // and lives in the Dock. The "Show in Dock" setting can flip
+            // to Accessory at runtime for users who want a menu-bar-only
+            // presence (see `fluxsync_set_show_in_dock`).
+            //
+            // Force Regular explicitly: depending on how the bundle is
+            // launched (LaunchAgent autostart, stale Accessory state) the
+            // Dock icon can otherwise go missing. This guarantees it shows.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::ActivationPolicy;
+                let _ = app.handle().set_activation_policy(ActivationPolicy::Regular);
+            }
+
             // Make the tray app self-sufficient: probe the daemon's
             // UNIX socket and, if missing, spawn `fluxsyncd` detached
             // before the rest of `setup()` runs. Synchronous (≤ 3s) so
@@ -336,25 +355,35 @@ pub fn run() {
                             .unwrap_or("")
                             .to_string();
                         
-                        // 1a. Check for peer name change (for QR window closing)
-                        // 1a. Check for peer name change (for QR window closing)
-                        if !name.is_empty() {
+                        // 1a. Fire `pairing-success` only on a real
+                        // unpaired→paired transition. `last_name` is reset to
+                        // None whenever the daemon reports no peer, so the SAME
+                        // device re-pairing after an unpair still counts as a
+                        // fresh transition (fixes "can't scan after reset").
+                        // Emitting on every name *change* caused the premature
+                        // "Successfully paired" with no scan.
+                        {
                             let mut guard = ln.lock().unwrap();
-                            let should_emit = match &*guard {
-                                // [FIX] Zero-Day: Always emit if we went from "pending" to a real name,
-                                // or if the name changed. The old logic prevented emitting if the Android
-                                // rejoined with the EXACT SAME NAME as the previous session!
-                                Some(prev_name) => prev_name.is_empty() || prev_name == "pending" || prev_name != &name,
-                                None => true,
-                            };
-
-                            if should_emit && name != "pending" {
-                                *guard = Some(name.clone());
-                                drop(guard);
-                                eprintln!("[fluxsync-tray] pairing-success emitted: {name}");
-                                let _ = ah.emit("pairing-success", name.clone());
+                            if name.is_empty() {
+                                // Unpaired / session reset → re-arm.
+                                *guard = None;
                             } else if name == "pending" {
                                 *guard = Some(name.clone());
+                            } else {
+                                let was_unpaired = match &*guard {
+                                    None => true,
+                                    Some(p) => p.is_empty() || p == "pending",
+                                };
+                                *guard = Some(name.clone());
+                                if was_unpaired {
+                                    drop(guard);
+                                    eprintln!("[fluxsync-tray] pairing-success emitted: {name}");
+                                    let _ = ah.emit("pairing-success", name.clone());
+                                    // Pair window closes itself on success; bring the
+                                    // menu back so the user lands on the dashboard
+                                    // (single-window: never leave zero windows).
+                                    show_menu(&ah);
+                                }
                             }
                         }
 
@@ -476,15 +505,16 @@ pub fn run() {
                     }
                     _ => {}
                 })
-                .on_tray_icon_event(|tray, event| match event {
-                    TrayIconEvent::Click {
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
+                        rect,
                         ..
-                    } => {
-                        toggle_popup(tray.app_handle());
+                    } = event
+                    {
+                        toggle_popup(tray.app_handle(), Some(rect));
                     }
-                    _ => {}
                 });
 
             // macOS: render the glyph as a template image so it tracks
@@ -498,36 +528,96 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            // macOS: clicking the Dock icon while the menu window is parked
+            // off-screen (or the app has no visible window) fires Reopen.
+            // Bring the menu window back on-screen, centred and focused.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_menu(_app);
+            }
+        });
 }
 
-/// Show or hide the borderless 360 × 540 popup that lives at
-/// `src/index.html`. The window is created hidden in
-/// `tauri.conf.json` so first-show is just `.show()`.
-fn toggle_popup<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+const MENU_W: f64 = 360.0;
+const MENU_H: f64 = 540.0;
+
+// macOS only: tracks whether the menu window is logically shown, so the
+// tray-icon click can toggle it. We use a real `hide()` (not off-screen
+// parking): a Dock app must have ZERO visible windows when dismissed,
+// otherwise clicking the Dock icon won't fire `RunEvent::Reopen` and the
+// window can never be brought back.
+#[cfg(target_os = "macos")]
+static MENU_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Bring the menu window on-screen, centred and focused.
+fn show_menu(app: &tauri::AppHandle) {
+    let Some(w) = app.get_webview_window("menu") else {
+        return;
+    };
+    if let Ok(Some(mon)) = app.primary_monitor() {
+        let scale = mon.scale_factor();
+        let msize = mon.size().to_logical::<f64>(scale);
+        let mpos = mon.position().to_logical::<f64>(scale);
+        let x = mpos.x + (msize.width - MENU_W) / 2.0;
+        let y = mpos.y + (msize.height - MENU_H) / 2.0;
+        let _ = w.set_position(tauri::LogicalPosition::new(x, y));
+    }
+    let _ = w.unminimize();
+    let _ = w.show();
+    let _ = w.set_focus();
+    #[cfg(target_os = "macos")]
+    MENU_SHOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Dismiss the menu window. macOS: park off-screen instead of `hide()` —
+/// `hide()` blanks the WKWebView so it repaints white on the next show.
+/// Off-screen keeps it composited. Dock re-show goes through
+/// `RunEvent::Reopen` → `show_menu`.
+fn hide_menu(app: &tauri::AppHandle) {
+    let Some(w) = app.get_webview_window("menu") else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let _ = w.set_position(tauri::LogicalPosition::new(-30000.0, -30000.0));
+        MENU_SHOWN.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = w.hide();
+}
+
+/// Tray-click toggle.
+fn toggle_popup(app: &tauri::AppHandle, _tray_rect: Option<tauri::Rect>) {
+    #[cfg(target_os = "macos")]
+    {
+        if MENU_SHOWN.load(std::sync::atomic::Ordering::SeqCst) {
+            hide_menu(app);
+        } else {
+            show_menu(app);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     if let Some(w) = app.get_webview_window("menu") {
-        let visible = w.is_visible().unwrap_or(false);
-        if visible {
+        if w.is_visible().unwrap_or(false) {
             let _ = w.hide();
         } else {
-            let _ = w.show();
-            let _ = w.set_focus();
+            show_menu(app);
         }
     }
 }
 
 /// Open the dedicated pair window (separate WebView so the user can
 /// keep the menu popup open in parallel).
-fn open_pair_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+fn open_pair_window(app: &tauri::AppHandle) {
     // Pair window is now declared in tauri.conf.json (visible:false at
     // boot). Runtime WebviewWindowBuilder cannot resolve bundled assets
     // on Windows: any `WebviewUrl::App("pair.html")` shows a blank
     // page. Pre-declared windows work because Tauri serves their URL
     // through the same path the menu/settings windows already use.
-    if let Some(menu) = app.get_webview_window("menu") {
-        let _ = menu.hide();
-    }
+    hide_menu(app);
     if let Some(w) = app.get_webview_window("pair") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -536,10 +626,8 @@ fn open_pair_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 }
 
 /// Open the dedicated settings window.
-fn open_settings_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    if let Some(menu) = app.get_webview_window("menu") {
-        let _ = menu.hide();
-    }
+fn open_settings_window(app: &tauri::AppHandle) {
+    hide_menu(app);
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.show();
         let _ = w.set_focus();

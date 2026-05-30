@@ -40,23 +40,21 @@ function applyState(s) {
   if (s) syncOn = !!s.on;
 
   const isPaired = s && s.peer_name && s.peer_name.trim() !== "" && s.peer_name !== "pending";
-  document.getElementById('tray-container').style.display = isPaired ? 'flex' : 'none';
-  document.getElementById('pairing-entry').style.display = 'none';
-  // Not paired → push the user straight to the pair window (the entry
-  // selector now lives there). Guarded so we don't re-open on every poll
-  // tick once the window is already up.
-  if (!isPaired && !window.__pairWindowOpened) {
-    window.__pairWindowOpened = true;
-    invoke('fluxsync_open_pair').catch(() => { window.__pairWindowOpened = false; });
-  }
-  if (isPaired) {
-    window.__pairWindowOpened = false;
-  }
+  // Single-window UX: this menu is the only window. Show the dashboard +
+  // history when linked, or an inline "Pair a device" CTA when not — never
+  // auto-spawn the separate pair window (that left two windows at launch).
+  document.getElementById('tray-container').style.display = 'flex';
+  document.getElementById('dashboard-body').style.display = isPaired ? 'flex' : 'none';
+  document.querySelector('.history-section').style.display = isPaired ? 'block' : 'none';
+  document.getElementById('pairing-entry').style.display = isPaired ? 'none' : 'flex';
 
   if (isPaired) {
     renderHero(s);
     renderPeer(s);
     renderRecent(s.history || []);
+  } else {
+    setHero('off', 'NO DEVICE PAIRED');
+    renderRecent([]);
   }
   renderMetrics(s);
 }
@@ -223,6 +221,12 @@ document.getElementById('open-settings').addEventListener('click', () => {
   invoke('fluxsync_open_settings');
 });
 
+// Pair CTA (unpaired state) — opens the dedicated pair window, which hides
+// this menu so only one window is ever on screen.
+document.getElementById('pair-cta').addEventListener('click', () => {
+  invoke('fluxsync_open_pair');
+});
+
 // entry-show-qr removed — pair window owns the entry now.
 
 document.getElementById('unpair-btn').addEventListener('click', async () => {
@@ -231,8 +235,7 @@ document.getElementById('unpair-btn').addEventListener('click', async () => {
     await invoke('fluxsync_unpair');
     showToast('Device unpaired.');
     refreshState();
-    // [FIX] Immediately show QR window after unpairing for better UX.
-    openPair();
+    // Stay on this window — refreshState swaps in the inline pair CTA.
   } catch (err) {
     showToast(`Unpair failed: ${err}`);
   }
@@ -307,8 +310,10 @@ document.addEventListener('contextmenu', (e) => {
 
 const win = getCurrentWindow();
 win.onFocusChanged(({ payload }) => {
-  // payload === true → focused (just shown); false → blurred (hidden).
-  if (payload) onShow(); else win.hide();
+  // Refresh on focus. Do NOT auto-hide on blur: this is a normal dock
+  // window now (closing it quits the app), and the old `win.hide()` here
+  // also blanked the WebView on the next show.
+  if (payload) onShow();
 });
 // First load when the window is created visible (during `tauri dev`).
 onShow();
