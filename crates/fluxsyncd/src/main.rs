@@ -119,7 +119,28 @@ async fn main() -> Result<()> {
                 cfg.start_on = true;
             }
         }
-        Err(e) => tracing::warn!(error = %e, "failed to load peers.json; starting unpaired"),
+        Err(e) => {
+            // M-DAEMON-12: a parse error means peers.json is corrupt, NOT
+            // first-boot (load_peers returns Ok([]) for missing/empty). Booting
+            // "unpaired" here would silently drop every paired device and force
+            // a full re-pair on a transient disk glitch — and the runtime path
+            // (handshake) already refuses on parse error, so the two were
+            // inconsistent. Fail closed: leave the file untouched (so a backup
+            // or manual edit can recover it) and refuse to start rather than
+            // nuke the user's trust topology. The file stays in place so every
+            // restart keeps refusing until the user fixes or deletes it.
+            let path = keystore_dir.join("peers.json");
+            tracing::error!(
+                error = %e,
+                path = %path.display(),
+                "peers.json is corrupt; refusing to start so paired devices aren't silently lost. \
+                 Restore a backup, or delete the file to re-pair from scratch."
+            );
+            anyhow::bail!(
+                "corrupt peers.json at {} ({e}); refusing to start. Restore a backup or delete the file to re-pair.",
+                path.display()
+            );
+        }
     }
 
     let shutdown = CancellationToken::new();

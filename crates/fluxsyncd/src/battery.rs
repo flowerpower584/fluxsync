@@ -6,13 +6,13 @@ use tokio_util::sync::CancellationToken;
 
 /// Polls macOS battery status via `pmset -g batt`.
 pub async fn battery_watcher_loop(
-    event_tx: mpsc::UnboundedSender<Event>,
+    event_tx: mpsc::Sender<Event>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     tracing::info!("macOS battery watcher started");
     loop {
         if let Ok((level, charging)) = get_macos_battery() {
-            let _ = event_tx.send(Event::BatteryChangedSelf { level, charging });
+            let _ = event_tx.try_send(Event::BatteryChangedSelf { level, charging });
         }
 
         tokio::select! {

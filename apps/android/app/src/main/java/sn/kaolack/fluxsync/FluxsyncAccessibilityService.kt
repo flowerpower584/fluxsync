@@ -79,14 +79,18 @@ class FluxsyncAccessibilityService : AccessibilityService() {
         // Register battery monitor
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
 
-        // FS-022: restore the persisted Lamport cursor so a process
-        // restart doesn't re-sync the daemon's whole history.
-        lastSeenLamport = try {
-            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .getLong(KEY_LAST_SEEN_LAMPORT, 0L)
+        // FS-022 / M-AND-01: restore the persisted set of already-applied
+        // content hashes so a process restart doesn't re-sync the daemon's
+        // whole history. Dedup keys on hashes, not a Lamport cursor (the
+        // daemon's Lamport clock resets to 0 on every daemon restart).
+        seenHashes = try {
+            LinkedHashSet(
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .getStringSet(KEY_SEEN_HASHES, emptySet()) ?: emptySet(),
+            )
         } catch (e: Exception) {
-            android.util.Log.w("FluxSync", "Failed to restore lamport cursor: ${e.message}")
-            0L
+            android.util.Log.w("FluxSync", "Failed to restore seen-hash set: ${e.message}")
+            LinkedHashSet()
         }
     }
 
@@ -140,7 +144,8 @@ class FluxsyncAccessibilityService : AccessibilityService() {
         }
     }
 
-    private var lastSeenLamport: Long = 0L
+    /** M-AND-01: content hashes already written to the system clipboard. */
+    private var seenHashes: LinkedHashSet<String> = LinkedHashSet()
 
     private fun startPolling() {
         if (pollingJob?.isActive == true) {
@@ -168,20 +173,20 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                                 // Sync incoming clipboard items to system clipboard
                                 if (parsed.history.isNotEmpty()) {
                                     // Process from oldest to newest to preserve order.
-                                    for (item in newRemoteItemsSince(parsed.history, lastSeenLamport)) {
+                                    val fresh = newRemoteItems(parsed.history, seenHashes)
+                                    for (item in fresh) {
                                         if (item.kind == "image") {
                                             syncImageToSystemClipboard(item.hash)
                                         } else {
                                             syncToSystemClipboard(item.preview)
                                         }
+                                        markSeen(item.hash)
                                     }
-                                    // FS-022: advance + persist the cursor only when it
-                                    // actually moves, so the tight poll doesn't write
-                                    // SharedPreferences several times a second.
-                                    val newest = parsed.history[0].lamport
-                                    if (newest != lastSeenLamport) {
-                                        lastSeenLamport = newest
-                                        persistLastSeenLamport(newest)
+                                    // M-AND-01: persist only when the set actually grew,
+                                    // so the tight poll doesn't write SharedPreferences
+                                    // several times a second.
+                                    if (fresh.isNotEmpty()) {
+                                        persistSeenHashes()
                                     }
                                 }
                             }
@@ -218,15 +223,29 @@ class FluxsyncAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** FS-022: persist the Lamport cursor across process restarts. */
-    private fun persistLastSeenLamport(value: Long) {
+    /** M-AND-01: record a content hash as applied, capped + most-recent-kept. */
+    private fun markSeen(hash: String) {
+        if (hash.isEmpty()) return
+        seenHashes.remove(hash) // re-insert so it counts as most-recent
+        seenHashes.add(hash)
+        while (seenHashes.size > MAX_SEEN_HASHES) {
+            val it = seenHashes.iterator()
+            if (it.hasNext()) {
+                it.next()
+                it.remove()
+            }
+        }
+    }
+
+    /** M-AND-01: persist the seen-hash set across process restarts. */
+    private fun persistSeenHashes() {
         try {
             getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
-                .putLong(KEY_LAST_SEEN_LAMPORT, value)
+                .putStringSet(KEY_SEEN_HASHES, HashSet(seenHashes))
                 .apply()
         } catch (e: Exception) {
-            android.util.Log.w("FluxSync", "Failed to persist lamport cursor: ${e.message}")
+            android.util.Log.w("FluxSync", "Failed to persist seen-hash set: ${e.message}")
         }
     }
 
@@ -376,28 +395,31 @@ class FluxsyncAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
 
     companion object {
-        /** FS-022: SharedPreferences store for the persisted Lamport cursor. */
+        /** FS-022 / M-AND-01: SharedPreferences store for inbound dedup. */
         private const val PREFS_NAME = "fluxsync_prefs"
-        private const val KEY_LAST_SEEN_LAMPORT = "last_seen_lamport"
+        private const val KEY_SEEN_HASHES = "seen_hashes"
+
+        /** Cap on remembered inbound hashes — bounds the persisted set. */
+        private const val MAX_SEEN_HASHES = 256
 
         /**
-         * FS-022: remote history items newer than [lastSeen], oldest-first.
-         * [history] is the daemon snapshot, newest-first. When [lastSeen] is
-         * 0 (a process restart that lost the in-memory cursor) this returns
-         * every remote item — the bug the persisted cursor prevents.
+         * M-AND-01: remote history items not yet applied to the system
+         * clipboard, oldest-first. [history] is the daemon snapshot,
+         * newest-first. Dedup keys on the content [HistoryItem.hash], NOT a
+         * Lamport threshold: the daemon's Lamport clock restarts at 0 on every
+         * daemon restart, so a `lamport <= cursor` gate silently stopped ALL
+         * inbound sync until the clock climbed back past the old cursor. A
+         * seen-hash set is also immune to out-of-order arrival (two peers /
+         * retransmits), which the old descending-Lamport `break` assumed away.
          */
         @JvmStatic
-        fun newRemoteItemsSince(
+        fun newRemoteItems(
             history: List<sn.kaolack.fluxsync.vm.HistoryItem>,
-            lastSeen: Long,
+            seen: Set<String>,
         ): List<sn.kaolack.fluxsync.vm.HistoryItem> {
-            val fresh = ArrayList<sn.kaolack.fluxsync.vm.HistoryItem>()
-            for (item in history) {
-                if (item.lamport <= lastSeen) break
-                fresh.add(item)
-            }
-            fresh.reverse()
-            return fresh.filter { it.source == "remote" }
+            return history
+                .filter { it.source == "remote" && it.hash.isNotEmpty() && it.hash !in seen }
+                .reversed()
         }
 
         /**

@@ -62,6 +62,7 @@ function resetState() {
   if (pinCountdownTimer) { clearInterval(pinCountdownTimer); pinCountdownTimer = null; }
   pairMethod = null;
   pendingPeerId = null;
+  pinAttempts = 0; // QA #3: never leave the PIN flow permanently locked out.
 }
 
 $('done-btn').addEventListener('click', () => {
@@ -225,6 +226,7 @@ $('enter-code-btn').addEventListener('click', () => {
 });
 
 function resetPinForm() {
+  pinAttempts = 0; // QA #3: a fresh entry into the PIN flow clears the lockout.
   pinSlots().forEach(i => { i.value = ''; });
   $('pin-submit-btn').disabled = true;
   $('pin-error').style.display = 'none';
@@ -365,16 +367,21 @@ $('verify-reject-btn').addEventListener('click', async () => {
 
 async function resolveVerify(accept) {
   if (!pendingPeerId) {
-    // Even without a peer_id we can fall through: if accept=false, no
-    // harm done; if accept=true, the trust is already in place via the
-    // handshake and pending will reap on its own. Keep the UI honest.
+    // QA #4: without a peer_id we cannot call `pair_confirm`, so the SAS
+    // gate was never satisfied. NEVER show "Paired" here — the daemon keeps
+    // the peer in `pending` and the reaper revokes it within ~120 s, so a
+    // success screen would be a lie AND would defeat the MITM gate the PIN
+    // flow exists to enforce. Accept => surface the error and stay; the
+    // user must reject and retry.
     if (accept) {
-      showPaired('your device');
-    } else {
-      try { await invoke('fluxsync_unpair'); } catch (_) {}
-      resetState();
-      showScreen('entry');
+      $('verify-error').style.display = 'block';
+      $('verify-error').textContent =
+        'Could not confirm: no pending entry from the daemon. Reject and pair again.';
+      return;
     }
+    try { await invoke('fluxsync_unpair'); } catch (_) {}
+    resetState();
+    showScreen('entry');
     return;
   }
   const accBtn = $('verify-accept-btn');

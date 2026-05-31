@@ -96,6 +96,12 @@ pub fn is_local_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
         std::net::IpAddr::V6(v6) => {
+            // L-DAEMON-10: a LAN IPv4 peer arriving on a dual-stack `::` socket
+            // appears as `::ffff:a.b.c.d`. Unwrap the embedded IPv4 and classify
+            // that, else a `bind = ::` daemon rejects every IPv4 LAN handshake.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_loopback() || v4.is_private() || v4.is_link_local();
+            }
             v6.is_loopback()
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
                 || (v6.segments()[0] & 0xffc0) == 0xfe80

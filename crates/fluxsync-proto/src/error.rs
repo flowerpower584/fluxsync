@@ -26,6 +26,9 @@ pub enum ProtoError {
     #[error("battery level {0} > 100")]
     BatteryLevel(u8),
 
+    #[error("hello name too long: {0} bytes (max 256)")]
+    HelloNameTooLong(usize),
+
     #[error("CBOR decode failed: {0}")]
     Cbor(String),
 

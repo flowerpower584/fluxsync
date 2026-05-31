@@ -34,8 +34,16 @@ pub fn status_for(state: &State) -> Status {
     if state.peer_battery <= CRITICAL_LEVEL || state.battery_level <= CRITICAL_LEVEL {
         return Status::Critical;
     }
-    let peer_below = state.peer_battery <= state.battery_threshold && !state.peer_charging;
-    let self_below = state.battery_level <= state.battery_threshold && !state.charging;
+    // M-CORE-01: `charge_override` (default true) is the "keep syncing while
+    // the low device is plugged in" exemption. When the user turns it OFF, a
+    // device below threshold must pause *even while charging* — so the charging
+    // exemption only applies when `charge_override` is set. Previously this
+    // field was never read and the toggle did nothing.
+    let charge_exempts = state.charge_override;
+    let peer_below =
+        state.peer_battery <= state.battery_threshold && !(charge_exempts && state.peer_charging);
+    let self_below =
+        state.battery_level <= state.battery_threshold && !(charge_exempts && state.charging);
     if peer_below || self_below {
         return Status::Paused;
     }

@@ -102,9 +102,20 @@ async fn fluxsync_unpair() -> Result<(), String> {
 
 #[tauri::command]
 fn fluxsync_open_url(url: String) {
-    // Uses the shell plugin to open the system browser.
-    // This is safer than window.open in some environments.
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    // Defense-in-depth (H-TRAY-01): only ever hand http(s) URLs to the OS
+    // opener, so even a stray `invoke` can't launch arbitrary schemes or
+    // commands. Cross-platform (L-TRAY-04): `open` is macOS-only.
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
 }
 
 #[tauri::command]
@@ -409,7 +420,7 @@ pub fn run() {
                                             match ah.notification()
                                                 .builder()
                                                 .title("FluxSync")
-                                                .body(format!("Received: {}", if preview.len() > 50 { format!("{}...", &preview[..47]) } else { preview.to_string() }))
+                                                .body(format!("Received: {}", if preview.chars().count() > 50 { format!("{}...", preview.chars().take(47).collect::<String>()) } else { preview.to_string() }))
                                                 .show() {
                                                     Ok(_) => eprintln!("[fluxsync-tray] notification .show() returned Ok"),
                                                     Err(e) => eprintln!("[fluxsync-tray] notification .show() failed: {e}"),

@@ -23,7 +23,6 @@ use crate::cmd::{Channel, CmdData, CmdOp, CmdRequest, CmdResponse, PeerEntry, Su
 use crate::config::{DaemonConfig, TestPair};
 use crate::discovery::{self, DiscoveryEvent};
 use crate::handshake::{self, PairingWindow, PendingSet, TrustedPeer, TrustedSet};
-use fluxsync_crypto::gen_pair_pin;
 use crate::ipc::{IpcConn, IpcServer};
 use crate::logs::LogTail;
 use crate::metrics::{DisconnectReason, MetricsTracker};
@@ -36,6 +35,7 @@ use fluxsync_core::{
     dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, Event, LogEntry, LogLevel, State,
     WallClock,
 };
+use fluxsync_crypto::gen_pair_pin;
 use fluxsync_crypto::{fingerprint, Identity};
 use fluxsync_proto::{
     ClipboardItem, Frame, Kind, Msg, MAX_CHUNK_DATA, MAX_PAYLOAD, PROTOCOL_VERSION,
@@ -140,7 +140,12 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     let initial = app.snapshot().clone();
     let (state_watch_tx, state_watch_rx) = watch::channel(initial);
     let (logs_bcast_tx, _) = broadcast::channel::<LogEntry>(64);
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event>();
+    // M-DAEMON-11: bounded so a hostile LAN flood (mDNS spam → DiscoveryEvent,
+    // or forged frames → Event) can't grow the daemon's memory without bound.
+    // Every producer uses `try_send` and drops on full (all sends are already
+    // fire-and-forget); the cap is far above any legitimate burst. The M-DAEMON-17
+    // fix removed the per-frame fsync that used to stall this consumer.
+    let (event_tx, mut event_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAP);
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DriverCmd>();
     let log_tail = Arc::new(LogTail::new());
 
@@ -237,23 +242,23 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 name: peer_name.clone(),
             },
         );
-        event_tx.send(Event::ToggleOn).ok();
+        event_tx.try_send(Event::ToggleOn).ok();
 
         event_tx
-            .send(Event::PeerSeen {
+            .try_send(Event::PeerSeen {
                 peer_id,
                 name: peer_name,
             })
             .ok();
-        event_tx.send(Event::HandshakeOk).ok();
+        event_tx.try_send(Event::HandshakeOk).ok();
         event_tx
-            .send(Event::BatteryChangedSelf {
+            .try_send(Event::BatteryChangedSelf {
                 level: 80,
                 charging: false,
             })
             .ok();
         event_tx
-            .send(Event::BatteryChangedPeer {
+            .try_send(Event::BatteryChangedPeer {
                 level: 80,
                 charging: false,
             })
@@ -270,7 +275,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         if let Some(peer) = g.values().next() {
             tracing::info!(peer = %peer.name, "Boot: informing UI about trusted peer");
             event_tx
-                .send(Event::SetTrustedPeer {
+                .try_send(Event::SetTrustedPeer {
                     name: peer.name.clone(),
                 })
                 .ok();
@@ -280,7 +285,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // ── State-Aware Boot: Auto-toggle ON if requested ─────────────
     if start_on {
         tracing::info!("State-Aware Boot: auto-starting sync");
-        event_tx.send(Event::ToggleOn).ok();
+        event_tx.try_send(Event::ToggleOn).ok();
     }
 
     // ── Long-lived tasks ──────────────────────────────────────────
@@ -367,7 +372,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     let mut _mdns_daemon = None;
     let we_are_test_mode = transport.session.lock().await.is_some();
     if !disable_mdns && !we_are_test_mode {
-        let (disc_tx, disc_rx) = mpsc::unbounded_channel::<DiscoveryEvent>();
+        let (disc_tx, disc_rx) = mpsc::channel::<DiscoveryEvent>(DISCOVERY_CHANNEL_CAP);
         let bind_ip: std::net::IpAddr = udp_bind
             .parse()
             .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
@@ -403,8 +408,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 let disc_cache = disc_cache.clone();
                 tasks.spawn(async move {
                     discovery_dispatcher(
-                        disc_rx, identity, trusted, transport, pending, event_tx,
-                        disc_cache, shutdown,
+                        disc_rx, identity, trusted, transport, pending, event_tx, disc_cache,
+                        shutdown,
                     )
                     .await
                 });
@@ -465,7 +470,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                     if let Some(start) = last_discovering_with_peer {
                         if Instant::now().duration_since(start) > Duration::from_secs(600) {
                             tracing::warn!("Ghost Timeout: 10 minutes elapsed without reconnection. Unpairing.");
-                            let _ = event_tx_clone.send(Event::GhostTimeout);
+                            let _ = event_tx_clone.try_send(Event::GhostTimeout);
                             last_discovering_with_peer = None;
                         }
                     } else {
@@ -536,6 +541,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             },
                             &*wall_clock,
                         );
+                        let actions = gate_outbound(actions, &transport, &pending_pairs).await;
                         dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight).await;
                     }
                     run_cmd @ DriverCmd::Run { .. } => {
@@ -562,6 +568,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &pin_advert,
                             &disc_cache,
                             &mdns_ctx,
+                            &shutdown,
                         ).await;
                     }
                 }
@@ -594,13 +601,46 @@ enum DriverCmd {
 // Action dispatch
 // ─────────────────────────────────────────────────────────────────
 
+/// M-DAEMON-01 / H-DAEMON-01: strip outbound `SendItem` actions when the
+/// active peer landed via TOFU but has not been verbally confirmed (SAS) yet.
+/// Mirrors the inbound FS-052 gate in `dispatch_inbound_frame`, so clipboard
+/// never flows in *either* direction to an unconfirmed peer during the pairing
+/// window. Non-clipboard actions (state/log/battery) pass through untouched and
+/// local history is unaffected — only the wire send is held back.
+async fn gate_outbound(
+    actions: Vec<Action>,
+    transport: &Arc<Transport>,
+    pending_pairs: &PendingSet,
+) -> Vec<Action> {
+    let pending = match *transport.last_peer_id.lock().await {
+        Some(id) => pending_pairs.lock().await.contains_key(&id),
+        None => false,
+    };
+    if !pending {
+        return actions;
+    }
+    actions
+        .into_iter()
+        .filter(|a| {
+            if matches!(a, Action::SendItem { .. }) {
+                tracing::warn!(
+                    "FS-052 gate: suppressing outbound clipboard — peer not yet verbally confirmed"
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
 async fn dispatch(
     actions: Vec<Action>,
     app: &mut App,
     transport: &Arc<Transport>,
-    trusted: &TrustedSet,
-    keystore_dir: Option<&std::path::PathBuf>,
+    _trusted: &TrustedSet,
+    _keystore_dir: Option<&std::path::PathBuf>,
     state_watch_tx: &watch::Sender<State>,
     logs_bcast_tx: &broadcast::Sender<LogEntry>,
     log_tail: &Arc<LogTail>,
@@ -886,31 +926,14 @@ async fn dispatch(
                     let _ = transport.send_encrypted(&bytes).await;
                 }
 
-                tracing::info!("DropPeer: clearing all trusted peers from memory");
-                // VULN-001 variant V8: snapshot+rollback to keep in-mem and
-                // peers.json consistent. Without this, a Ghost Timeout could
-                // wipe live trust while disk still trusts the peer; on next
-                // daemon start the peer would be re-trusted silently.
-                let snapshot = trusted.lock().await.clone();
-                trusted.lock().await.clear();
-                let persisted = if let Some(dir) = keystore_dir {
-                    match save_peers_with_retry(dir, trusted, transport).await {
-                        Ok(()) => true,
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "DropPeer: failed to persist cleared peer set; rolling back in-memory clear so on-disk and in-memory trust stay consistent. Session NOT dropped; FSM will retry on next Ghost Timeout."
-                            );
-                            *trusted.lock().await = snapshot;
-                            false
-                        }
-                    }
-                } else {
-                    true
-                };
-                if persisted {
-                    transport.drop_session().await;
-                }
+                // M-DAEMON-18: DropPeer tears down the live SESSION only — it
+                // must NEVER wipe the trust store. GhostTimeout (peer offline
+                // 10 min) reaches here and would otherwise erase every paired
+                // device. Intentional unpair/revoke removes the specific peer
+                // from `trusted` at its own call site (IPC Unpair, Revoke,
+                // PairConfirm-reject) *before* dispatching the FSM actions.
+                tracing::info!("DropPeer: dropping live session (trust store untouched)");
+                transport.drop_session().await;
             }
             Action::SendHandshake { .. } => {
                 metrics.lock().await.on_handshake_start();
@@ -978,7 +1001,7 @@ async fn handle_driver_cmd(
     pairing_window: &PairingWindow,
     transport: &Arc<Transport>,
     pending_initiator_tx: &Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
-    event_tx: &mpsc::UnboundedSender<Event>,
+    event_tx: &mpsc::Sender<Event>,
     state_watch_tx: &watch::Sender<State>,
     logs_bcast_tx: &broadcast::Sender<LogEntry>,
     log_tail: &Arc<LogTail>,
@@ -992,6 +1015,7 @@ async fn handle_driver_cmd(
     pin_advert: &PinAdvertisement,
     disc_cache: &DiscoveryCache,
     mdns_ctx: &MdnsCtx,
+    shutdown: &CancellationToken,
 ) {
     let DriverCmd::Run { op, reply, req_id } = cmd else {
         return;
@@ -1008,7 +1032,7 @@ async fn handle_driver_cmd(
         CmdOp::Reconnect {} => {
             tracing::info!("IPC: manual reconnect requested");
             transport.drop_session().await;
-            let _ = event_tx.send(Event::PeerLost);
+            let _ = event_tx.try_send(Event::PeerLost);
             CmdResponse::ok(req_id, Some(CmdData::Pong))
         }
         CmdOp::Push { text } => {
@@ -1032,6 +1056,7 @@ async fn handle_driver_cmd(
                     &**wall,
                 );
                 tracing::debug!(?actions, "LocalClipboardChange results");
+                let actions = gate_outbound(actions, transport, pending_pairs).await;
                 dispatch(
                     actions,
                     app,
@@ -1069,6 +1094,7 @@ async fn handle_driver_cmd(
                             },
                             &**wall,
                         );
+                        let actions = gate_outbound(actions, transport, pending_pairs).await;
                         dispatch(
                             actions,
                             app,
@@ -1185,7 +1211,18 @@ async fn handle_driver_cmd(
             .await;
             CmdResponse::ok(req_id, None)
         }
-        CmdOp::DebugCapture {} | CmdOp::Shutdown {} => CmdResponse::ok(req_id, None),
+        CmdOp::DebugCapture {} => CmdResponse::ok(req_id, None),
+        // M-TRAY-03: actually terminate. The tray's `restart_stale_daemon`
+        // sends `shutdown` then waits for the socket to close before it
+        // respawns the up-to-date binary; a no-op left the stale daemon
+        // running forever. Cancelling the token breaks every loop; the ok
+        // reply below still flushes (sent at the tail of this fn) before
+        // `run()` returns and the process exits.
+        CmdOp::Shutdown {} => {
+            tracing::info!("Shutdown requested via IPC; cancelling daemon");
+            shutdown.cancel();
+            CmdResponse::ok(req_id, None)
+        }
         CmdOp::Unpair {} => {
             tracing::info!("Manual unpair requested via IPC");
             // VULN-001 variant V1: snapshot+retry+rollback. Without this,
@@ -1448,10 +1485,14 @@ async fn handle_driver_cmd(
             // TXT when the user pairs or the window times out.
             let pin = gen_pair_pin();
             let expires_at = Instant::now() + handshake::PAIRING_WINDOW;
-            let was_active = pin_advert.lock().await.replace(PinAd {
-                pin: pin.clone(),
-                expires_at,
-            }).is_some();
+            let was_active = pin_advert
+                .lock()
+                .await
+                .replace(PinAd {
+                    pin: pin.clone(),
+                    expires_at,
+                })
+                .is_some();
             if let Some(ctx) = mdns_ctx.lock().await.as_ref() {
                 if let Err(e) = discovery::republish_with_pin(
                     &ctx.daemon,
@@ -1876,7 +1917,7 @@ async fn transport_recv_loop(
     trusted: TrustedSet,
     pairing_window: PairingWindow,
     pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
-    event_tx: mpsc::UnboundedSender<Event>,
+    event_tx: mpsc::Sender<Event>,
     shutdown: CancellationToken,
     keystore_dir: Option<PathBuf>,
     metrics: Arc<Mutex<MetricsTracker>>,
@@ -1893,6 +1934,11 @@ async fn transport_recv_loop(
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(5));
     let mut retransmit_interval = tokio::time::interval(RETRANSMIT_INTERVAL);
     let mut nak_interval = tokio::time::interval(NAK_INTERVAL);
+    // M-DAEMON-17: last peer address we persisted to peers.json. Used to
+    // persist a roam ONLY when the address actually changes — otherwise every
+    // encrypted frame (heartbeat each 5 s + every clipboard item) would
+    // tmp+fsync+rename peers.json continuously, burning disk/SSD for nothing.
+    let mut last_persisted_addr: Option<std::net::SocketAddr> = None;
 
     loop {
         tokio::select! {
@@ -2098,16 +2144,20 @@ async fn transport_recv_loop(
                         }
                     }
                     RecvFrame::Encrypted { from, plaintext } => {
-                        // ROAMING persistence: if the transport just updated its peer_addr,
-                        // persist it to the keystore.
-                        if let Some(dir) = &keystore_dir {
-                            let current_p = *transport.peer_addr.lock().await;
-                            if current_p == Some(from) {
-                                // Decryption succeeded (implicit in RecvFrame::Encrypted)
-                                // and the address matches the transport's peer_addr (which updates on roaming).
-                                // We save the peers to ensure the new IP survives a reboot.
-                                if let Err(e) = save_current_peers(dir, &trusted, &transport).await {
-                                    tracing::warn!(error = %e, "failed to persist roaming update");
+                        // ROAMING persistence (M-DAEMON-17): only when the peer
+                        // address actually changed since the last write — not on
+                        // every frame. `peer_addr` updates on roam; comparing
+                        // against `last_persisted_addr` collapses the steady-state
+                        // heartbeat/clipboard stream to zero disk writes.
+                        if last_persisted_addr != Some(from) {
+                            if let Some(dir) = &keystore_dir {
+                                let current_p = *transport.peer_addr.lock().await;
+                                if current_p == Some(from) {
+                                    if let Err(e) = save_current_peers(dir, &trusted, &transport).await {
+                                        tracing::warn!(error = %e, "failed to persist roaming update");
+                                    } else {
+                                        last_persisted_addr = Some(from);
+                                    }
                                 }
                             }
                         }
@@ -2391,7 +2441,7 @@ async fn clipboard_watcher_loop(
 
 async fn heartbeat_loop(
     transport: Arc<Transport>,
-    event_tx: mpsc::UnboundedSender<Event>,
+    event_tx: mpsc::Sender<Event>,
     shutdown: CancellationToken,
     metrics: Arc<Mutex<MetricsTracker>>,
 ) -> Result<()> {
@@ -2431,7 +2481,7 @@ async fn heartbeat_loop(
                             tracing::warn!("Peer timed out (6 missed pings/30s). Dropping link.");
                             metrics.lock().await.on_disconnect(DisconnectReason::HeartbeatTimeout);
                             transport.last_rx_ms.store(now, std::sync::atomic::Ordering::Relaxed);
-                            let _ = event_tx.send(Event::PeerLost);
+                            let _ = event_tx.try_send(Event::PeerLost);
                             missed_pings = 0;
                         }
                     } else {
@@ -2569,6 +2619,18 @@ const PEERS_PERSIST_ATTEMPTS: u32 = 3;
 /// cap", not "any insert exceeds cap".
 pub const MAX_TRUSTED_PEERS: usize = 64;
 
+/// M-DAEMON-11: bounded capacity for the daemon's central `Event` channel.
+/// One mono-task consumer drains it; 1024 is orders of magnitude above any
+/// legitimate burst (chunk reassembly already caps concurrent inbound items at
+/// 5), so it only ever fills under a hostile flood — at which point `try_send`
+/// drops with a warning instead of growing memory without bound.
+const EVENT_CHANNEL_CAP: usize = 1024;
+
+/// M-DAEMON-11: bounded capacity for the mDNS `DiscoveryEvent` channel. A
+/// dropped resolve under flood is harmless — mDNS re-announces, and the
+/// downstream discovery cache is itself capped at 256.
+const DISCOVERY_CHANNEL_CAP: usize = 256;
+
 /// Atomic upsert of a single [`crate::keystore::StoredPeer`] into
 /// `peers.json`: takes the disk lock, reads the on-disk list, upserts
 /// `entry` by `peer_id_hex`, and persists with retry. Used by the
@@ -2616,7 +2678,7 @@ pub(crate) async fn upsert_peer_persist(
 
 async fn dispatch_inbound_frame(
     frame: Frame,
-    event_tx: &mpsc::UnboundedSender<Event>,
+    event_tx: &mpsc::Sender<Event>,
     transport: &Arc<Transport>,
     reassembly: &Arc<Mutex<HashMap<[u8; 32], Reassembly>>>,
     metrics: &Arc<Mutex<MetricsTracker>>,
@@ -2685,7 +2747,7 @@ async fn dispatch_inbound_frame(
                     drop(map);
 
                     let preview = preview_label(kind, &full_payload);
-                    let _ = event_tx.send(Event::FrameReceivedClipboard {
+                    let _ = event_tx.try_send(Event::FrameReceivedClipboard {
                         hash: item.hash,
                         kind,
                         payload: full_payload,
@@ -2696,7 +2758,7 @@ async fn dispatch_inbound_frame(
                 }
             } else {
                 let preview = preview_label(item.kind, &item.payload);
-                let _ = event_tx.send(Event::FrameReceivedClipboard {
+                let _ = event_tx.try_send(Event::FrameReceivedClipboard {
                     hash: item.hash,
                     kind: item.kind,
                     payload: item.payload,
@@ -2755,7 +2817,7 @@ async fn dispatch_inbound_frame(
                 drop(map);
 
                 let preview = preview_label(kind, &full_payload);
-                let _ = event_tx.send(Event::FrameReceivedClipboard {
+                let _ = event_tx.try_send(Event::FrameReceivedClipboard {
                     hash: c.item_id,
                     kind,
                     payload: full_payload,
@@ -2766,7 +2828,7 @@ async fn dispatch_inbound_frame(
             }
         }
         Msg::BatteryStatus(b) => {
-            let _ = event_tx.send(Event::BatteryChangedPeer {
+            let _ = event_tx.try_send(Event::BatteryChangedPeer {
                 level: b.level,
                 charging: b.charging,
             });
@@ -2841,7 +2903,7 @@ async fn dispatch_inbound_frame(
             // Peer announced a clean disconnect: tear down the session and
             // signal PeerLost so the FSM closes the session and re-discovers.
             transport.drop_session().await;
-            let _ = event_tx.send(Event::PeerLost);
+            let _ = event_tx.try_send(Event::PeerLost);
         }
         Msg::HandshakeInit(_) | Msg::HandshakeResp(_) => {
             // Handshake frames are driven by the handshake task, not here.
@@ -2853,7 +2915,7 @@ async fn dispatch_inbound_frame(
             // bypasses the FSM peer-mismatch check. Drop the Hello.
             match *transport.last_peer_id.lock().await {
                 Some(peer_id) => {
-                    let _ = event_tx.send(Event::PeerSeen {
+                    let _ = event_tx.try_send(Event::PeerSeen {
                         peer_id,
                         name: h.name,
                     });
@@ -2915,12 +2977,12 @@ const NAK_MISSING_PER_FRAME: usize = 400;
 
 #[allow(clippy::too_many_arguments)]
 async fn discovery_dispatcher(
-    mut rx: mpsc::UnboundedReceiver<DiscoveryEvent>,
+    mut rx: mpsc::Receiver<DiscoveryEvent>,
     identity: Identity,
     trusted: TrustedSet,
     transport: Arc<Transport>,
     pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
-    event_tx: mpsc::UnboundedSender<Event>,
+    event_tx: mpsc::Sender<Event>,
     disc_cache: DiscoveryCache,
     shutdown: CancellationToken,
 ) -> Result<()> {
@@ -3016,8 +3078,15 @@ async fn discovery_dispatcher(
                             g.get(&peer_id).is_some_and(|t| t.static_pub == static_pub)
                         };
                         if !trusted_match {
-                            tracing::info!(peer = %peer_id_hex, "saw untrusted peer; checking for cryptographic reset...");
-                            let _ = event_tx.send(Event::UntrustedPeerSeen { name: name.clone() });
+                            // C-DAEMON-01: `peer_id == BLAKE3(static_pub)` is
+                            // verified above, so a peer_id absent from the
+                            // trust set is just an unknown device on the LAN —
+                            // never a "cryptographic reset" of an existing
+                            // pairing (impossible by construction: same id ⇒
+                            // same key). Ignore it; do NOT touch trust. Firing
+                            // UntrustedPeerSeen here let ANY stranger's mDNS
+                            // advert remote-wipe the whole trust store.
+                            tracing::debug!(peer = %peer_id_hex, "ignoring advertisement from untrusted/unknown peer");
                             continue;
                         }
                         // Skip if a session is already up to this peer.
@@ -3051,7 +3120,7 @@ async fn discovery_dispatcher(
                         ).await;
                     }
                     DiscoveryEvent::Removed { .. } => {
-                        let _ = event_tx.send(Event::PeerLost);
+                        let _ = event_tx.try_send(Event::PeerLost);
                     }
                 }
             }
@@ -3069,7 +3138,7 @@ async fn start_initiator(
     name: String,
     transport: Arc<Transport>,
     pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
-    event_tx: mpsc::UnboundedSender<Event>,
+    event_tx: mpsc::Sender<Event>,
 ) {
     // Single-flight: refuse to start a second initiator while one is
     // still waiting on its msg2. The pending slot doubles as the route
@@ -3468,7 +3537,7 @@ mod tests {
             .await
             .expect("bind loopback transport");
         let transport = Arc::new(transport);
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(1024);
         let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let inflight = Arc::new(Mutex::new(HashMap::new()));

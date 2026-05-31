@@ -108,7 +108,7 @@ pub fn start(
     static_pub_hex: &str,
     bind_ip: IpAddr,
     udp_port: u16,
-    tx: mpsc::UnboundedSender<DiscoveryEvent>,
+    tx: mpsc::Sender<DiscoveryEvent>,
     shutdown: CancellationToken,
 ) -> Result<ServiceDaemon> {
     let daemon = ServiceDaemon::new().context("create mdns daemon")?;
@@ -182,7 +182,7 @@ fn is_valid_hex_id(s: &str) -> bool {
 async fn browse_loop(
     receiver: mdns_sd::Receiver<ServiceEvent>,
     self_peer_id: String,
-    tx: mpsc::UnboundedSender<DiscoveryEvent>,
+    tx: mpsc::Sender<DiscoveryEvent>,
     shutdown: CancellationToken,
 ) -> Result<()> {
     loop {
@@ -223,7 +223,7 @@ async fn browse_loop(
                             .get_property_val_str("pair_pin")
                             .filter(|s| s.len() == 6 && s.bytes().all(|b| b.is_ascii_digit()))
                             .map(str::to_string);
-                        let _ = tx.send(DiscoveryEvent::Resolved {
+                        let _ = tx.try_send(DiscoveryEvent::Resolved {
                             peer_id_hex: peer_id.to_string(),
                             static_pub_hex: static_pub.to_string(),
                             name,
@@ -232,7 +232,7 @@ async fn browse_loop(
                         });
                     }
                     ServiceEvent::ServiceRemoved(_, fullname) => {
-                        let _ = tx.send(DiscoveryEvent::Removed { fullname });
+                        let _ = tx.try_send(DiscoveryEvent::Removed { fullname });
                     }
                     _ => {}
                 }

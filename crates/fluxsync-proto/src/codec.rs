@@ -1,6 +1,8 @@
 use crate::error::ProtoError;
 use crate::types::{Chunk, ClipboardItem, Frame, Msg, Nak};
-use crate::{MAX_CHUNKS, MAX_CHUNK_DATA, MAX_NAK_MISSING, MAX_PAYLOAD, PROTOCOL_VERSION};
+use crate::{
+    MAX_CHUNKS, MAX_CHUNK_DATA, MAX_HELLO_NAME, MAX_NAK_MISSING, MAX_PAYLOAD, PROTOCOL_VERSION,
+};
 
 /// Encode a [`Frame`] to CBOR bytes.
 ///
@@ -55,6 +57,9 @@ fn validate(frame: &Frame) -> Result<(), ProtoError> {
         Msg::Chunk(chunk) => validate_chunk(chunk),
         Msg::Nak(nak) => validate_nak(nak),
         Msg::BatteryStatus(b) if b.level > 100 => Err(ProtoError::BatteryLevel(b.level)),
+        Msg::Hello(h) if h.name.len() > MAX_HELLO_NAME => {
+            Err(ProtoError::HelloNameTooLong(h.name.len()))
+        }
         _ => Ok(()),
     }
 }

@@ -207,11 +207,7 @@ fn test_06_duplicate_hash_poisoning() {
     assert_eq!(app.state.history.len(), 2);
     // The genuine first item must still be present; SE-14 only ensures
     // the second item isn't dropped on the basis of a forged hash.
-    assert!(app
-        .state
-        .history
-        .iter()
-        .any(|h| h.preview == "Real"));
+    assert!(app.state.history.iter().any(|h| h.preview == "Real"));
 }
 
 // =============================================================================
@@ -327,9 +323,8 @@ fn test_09_lamport_jump_to_max() {
     );
     // SE-08: hostile `u64::MAX - 1` is clamped to LAMPORT_OBSERVE_MAX,
     // not saturated at u64::MAX — subsequent local ticks still advance.
-    use fluxsync_core::clock::LAMPORT_OBSERVE_MAX;
-    assert!(app.clock.now() <= LAMPORT_OBSERVE_MAX + 2);
-    assert!(app.clock.now() > LAMPORT_OBSERVE_MAX - 1);
+    assert!(app.clock.now() <= fluxsync_core::clock::LAMPORT_OBSERVE_MAX + 2);
+    assert!(app.clock.now() > fluxsync_core::clock::LAMPORT_OBSERVE_MAX - 1);
 }
 
 #[test]
@@ -567,16 +562,8 @@ fn test_17_dedup_collision_resistance() {
     // Two frames with the same forged hash but different payloads are
     // both accepted — the peer no longer controls dedup-ring slots.
     assert_eq!(app.state.history.len(), 2);
-    assert!(app
-        .state
-        .history
-        .iter()
-        .any(|h| h.preview == "Content A"));
-    assert!(app
-        .state
-        .history
-        .iter()
-        .any(|h| h.preview == "Content B"));
+    assert!(app.state.history.iter().any(|h| h.preview == "Content A"));
+    assert!(app.state.history.iter().any(|h| h.preview == "Content B"));
 }
 
 #[test]
@@ -949,16 +936,8 @@ fn test_30_simulated_sha256_poisoning_in_history() {
     // Both items end up in history (newest first); the test now
     // verifies the original is still there and "Poison" did not
     // overwrite it — the slot-pinning attack is what SE-14 prevents.
-    assert!(app
-        .state
-        .history
-        .iter()
-        .any(|h| h.preview == "Original"));
-    assert!(app
-        .state
-        .history
-        .iter()
-        .any(|h| h.preview == "Poison"));
+    assert!(app.state.history.iter().any(|h| h.preview == "Original"));
+    assert!(app.state.history.iter().any(|h| h.preview == "Poison"));
 }
 
 #[test]

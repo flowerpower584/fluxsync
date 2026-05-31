@@ -173,8 +173,8 @@ pub fn render_peers(v: &Value) {
         let pid = p.get("peer_id").and_then(Value::as_str).unwrap_or("");
         let pid_short: String = pid.chars().take(10).collect();
         let addr = p.get("addr").and_then(Value::as_str).unwrap_or("—");
-        let rtt = p.get("rtt_ms").and_then(Value::as_u64);
-        let batt = p.get("battery_level").and_then(Value::as_u64);
+        let rtt = p.get("link_latency_ms").and_then(Value::as_u64);
+        let batt = p.get("battery").and_then(Value::as_u64);
         let charging = p.get("charging").and_then(Value::as_bool).unwrap_or(false);
         let rtt_cell = match rtt {
             Some(r) => format!("{r} ms"),
@@ -210,19 +210,16 @@ pub fn render_tail(v: &Value) {
     for entry in arr {
         let level = entry.get("level").and_then(Value::as_str).unwrap_or("INFO");
         let msg = entry.get("msg").and_then(Value::as_str).unwrap_or("");
-        let ts = entry.get("ts").and_then(Value::as_str).unwrap_or("");
+        // LogLevel serializes UPPERCASE: OK / INFO / SYNC / WARN / ERR.
+        // LogEntry carries no timestamp.
         let level_str = match level {
-            "ERROR" => format!("{level:<5}").red().bold().to_string(),
-            "WARN" => format!("{level:<5}").yellow().bold().to_string(),
-            "INFO" => format!("{level:<5}").cyan().to_string(),
-            "DEBUG" => format!("{level:<5}").bright_black().to_string(),
-            _ => format!("{level:<5}").white().to_string(),
+            "ERR" => format!("{level:<4}").red().bold().to_string(),
+            "WARN" => format!("{level:<4}").yellow().bold().to_string(),
+            "SYNC" => format!("{level:<4}").cyan().to_string(),
+            "OK" => format!("{level:<4}").green().to_string(),
+            _ => format!("{level:<4}").bright_black().to_string(),
         };
-        if ts.is_empty() {
-            println!("{level_str}  {msg}");
-        } else {
-            println!("{level_str}  {}  {msg}", ts.dimmed());
-        }
+        println!("{level_str}  {msg}");
     }
 }
 
@@ -236,10 +233,10 @@ pub fn render_pull(v: &Value) {
         return;
     }
     let item = data.unwrap();
-    let text = item.get("text").and_then(Value::as_str);
-    let from = item.get("from").and_then(Value::as_str).unwrap_or("?");
+    let text = item.get("preview").and_then(Value::as_str);
+    let from = item.get("source").and_then(Value::as_str).unwrap_or("?");
     let kind = item.get("kind").and_then(Value::as_str).unwrap_or("text");
-    let ts = item.get("ts").and_then(Value::as_str).unwrap_or("");
+    let ts = item.get("time").and_then(Value::as_str).unwrap_or("");
     println!(
         "{} from {} {} {}",
         "▼".cyan().bold(),
@@ -293,7 +290,7 @@ pub fn render_pair_show(v: &Value) -> Result<()> {
 
 pub fn render_ack(v: &Value, action: &str) {
     let ok = v.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    let err = v.get("error").and_then(Value::as_str);
+    let err = v.get("err").and_then(Value::as_str);
     if ok {
         let detail = v.get("data").and_then(Value::as_str);
         match detail {
@@ -308,7 +305,7 @@ pub fn render_ack(v: &Value, action: &str) {
 
 fn render_err(v: &Value, action: &str) {
     let err = v
-        .get("error")
+        .get("err")
         .and_then(Value::as_str)
         .unwrap_or("malformed response");
     println!("{} {action}: {}", "✗".red().bold(), err.red());

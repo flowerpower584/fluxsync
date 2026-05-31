@@ -92,28 +92,58 @@ function updateUI(s) {
 function renderDevices(s) {
   const list = document.getElementById('device-list');
   list.innerHTML = '';
-  
+
   // Filter out 'pending' placeholder to avoid confusion.
   const hasRealPeer = s.peer_name && s.peer_name !== "pending";
-
-  if (hasRealPeer) {
-    const item = document.createElement('div');
-    item.className = 'device-item';
-    item.innerHTML = `
-      <div>
-        <div class="name-row">
-          <div class="dot"></div>
-          <span class="name">${s.peer_name}</span>
-        </div>
-        <div class="meta">ANDROID · ${s.peer_battery}%</div>
-        <div class="last-seen">LAST SEEN · NOW</div>
-      </div>
-      <button class="unpair-btn" id="unpair-active">UNPAIR</button>
-    `;
-    list.appendChild(item);
-  } else {
-    list.innerHTML = '<div style="text-align:center;color:var(--fs-muted);padding:20px;">No devices paired yet.</div>';
+  if (!hasRealPeer) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'text-align:center;color:var(--fs-muted);padding:20px;';
+    empty.textContent = 'No devices paired yet.';
+    list.appendChild(empty);
+    return;
   }
+
+  // H-TRAY-01: `peer_name` is attacker-controlled (the peer's self-reported
+  // Hello name). NEVER interpolate it into innerHTML — build the row with
+  // the DOM API + textContent so a name like `<img onerror=…>` can't run
+  // privileged Tauri invokes. Also drops the bogus hardcoded "ANDROID" /
+  // "LAST SEEN · NOW" (QA #2/#10) for daemon-derived values.
+  const item = document.createElement('div');
+  item.className = 'device-item';
+
+  const info = document.createElement('div');
+
+  const nameRow = document.createElement('div');
+  nameRow.className = 'name-row';
+  const dot = document.createElement('div');
+  dot.className = 'dot';
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = s.peer_name;
+  nameRow.appendChild(dot);
+  nameRow.appendChild(name);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = typeof s.peer_battery === 'number' ? `${s.peer_battery}%` : '—';
+
+  const lastSeen = document.createElement('div');
+  lastSeen.className = 'last-seen';
+  const linked = s.status === 'syncing' || s.status === 'paused';
+  lastSeen.textContent = linked ? 'CONNECTED' : 'OFFLINE';
+
+  info.appendChild(nameRow);
+  info.appendChild(meta);
+  info.appendChild(lastSeen);
+
+  const btn = document.createElement('button');
+  btn.className = 'unpair-btn';
+  btn.id = 'unpair-active';
+  btn.textContent = 'UNPAIR';
+
+  item.appendChild(info);
+  item.appendChild(btn);
+  list.appendChild(item);
 }
 
 // ── Tab Navigation ──────────────────────────────────────────────
@@ -227,6 +257,8 @@ document.getElementById('btn-reset-session').addEventListener('click', async () 
 // Event delegation for the dynamic Unpair button
 document.getElementById('device-list').addEventListener('click', async (e) => {
   if (e.target.classList.contains('unpair-btn')) {
+    // QA #8: the device-list UNPAIR previously fired with zero confirmation.
+    if (!confirm("Unpair this device? You'll have to pair again to reconnect.")) return;
     try {
       await invoke('fluxsync_unpair');
       showToast("Device unpaired.");
@@ -245,7 +277,11 @@ document.getElementById('link-author').addEventListener('click', () => {
 });
 
 document.getElementById('btn-check-updates').addEventListener('click', () => {
-  showToast("You are on the latest hardened build (v0.5.0).");
+  // QA #6/#7: don't claim a hardcoded (wrong) version or fake an update
+  // check. Report the daemon's own version when known; FluxSync ships no
+  // auto-updater by design — releases live on GitHub.
+  const v = lastState && lastState.version ? ` (v${lastState.version})` : '';
+  showToast(`FluxSync${v} has no auto-update — get releases from GitHub.`);
 });
 
 // ── Initialization ─────────────────────────────────────────────

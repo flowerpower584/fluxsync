@@ -128,6 +128,7 @@ impl FluxsyncHandle {
     /// state-subscriber task is running. Pass `IdentitySource::Keystore`
     /// for the normal "remember pairing across reboots" path.
     #[uniffi::constructor]
+    #[allow(clippy::too_many_lines)]
     pub fn start(
         peer_name: String,
         ipc_path: String,
@@ -155,9 +156,8 @@ impl FluxsyncHandle {
                         "IdentitySource::Keystore.dir must not be empty".into(),
                     ));
                 }
-                let id =
-                    fluxsyncd::keystore::load_or_create_identity(std::path::Path::new(&dir))
-                        .map_err(|e| FluxError::Identity(format!("keystore: {e}")))?;
+                let id = fluxsyncd::keystore::load_or_create_identity(std::path::Path::new(&dir))
+                    .map_err(|e| FluxError::Identity(format!("keystore: {e}")))?;
                 (id, Some(PathBuf::from(dir)))
             }
             IdentitySource::SecretBase64 { secret } => {
@@ -566,30 +566,42 @@ async fn wait_for_socket(path: &PathBuf, deadline: std::time::Duration) -> anyho
     ))
 }
 
+/// M-FFI-01: hard deadline on a single IPC round-trip. Every FFI command runs
+/// via `block_on(send_cmd(...))` on the calling JNI thread; without a timeout a
+/// wedged daemon (busy event loop, an `fsync` storm, a oneshot reply that never
+/// fires) would block the Android UI thread indefinitely → ANR.
+const IPC_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 async fn send_cmd(path: &PathBuf, request: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    let stream = UnixStream::connect(path).await?;
-    let (read, mut write) = stream.into_split();
-    write.write_all(b"{\"subscribe\":\"cmd\"}\n").await?;
-    let line = format!("{request}\n");
-    write.write_all(line.as_bytes()).await?;
-    write.flush().await?;
-    let mut reader = BufReader::new(read);
-    let mut buf = String::new();
-    reader.read_line(&mut buf).await?;
-    let v: serde_json::Value = serde_json::from_str(buf.trim())?;
-    if !v
-        .get("ok")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        let err = v
-            .get("err")
-            .and_then(|x| x.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        anyhow::bail!("daemon refused: {err}");
+    let round_trip = async {
+        let stream = UnixStream::connect(path).await?;
+        let (read, mut write) = stream.into_split();
+        write.write_all(b"{\"subscribe\":\"cmd\"}\n").await?;
+        let line = format!("{request}\n");
+        write.write_all(line.as_bytes()).await?;
+        write.flush().await?;
+        let mut reader = BufReader::new(read);
+        let mut buf = String::new();
+        reader.read_line(&mut buf).await?;
+        let v: serde_json::Value = serde_json::from_str(buf.trim())?;
+        if !v
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            let err = v
+                .get("err")
+                .and_then(|x| x.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            anyhow::bail!("daemon refused: {err}");
+        }
+        Ok(v)
+    };
+    match tokio::time::timeout(IPC_CMD_TIMEOUT, round_trip).await {
+        Ok(res) => res,
+        Err(_) => anyhow::bail!("ipc command timed out after {IPC_CMD_TIMEOUT:?}"),
     }
-    Ok(v)
 }
 
 /// Long-lived state-channel subscriber. Keeps `last_state` updated with

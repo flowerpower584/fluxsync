@@ -100,7 +100,7 @@ pub async fn run_initiator(
     peer_addr: SocketAddr,
     transport: Arc<Transport>,
     mut incoming: mpsc::UnboundedReceiver<Vec<u8>>,
-    event_tx: mpsc::UnboundedSender<Event>,
+    event_tx: mpsc::Sender<Event>,
     peer_id: [u8; 32],
     peer_name: String,
 ) -> Result<()> {
@@ -123,11 +123,11 @@ pub async fn run_initiator(
         return Ok(());
     }
     transport.set_peer_info(peer_id, peer_addr).await;
-    let _ = event_tx.send(Event::PeerSeen {
+    let _ = event_tx.try_send(Event::PeerSeen {
         peer_id,
         name: peer_name,
     });
-    let _ = event_tx.send(Event::HandshakeOk);
+    let _ = event_tx.try_send(Event::HandshakeOk);
     Ok(())
 }
 
@@ -149,7 +149,7 @@ pub async fn run_responder(
     transport: Arc<Transport>,
     trusted: TrustedSet,
     pairing_window: PairingWindow,
-    event_tx: mpsc::UnboundedSender<Event>,
+    event_tx: mpsc::Sender<Event>,
     keystore_dir: Option<std::path::PathBuf>,
     pending: PendingSet,
 ) -> Result<()> {
@@ -286,11 +286,11 @@ pub async fn run_responder(
     transport
         .send_typed(TYPE_HANDSHAKE_RESP, &msg2, from)
         .await?;
-    let _ = event_tx.send(Event::PeerSeen {
+    let _ = event_tx.try_send(Event::PeerSeen {
         peer_id,
         name: entry.name,
     });
-    let _ = event_tx.send(Event::HandshakeOk);
+    let _ = event_tx.try_send(Event::HandshakeOk);
     Ok(())
 }
 

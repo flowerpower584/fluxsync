@@ -40,3 +40,9 @@ pub const MAX_CHUNKS: u16 = 16384;
 /// the decoder enforces this larger ceiling purely as a DoS guard against a
 /// malicious peer claiming a giant missing set.
 pub const MAX_NAK_MISSING: usize = 512;
+
+/// Hard cap on `Hello.name` (M-PROTO-01). The post-handshake greeting carries
+/// the peer's self-reported device name straight into the tray / Android UI;
+/// without a bound a hostile peer could ship a ~datagram-sized name. 256 bytes
+/// is far above any real device name.
+pub const MAX_HELLO_NAME: usize = 256;

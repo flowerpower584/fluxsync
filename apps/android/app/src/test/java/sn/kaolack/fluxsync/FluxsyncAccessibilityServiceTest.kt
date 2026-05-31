@@ -56,8 +56,8 @@ class FluxsyncAccessibilityServiceTest {
         assertEquals("Pixel 8", FluxsyncAccessibilityService.formatPeerName("", "Pixel 8"))
     }
 
-    // FS-022: the Lamport cursor must be persisted so a process restart
-    // doesn't re-sync the daemon's whole history to the clipboard.
+    // M-AND-01: inbound dedup keys on content hash, not a Lamport cursor, so
+    // a daemon restart (Lamport resets to 0) can't silently stop inbound sync.
 
     private fun histItem(lamport: Long, source: String) = HistoryItem(
         hash = "h$lamport",
@@ -70,27 +70,27 @@ class FluxsyncAccessibilityServiceTest {
     )
 
     @Test
-    fun newRemoteItemsFloodsWhenCursorIsZero() {
+    fun newRemoteItemsFloodsWhenSeenSetIsEmpty() {
         val history = listOf(
             histItem(5, "remote"),
             histItem(4, "local"),
             histItem(3, "remote"),
             histItem(2, "remote"),
         )
-        // A restart loses the in-memory cursor → every remote item resynced.
-        val fresh = FluxsyncAccessibilityService.newRemoteItemsSince(history, 0L)
+        // A restart with no persisted set → every remote item resynced, oldest-first.
+        val fresh = FluxsyncAccessibilityService.newRemoteItems(history, emptySet())
         assertEquals(listOf(2L, 3L, 5L), fresh.map { it.lamport })
     }
 
     @Test
-    fun newRemoteItemsEmptyWhenCursorRestoredAtHead() {
+    fun newRemoteItemsEmptyWhenAllHashesSeen() {
         val history = listOf(
             histItem(5, "remote"),
             histItem(4, "local"),
             histItem(3, "remote"),
         )
-        val fresh = FluxsyncAccessibilityService.newRemoteItemsSince(history, 5L)
-        assertTrue("a restored cursor must suppress the restart flood", fresh.isEmpty())
+        val fresh = FluxsyncAccessibilityService.newRemoteItems(history, setOf("h5", "h3"))
+        assertTrue("known hashes must suppress the restart flood", fresh.isEmpty())
     }
 
     @Test
@@ -100,8 +100,21 @@ class FluxsyncAccessibilityServiceTest {
             histItem(8, "remote"),
             histItem(7, "local"),
         )
-        val fresh = FluxsyncAccessibilityService.newRemoteItemsSince(history, 6L)
+        val fresh = FluxsyncAccessibilityService.newRemoteItems(history, emptySet())
         assertEquals(listOf(8L, 9L), fresh.map { it.lamport })
+    }
+
+    @Test
+    fun newRemoteItemsSurvivesDaemonLamportReset() {
+        // After a daemon restart the new remote item carries a LOW lamport (1)
+        // while a previously-applied item had a high one (500). A Lamport gate
+        // would `break` and drop it; the hash set lets it through.
+        val history = listOf(
+            histItem(1, "remote"),
+            histItem(500, "remote"),
+        )
+        val fresh = FluxsyncAccessibilityService.newRemoteItems(history, setOf("h500"))
+        assertEquals(listOf(1L), fresh.map { it.lamport })
     }
 
     @Test

@@ -71,14 +71,21 @@ fn stripe_re() -> &'static Regex {
 
 fn generic_sk_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
+    // L-CORE-03: allow `_`/`-` in the body so modern prefixed keys like
+    // `sk-proj-…` and `sk-ant-…` match — the old `[A-Za-z0-9]{20,}` stopped at
+    // the first hyphen (`proj` = 4 chars < 20) and let them through.
     R.get_or_init(|| {
-        Regex::new(r"sk-[A-Za-z0-9]{20,}").expect("generic-sk regex literal must compile")
+        Regex::new(r"sk-[A-Za-z0-9_-]{20,}").expect("generic-sk regex literal must compile")
     })
 }
 
 fn github_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"ghp_[A-Za-z0-9]{36}").expect("github regex literal must compile"))
+    // L-CORE-03: classic `ghp_` PATs plus fine-grained `github_pat_…` tokens.
+    R.get_or_init(|| {
+        Regex::new(r"gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}")
+            .expect("github regex literal must compile")
+    })
 }
 
 fn aws_re() -> &'static Regex {
@@ -177,8 +184,25 @@ mod tests {
     }
 
     #[test]
+    fn detects_modern_prefixed_sk_keys() {
+        // L-CORE-03: hyphen-bodied keys the old regex missed.
+        assert!(is_sensitive(
+            "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEf"
+        ));
+        assert!(is_sensitive("sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz01234"));
+    }
+
+    #[test]
     fn detects_github_personal_access_token() {
         assert!(is_sensitive("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"));
+    }
+
+    #[test]
+    fn detects_github_fine_grained_token() {
+        // L-CORE-03: `github_pat_…` fine-grained tokens.
+        assert!(is_sensitive(
+            "github_pat_11ABCDEFG0aBcDeFgHiJkL_mNoPqRsTuVwXyZ0123456789"
+        ));
     }
 
     #[test]
