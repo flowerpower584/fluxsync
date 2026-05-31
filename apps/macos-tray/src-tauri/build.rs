@@ -105,7 +105,11 @@ fn prepare_sidecar() {
         .canonicalize()
         .expect("locate repo root from src-tauri");
     let target = std::env::var("TARGET").expect("TARGET");
-    let exe = if target.contains("windows") { ".exe" } else { "" };
+    let exe = if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
 
     let sidecar = manifest_dir
         .join("binaries")

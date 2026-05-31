@@ -134,8 +134,7 @@ fn ipc_cmd_blocking(op: &str) -> Result<Value> {
     let mut reader = std::io::BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
-    serde_json::from_str(line.trim())
-        .with_context(|| format!("parse daemon response: {line:?}"))
+    serde_json::from_str(line.trim()).with_context(|| format!("parse daemon response: {line:?}"))
 }
 
 /// Ask the running daemon for its compiled-in `build_id`.
@@ -157,12 +156,11 @@ fn daemon_build_id() -> Result<Option<String>> {
         .map(str::to_string))
 }
 
-/// Tell a stale daemon to shut down, then wait for it to release its
-/// socket. Returns `true` once the socket stops answering.
+/// Fire-and-forget `shutdown` over the daemon's cmd channel. A clean
+/// shutdown often drops the connection before any response is flushed,
+/// so the reply isn't worth reading.
 #[cfg(unix)]
-fn restart_stale_daemon() -> bool {
-    // Fire-and-forget: a clean shutdown often drops the connection
-    // before any response is flushed, so the reply isn't worth reading.
+fn send_shutdown_cmd() {
     if let Ok(path) = ipc_path() {
         if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&path) {
             use std::io::Write;
@@ -170,6 +168,13 @@ fn restart_stale_daemon() -> bool {
             let _ = s.flush();
         }
     }
+}
+
+/// Tell a stale daemon to shut down, then wait for it to release its
+/// socket. Returns `true` once the socket stops answering.
+#[cfg(unix)]
+fn restart_stale_daemon() -> bool {
+    send_shutdown_cmd();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if !is_daemon_alive() {
@@ -179,6 +184,56 @@ fn restart_stale_daemon() -> bool {
     }
     eprintln!("[fluxsync-tray] stale daemon did not exit within 3s");
     false
+}
+
+/// Ask the running daemon to stop. Invoked when the user quits the tray
+/// (menu "Quit" or Cmd-Q) so FluxSync exits completely instead of
+/// leaving the detached (`setsid`) daemon running in the background,
+/// still bound to UDP 41889 and watching the clipboard. Best-effort,
+/// with a short wait so the process is really gone before the tray
+/// exits.
+#[cfg(unix)]
+pub fn request_daemon_shutdown() {
+    if !is_daemon_alive() {
+        return;
+    }
+    send_shutdown_cmd();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if !is_daemon_alive() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eprintln!("[fluxsync-tray] daemon did not exit within 2s of quit request");
+}
+
+/// Windows variant. Runs in the sync `RunEvent` callback, so it MUST use
+/// `std::fs` on the named pipe — calling the tokio named-pipe client
+/// here panics ("there is no reactor running").
+#[cfg(windows)]
+pub fn request_daemon_shutdown() {
+    if !is_daemon_alive() {
+        return;
+    }
+    if let Ok(path) = ipc_path() {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            let _ = f.write_all(b"{\"subscribe\":\"cmd\"}\n{\"id\":1,\"op\":\"shutdown\"}\n");
+            let _ = f.flush();
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if !is_daemon_alive() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn spawn_daemon_detached() -> Result<PathBuf> {
@@ -234,8 +289,7 @@ fn detach_session() -> std::io::Result<()> {
 fn open_daemon_log() -> Result<std::fs::File> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("could not find home directory"))?;
     let dir = home.join(".fluxsync");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("daemon.log");
     // M2: mode 0o600 on unix. The daemon log captures tracing JSON which
     // can include peer identifiers, addresses, and (in DEBUG builds)
@@ -309,7 +363,10 @@ fn locate_daemon() -> Result<PathBuf> {
             // Sidecar location in macOS bundle: ../Resources/binaries/fluxsyncd-<target>
             #[cfg(target_os = "macos")]
             if let Some(contents) = dir.parent() {
-                let sidecar = contents.join("Resources").join("binaries").join("fluxsyncd-aarch64-apple-darwin");
+                let sidecar = contents
+                    .join("Resources")
+                    .join("binaries")
+                    .join("fluxsyncd-aarch64-apple-darwin");
                 if sidecar.is_file() {
                     return Ok(sidecar);
                 }
@@ -389,9 +446,7 @@ async fn one_shot_inner(request: Value) -> Result<Value> {
     let path = ipc_path()?;
     let (read, mut write) = connect_ipc(&path).await?;
     write.write_all(b"{\"subscribe\":\"cmd\"}\n").await?;
-    write
-        .write_all(format!("{request}\n").as_bytes())
-        .await?;
+    write.write_all(format!("{request}\n").as_bytes()).await?;
     write.flush().await?;
     let mut reader = BufReader::new(read);
     let mut buf = String::new();

@@ -27,7 +27,7 @@ mod sys {
 
     pub struct IpcServer {
         listener: UnixListener,
-        _path: PathBuf,
+        path: PathBuf,
         _lock: Flock<std::fs::File>,
     }
 
@@ -83,7 +83,7 @@ mod sys {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
             Ok(Self {
                 listener,
-                _path: path.to_path_buf(),
+                path: path.to_path_buf(),
                 _lock: lock,
             })
         }
@@ -91,6 +91,16 @@ mod sys {
         pub async fn accept(&self) -> io::Result<IpcConn> {
             let (stream, _) = self.listener.accept().await?;
             Ok(IpcConn { stream })
+        }
+    }
+
+    impl Drop for IpcServer {
+        fn drop(&mut self) {
+            // Unlink our socket inode on exit so a stale path doesn't
+            // linger and read as "daemon running". The flock in `_lock`
+            // releases on drop too. Best-effort: a failure is harmless —
+            // `bind()` removes a stale socket before re-binding anyway.
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 }

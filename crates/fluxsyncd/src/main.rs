@@ -147,16 +147,44 @@ async fn main() -> Result<()> {
     let s2 = shutdown.clone();
 
     tokio::spawn(async move {
-        match signal::ctrl_c().await {
-            Ok(()) => {
-                tracing::info!("ctrl-c received; shutting down");
-                s2.cancel();
-            }
-            Err(e) => tracing::error!(error = %e, "ctrl-c handler failed"),
-        }
+        shutdown_signal().await;
+        tracing::info!("shutdown signal received; shutting down");
+        s2.cancel();
     });
 
     run(cfg, shutdown).await.context("daemon main loop failed")
+}
+
+/// Resolve once any termination signal arrives. On unix this is SIGINT
+/// (ctrl-c) **or** SIGTERM — the latter is what `kill <pid>`, launchd,
+/// and the tray's restart path send, and was previously unhandled, so a
+/// `kill` skipped the graceful `CancellationToken` shutdown entirely.
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::SignalKind;
+    let mut sigterm = match tokio::signal::unix::signal(SignalKind::terminate()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to install SIGTERM handler; SIGINT only");
+            None
+        }
+    };
+    match sigterm.as_mut() {
+        Some(term) => {
+            tokio::select! {
+                _ = signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+        }
+        None => {
+            let _ = signal::ctrl_c().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = signal::ctrl_c().await;
 }
 
 /// Initialise Sentry only when both build-time and run-time opt-ins are

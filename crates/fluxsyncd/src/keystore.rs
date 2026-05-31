@@ -133,6 +133,34 @@ pub fn ensure_dir(dir: &Path) -> Result<()> {
 pub fn load_or_create_identity(dir: &Path) -> Result<Identity> {
     ensure_dir(dir)?;
 
+    // Escape hatch: when the OS keychain is unreachable (headless boot,
+    // a detached/differently-signed binary that triggers a GUI auth
+    // prompt macOS can't satisfy, locked login keychain, no dbus) the
+    // user can opt back into the file-based identity with
+    // `FLUXSYNC_NO_KEYCHAIN=1`. This restores the legacy `identity.bin`
+    // path on the same `#[cfg(unix)]` write helper Android uses. It is
+    // strictly opt-in so the default stays "no plaintext secret on disk".
+    #[cfg(all(unix, not(target_os = "android")))]
+    if std::env::var("FLUXSYNC_NO_KEYCHAIN").as_deref() == Ok("1") {
+        let path = dir.join(IDENTITY_FILE);
+        if path.exists() {
+            let id = read_legacy_identity(&path)?;
+            tracing::warn!(
+                path = %path.display(),
+                "FLUXSYNC_NO_KEYCHAIN set: loaded identity from plaintext file (keychain bypassed)"
+            );
+            return Ok(id);
+        }
+        let id = Identity::generate();
+        let secret = id.secret_bytes();
+        write_secret_atomic(&path, &secret)?;
+        tracing::warn!(
+            path = %path.display(),
+            "FLUXSYNC_NO_KEYCHAIN set: generated identity in plaintext file (keychain bypassed)"
+        );
+        return Ok(id);
+    }
+
     #[cfg(not(target_os = "android"))]
     {
         let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
@@ -188,7 +216,8 @@ pub fn load_or_create_identity(dir: &Path) -> Result<Identity> {
                 return Err(anyhow!(
                     "OS keychain unavailable ({e}); refusing to fall back to plaintext \
                      identity.bin. Fix the backend (unlock Keychain / start dbus / \
-                     enable Credential Manager) and retry."
+                     enable Credential Manager), or set FLUXSYNC_NO_KEYCHAIN=1 to use a \
+                     file-based identity, and retry."
                 ));
             }
         }
@@ -287,11 +316,11 @@ fn secure_wipe_identity_file(path: &Path) {
     }
 }
 
-/// Atomic, mode-0600 write of the legacy `identity.bin`. Compiled only
-/// when the file-fallback path can run: Android at runtime, plus tests
-/// on any unix host (so the migration logic can be exercised by `cargo
-/// test` on macOS/Linux without going through the real keychain).
-#[cfg(any(target_os = "android", all(unix, test)))]
+/// Atomic, mode-0600 write of the legacy `identity.bin`. Compiled on
+/// every unix host: Android at runtime, the `FLUXSYNC_NO_KEYCHAIN`
+/// escape hatch on macOS/Linux, and tests exercising the migration
+/// logic without the real keychain.
+#[cfg(unix)]
 fn write_secret_atomic(path: &Path, bytes: &[u8; 32]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;

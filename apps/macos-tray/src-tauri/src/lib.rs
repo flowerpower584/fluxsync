@@ -13,7 +13,6 @@
 
 mod ipc;
 
-use blake3;
 use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -365,7 +364,7 @@ pub fn run() {
                             .and_then(|x| x.as_str())
                             .unwrap_or("")
                             .to_string();
-                        
+
                         // 1a. Fire `pairing-success` only on a real
                         // unpaired→paired transition. `last_name` is reset to
                         // None whenever the daemon reports no peer, so the SAME
@@ -402,14 +401,14 @@ pub fn run() {
                             if let Some(first) = history.first() {
                                 if let Some(preview) = first.get("preview").and_then(|p| p.as_str()) {
                                     let mut h_guard = lh.lock().unwrap();
-                                    
+
                                     // [FIX] RAM Protection: hash the preview instead of storing it raw.
                                     // Protects the tray app from 10MB+ clipboard payloads.
                                     let current_hash = blake3::hash(preview.as_bytes()).to_hex().to_string();
 
                                     if !preview.is_empty() && *h_guard != current_hash {
                                         *h_guard = current_hash;
-                                        
+
                                         // ❌ BUG FIX: Only notify if it came from the peer (remote)
                                         let source = first.get("source").and_then(|s| s.as_str()).unwrap_or("local");
                                         if source == "remote" {
@@ -546,8 +545,15 @@ pub fn run() {
             // off-screen (or the app has no visible window) fires Reopen.
             // Bring the menu window back on-screen, centred and focused.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = _event {
+            if let tauri::RunEvent::Reopen { .. } = &_event {
                 show_menu(_app);
+            }
+            // The user quit FluxSync (tray "Quit" → app.exit(0), or Cmd-Q).
+            // Stop the daemon too: it was spawned detached (setsid) so it
+            // would otherwise keep running, bound to UDP 41889 and syncing
+            // the clipboard, with no UI left to stop it. Quit means quit.
+            if let tauri::RunEvent::Exit = &_event {
+                ipc::request_daemon_shutdown();
             }
         });
 }
