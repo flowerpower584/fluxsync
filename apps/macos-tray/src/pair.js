@@ -1,13 +1,15 @@
 // Pair window v2 + PR2 (PIN method + verify-words gate).
 //
-// Two flows share the same final state:
-//   * Show:    entry -> show -> paired
+// Both flows share the same final state AND both clear the SAS gate:
+//   * Show:    entry -> show -> verify -> paired
 //   * Enter:   entry -> pin-entry -> pin-progress -> verify -> paired
 //
-// "Show" stays TOFU-silent (URI carries the pubkey out-of-band via QR).
-// "Enter" forces SAS-words verification because the PIN flies over mDNS
-// on a shared LAN — MITM is possible until the user has matched the
-// 6 words on both devices.
+// The daemon's FS-052 trust gate withholds ALL clipboard traffic until
+// `pair_confirm` runs. A flow that shortcuts to "paired" without verify
+// leaves a peer that looks linked but never syncs (the exact copy-paste
+// dead-end users hit on the QR path), and skips the MITM check: the PIN
+// flies over mDNS, and a shown QR can be re-presented to an attacker.
+// So both paths force the user to match the 6 words on both devices.
 
 const { invoke } = window.__TAURI__.core;
 const { getCurrentWindow } = window.__TAURI__.window;
@@ -111,11 +113,10 @@ async function watchForPair() {
     if (name && name !== 'pending' && name === initialPeerName) return;
     if (unlistenPair) { unlistenPair(); unlistenPair = null; }
     const displayName = name === 'pending' ? 'your device' : name;
-    if (pairMethod === 'pin') {
-      await enterVerifyScreen(displayName);
-    } else {
-      showPaired(displayName);
-    }
+    // Both QR ('show') and PIN ('enter') must clear the SAS gate: the
+    // daemon drops every clipboard frame until `pair_confirm`, so a direct
+    // jump to "paired" yields a peer that looks linked but never syncs.
+    await enterVerifyScreen(displayName);
   });
 }
 
@@ -319,7 +320,7 @@ function showPinError(msg) {
   $('pin-hint').textContent = `Attempt ${Math.min(pinAttempts, MAX_PIN_ATTEMPTS)} of ${MAX_PIN_ATTEMPTS}.`;
 }
 
-// ─── Verify-words flow (PIN-only) ────────────────────────────────
+// ─── Verify-words flow (both QR + PIN) ──────────────────────────
 
 async function enterVerifyScreen(_peerDisplayName) {
   showScreen('verify');

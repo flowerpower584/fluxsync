@@ -1664,6 +1664,7 @@ async fn handle_driver_cmd(
                         transport.clone(),
                         pending_initiator_tx.clone(),
                         event_tx.clone(),
+                        Some(pending_pairs.clone()),
                     )
                     .await;
                 } else {
@@ -1770,6 +1771,7 @@ async fn handle_driver_cmd(
                             transport.clone(),
                             pending_initiator_tx.clone(),
                             event_tx.clone(),
+                            Some(pending_pairs.clone()),
                         )
                         .await;
                     }
@@ -1879,6 +1881,7 @@ async fn handle_driver_cmd(
                 transport.clone(),
                 pending_initiator_tx.clone(),
                 event_tx.clone(),
+                Some(pending_pairs.clone()),
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -3036,6 +3039,7 @@ async fn discovery_dispatcher(
                                         transport_clone,
                                         pending_tx,
                                         event_tx_clone,
+                                        None,
                                     ).await;
                                 });
                             }
@@ -3117,6 +3121,7 @@ async fn discovery_dispatcher(
                             transport.clone(),
                             pending_initiator_tx.clone(),
                             event_tx.clone(),
+                            None,
                         ).await;
                     }
                     DiscoveryEvent::Removed { .. } => {
@@ -3139,6 +3144,7 @@ async fn start_initiator(
     transport: Arc<Transport>,
     pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
     event_tx: mpsc::Sender<Event>,
+    pending: Option<PendingSet>,
 ) {
     // Single-flight: refuse to start a second initiator while one is
     // still waiting on its msg2. The pending slot doubles as the route
@@ -3158,7 +3164,7 @@ async fn start_initiator(
     let pending_clear = pending_initiator_tx.clone();
     tokio::spawn(async move {
         let result = handshake::run_initiator(
-            identity, static_pub, addr, transport, rx, event_tx, peer_id, name,
+            identity, static_pub, addr, transport, rx, event_tx, peer_id, name, pending,
         )
         .await;
         // Clear the pending slot whether the handshake succeeded or

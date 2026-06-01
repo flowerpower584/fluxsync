@@ -103,6 +103,10 @@ pub async fn run_initiator(
     event_tx: mpsc::Sender<Event>,
     peer_id: [u8; 32],
     peer_name: String,
+    // `Some` only for fresh pair-command handshakes (gate + verbal confirm);
+    // `None` for reconnects to an already-confirmed peer, which must not be
+    // re-gated. Mirrors the responder's `newly_tofu`-only pending insert.
+    pending: Option<PendingSet>,
 ) -> Result<()> {
     let (initiator, msg1) = Initiator::start(&identity, &peer_static_pub)?;
     transport
@@ -115,6 +119,13 @@ pub async fn run_initiator(
         .ok_or_else(|| anyhow!("handshake channel closed"))?;
 
     let session = initiator.finish(&msg2)?;
+    // FS-052: SAS bound to this handshake hash. The initiator already
+    // authenticated the responder out-of-band (scanned QR / typed PIN), but
+    // we still surface the 6 words and gate clipboard so the user can match
+    // them on both devices and explicitly confirm — symmetric with the
+    // responder, and the only way the user can reject a wrong handshake.
+    let sas_words: [String; 6] = fingerprint_from_handshake_hash(session.handshake_hash())
+        .map(std::string::ToString::to_string);
     if !transport.try_install_session(peer_id, session).await {
         // Responder side completed first (simultaneous-init race). The
         // existing session is authoritative; drop ours and let the peer
@@ -123,6 +134,36 @@ pub async fn run_initiator(
         return Ok(());
     }
     transport.set_peer_info(peer_id, peer_addr).await;
+
+    // FS-052: insert the pending entry BEFORE announcing the link so the
+    // outbound gate engages immediately. Mirrors the responder's insert
+    // (expiry sweep + hard cap). `PairConfirm` clears it; the reaper revokes
+    // both the pending and the trusted slot if the user never confirms.
+    if let Some(pending) = pending {
+        let mut pending_guard = pending.lock().await;
+        let now = Instant::now();
+        pending_guard.retain(|_, p| p.expires_at > now);
+        if pending_guard.len() >= MAX_PENDING_PAIRS {
+            if let Some(victim) = pending_guard
+                .iter()
+                .min_by_key(|(_, p)| p.expires_at)
+                .map(|(k, _)| *k)
+            {
+                pending_guard.remove(&victim);
+            }
+        }
+        pending_guard.insert(
+            peer_id,
+            PendingPair {
+                static_pub: peer_static_pub,
+                name: peer_name.clone(),
+                sas_words,
+                from: peer_addr,
+                expires_at: now + PAIRING_WINDOW,
+            },
+        );
+    }
+
     let _ = event_tx.try_send(Event::PeerSeen {
         peer_id,
         name: peer_name,

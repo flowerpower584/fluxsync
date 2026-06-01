@@ -642,7 +642,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_accept(
     ): Short
+    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_confirm(
+    ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_from_uri(
+    ): Short
+    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_pending(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_show(
     ): Short
@@ -698,8 +702,12 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_accept(`ptr`: Long,`pubkeyB32`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`addr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_confirm(`ptr`: Long,`peerId`: RustBuffer.ByValue,`accept`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_from_uri(`ptr`: Long,`uri`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_pending(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_show(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_poll_logs(`ptr`: Long,`since`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -850,7 +858,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_accept() != 27254.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_confirm() != 53681.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_from_uri() != 26161.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_pending() != 12529.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_show() != 36878.toShort()) {
@@ -1339,10 +1353,25 @@ public interface FluxsyncHandleInterface {
     fun `pairAccept`(`pubkeyB32`: kotlin.String, `name`: kotlin.String, `addr`: kotlin.String)
     
     /**
+     * FS-052: accept or reject a pending pair after the user has compared the
+     * 6 SAS words on both devices. `accept = true` clears the gate so
+     * clipboard can flow; `accept = false` revokes the peer entirely.
+     */
+    fun `pairConfirm`(`peerId`: kotlin.String, `accept`: kotlin.Boolean)
+    
+    /**
      * Trust a peer described by a `fluxsync://pair/...` URI (typically
      * from a scanned QR). `name` is the nickname for the peer.
      */
     fun `pairFromUri`(`uri`: kotlin.String, `name`: kotlin.String)
+    
+    /**
+     * FS-052: list TOFU pairs awaiting verbal SAS confirmation. Returns the
+     * raw `data` JSON array (`[{peer_id, name, sas_words, ...}]`) so the UI
+     * can render the 6-word compare after a scan. Empty array once the user
+     * has confirmed (or if nothing is pending).
+     */
+    fun `pairPending`(): kotlin.String
     
     /**
      * This device's pair info as JSON (matches `CmdData::PairInfo`).
@@ -1572,6 +1601,24 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
 
     
     /**
+     * FS-052: accept or reject a pending pair after the user has compared the
+     * 6 SAS words on both devices. `accept = true` clears the gate so
+     * clipboard can flow; `accept = false` revokes the peer entirely.
+     */
+    @Throws(FluxException::class)override fun `pairConfirm`(`peerId`: kotlin.String, `accept`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_confirm(
+        it,
+        FfiConverterString.lower(`peerId`),FfiConverterBoolean.lower(`accept`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Trust a peer described by a `fluxsync://pair/...` URI (typically
      * from a scanned QR). `name` is the nickname for the peer.
      */
@@ -1585,6 +1632,26 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
 }
     }
     
+    
+
+    
+    /**
+     * FS-052: list TOFU pairs awaiting verbal SAS confirmation. Returns the
+     * raw `data` JSON array (`[{peer_id, name, sas_words, ...}]`) so the UI
+     * can render the 6-word compare after a scan. Empty array once the user
+     * has confirmed (or if nothing is pending).
+     */
+    @Throws(FluxException::class)override fun `pairPending`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_pending(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     

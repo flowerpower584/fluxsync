@@ -22,11 +22,13 @@ import androidx.navigation.compose.rememberNavController
 import sn.kaolack.fluxsync.ui.screens.LinkedScreen
 import sn.kaolack.fluxsync.ui.screens.PairingDashboardScreen
 import sn.kaolack.fluxsync.ui.screens.PairScanScreen
+import sn.kaolack.fluxsync.ui.screens.PairVerifyScreen
 import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
 object Routes {
     const val PAIR_DASHBOARD = "pair_dashboard"
     const val PAIR_SCAN = "pair_scan"
+    const val PAIR_VERIFY = "pair_verify" // FS-052: SAS verify after scan
     const val LINKED = "linked" // This will remain the parent container with BottomNav
 
     // Main tabs
@@ -90,9 +92,11 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
     // dropping never triggers navigation — the user keeps their screen.
     androidx.compose.runtime.LaunchedEffect(state?.peerName) {
         val s = state ?: return@LaunchedEffect
-        if (s.peerName.isNotEmpty() &&
-            nav.currentBackStackEntry?.destination?.route != Routes.LINKED
-        ) {
+        // Only auto-advance from the dashboard. Never yank the user off the
+        // scan or SAS-verify screens — FS-052 requires an explicit confirm
+        // there, and peerName populates the moment the handshake lands.
+        val route = nav.currentBackStackEntry?.destination?.route
+        if (s.peerName.isNotEmpty() && route == Routes.PAIR_DASHBOARD) {
             nav.navigate(Routes.LINKED) {
                 popUpTo(Routes.PAIR_DASHBOARD) { inclusive = true }
             }
@@ -116,12 +120,25 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
         composable(Routes.PAIR_SCAN) {
             PairScanScreen(
                 vm = vm,
-                onPaired = {
+                // FS-052: a scan only TOFU-trusts; the SAS verify gate decides
+                // whether clipboard flows. Hand off to the verify screen.
+                onPaired = { nav.navigate(Routes.PAIR_VERIFY) },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Routes.PAIR_VERIFY) {
+            PairVerifyScreen(
+                vm = vm,
+                onConfirmed = {
                     nav.navigate(Routes.LINKED) {
                         popUpTo(Routes.PAIR_DASHBOARD) { inclusive = true }
                     }
                 },
-                onBack = { nav.popBackStack() },
+                onRejected = {
+                    nav.navigate(Routes.PAIR_DASHBOARD) {
+                        popUpTo(Routes.PAIR_SCAN) { inclusive = true }
+                    }
+                },
             )
         }
         composable(Routes.LINKED) {

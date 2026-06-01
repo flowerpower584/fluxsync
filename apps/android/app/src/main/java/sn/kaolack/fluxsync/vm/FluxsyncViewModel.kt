@@ -125,6 +125,24 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
     fun pairAccept(pubkeyB32: String, name: String, addr: String = "") =
         ffi("Accept pairing") { it.pairAccept(pubkeyB32, name, addr) }
 
+    /**
+     * FS-052: raw JSON array of TOFU pairs awaiting verbal SAS confirmation.
+     * Polled by the verify screen after a scan so the user can compare the
+     * 6 words against the peer's screen. Empty `[]` once confirmed.
+     */
+    suspend fun pairPending(): String? = withContext(Dispatchers.IO) {
+        try {
+            getHandle()?.pairPending()
+        } catch (t: Throwable) {
+            _error.value = t.message
+            null
+        }
+    }
+
+    /** FS-052: accept (clears gate) or reject (revokes) a pending pair. */
+    fun pairConfirm(peerId: String, accept: Boolean) =
+        ffi(if (accept) "Confirm pairing" else "Reject pairing") { it.pairConfirm(peerId, accept) }
+
     fun checkAccessibility() {
         val app = getApplication<Application>()
         _isAccessibilityEnabled.value = isAccessibilityServiceEnabled(app, FluxsyncAccessibilityService::class.java)

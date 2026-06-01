@@ -500,6 +500,43 @@ impl FluxsyncHandle {
             .map(|_| ())
             .map_err(|e| FluxError::Ipc(e.to_string()))
     }
+
+    /// FS-052: list TOFU pairs awaiting verbal SAS confirmation. Returns the
+    /// raw `data` JSON array (`[{peer_id, name, sas_words, ...}]`) so the UI
+    /// can render the 6-word compare after a scan. Empty array once the user
+    /// has confirmed (or if nothing is pending).
+    pub fn pair_pending(&self) -> Result<String, FluxError> {
+        let resp = self
+            .runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({"id": 1, "op": "pair_pending"}),
+            ))
+            .map_err(|e| FluxError::Ipc(e.to_string()))?;
+        // `data` is omitted when the list is empty (skip_serializing_if).
+        Ok(resp
+            .get("data")
+            .map_or_else(|| "[]".to_string(), std::string::ToString::to_string))
+    }
+
+    /// FS-052: accept or reject a pending pair after the user has compared the
+    /// 6 SAS words on both devices. `accept = true` clears the gate so
+    /// clipboard can flow; `accept = false` revokes the peer entirely.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn pair_confirm(&self, peer_id: String, accept: bool) -> Result<(), FluxError> {
+        self.runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({
+                    "id": 1,
+                    "op": "pair_confirm",
+                    "peer_id": peer_id,
+                    "accept": accept,
+                }),
+            ))
+            .map(|_| ())
+            .map_err(|e| FluxError::Ipc(e.to_string()))
+    }
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────
