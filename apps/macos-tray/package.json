@@ -1,7 +1,7 @@
 {
   "name": "fluxsync-macos-tray",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.6.1",
   "type": "module",
   "description": "FluxSync macOS menu-bar app (Tauri v2). Frontend is a static HTML/CSS/JS bundle under src/.",
   "scripts": {
