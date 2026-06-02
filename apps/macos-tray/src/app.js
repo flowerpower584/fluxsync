@@ -217,9 +217,8 @@ function showToast(message) {
   toastTimer = setTimeout(() => el.classList.remove('visible'), 3000);
 }
 
-document.getElementById('open-settings').addEventListener('click', () => {
-  invoke('fluxsync_open_settings');
-});
+const headerSettings = document.getElementById('header-settings');
+if (headerSettings) headerSettings.addEventListener('click', () => invoke('fluxsync_open_settings'));
 
 // Pair CTA (unpaired state) — opens the dedicated pair window, which hides
 // this menu so only one window is ever on screen.
