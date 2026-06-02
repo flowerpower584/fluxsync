@@ -29,21 +29,25 @@ import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
 /**
  * Compose entry point. Owns the `FluxsyncViewModel` (which boots/shuts
- * down the Rust daemon thread) and three pieces of OS plumbing the
- * daemon can't do from Rust:
+ * down the Rust daemon thread) and one piece of OS plumbing: a foreground
+ * clipboard bridge.
  *
- *   * **Clipboard** — registers a `ClipboardManager` listener so local
- *     copies are pushed to the peer; observes `vm.state.history[0]` so
- *     items received from the peer are written to the OS clipboard.
- *     Both directions dedup against `lastWrittenText` to break the
- *     read-our-own-write echo.
- *   * **Battery** — registers a `ACTION_BATTERY_CHANGED` receiver and
- *     forwards level/charging into the daemon via `vm.setSelfBattery`,
- *     so the peer device sees the real battery instead of a hardcoded
- *     100%.
- *   * **Lifecycle** — the Activity's lifecycleScope cancels the
- *     listeners + receiver in `onDestroy`, which the ViewModel can't do
- *     because it doesn't have a Context.
+ *   * **Clipboard (outbound)** — registers a `ClipboardManager` listener
+ *     so local copies (text + image) made while FluxSync is focused are
+ *     pushed to the peer, and re-checks the clipboard in `onResume`.
+ *     Echoes of peer items we just wrote are dropped via
+ *     `FluxsyncManager.isRecentPeerClip`; a single copy is pushed once via
+ *     `FluxsyncManager.markPushedIfNew`. This is a foreground convenience
+ *     path only — the AccessibilityService owns the daemon AND runs the
+ *     same clipboard capture in the background, so sync does not depend on
+ *     this Activity being alive.
+ *   * **Lifecycle** — the Activity's lifecycleScope unregisters the
+ *     listener in `onDestroy`, which the ViewModel can't do (no Context).
+ *
+ * Inbound (peer → clipboard) and battery reporting are NOT handled here:
+ * the AccessibilityService poll loop writes received items to the OS
+ * clipboard and forwards battery state. There is no `vm.state.history`
+ * observer in this Activity.
  *
  * Build pipeline (run from the workspace root):
  *
@@ -85,10 +89,13 @@ class MainActivity : ComponentActivity() {
         val raw = item.coerceToText(this) ?: return@OnPrimaryClipChangedListener
         val text = raw.toString()
         if (text.isEmpty()) return@OnPrimaryClipChangedListener
-        // Compare trimmed: syncToSystemClipboard stores lastPeerClipText
-        // trimmed, so an untrimmed compare would echo back any peer item
-        // with leading/trailing whitespace.
-        if (text.trim() == FluxsyncManager.lastPeerClipText) return@OnPrimaryClipChangedListener
+        // #6 echo guard: skip items we just wrote from a peer. A bounded
+        // recency set (not one volatile string) keeps two peer items that
+        // arrive back-to-back both suppressed.
+        if (FluxsyncManager.isRecentPeerClip(text)) return@OnPrimaryClipChangedListener
+        // #5: dedup against the a11y copy detector so one local copy is
+        // pushed once, not twice.
+        if (!FluxsyncManager.markPushedIfNew(text)) return@OnPrimaryClipChangedListener
 
         lifecycleScope.launch { vm.pushText(text) }
     }
@@ -150,11 +157,17 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         currentVm?.checkAccessibility()
         
-        // Force a clipboard check when the app is opened
+        // #5: re-check the clipboard on open, but don't re-broadcast a stale
+        // local item. onResume fires on every foreground, so an unguarded push
+        // here clobbers the peer with an old clip each time. Skip peer echoes
+        // (isRecentPeerClip) and anything already pushed (markPushedIfNew).
         val clip = clipboard.primaryClip
         if (clip != null && clip.itemCount > 0) {
-            val text = clip.getItemAt(0).coerceToText(this)?.toString()?.trim()
-            if (text != null && text.isNotEmpty() && text != FluxsyncManager.lastPeerClipText?.trim()) {
+            val text = clip.getItemAt(0).coerceToText(this)?.toString()
+            if (!text.isNullOrEmpty() &&
+                !FluxsyncManager.isRecentPeerClip(text) &&
+                FluxsyncManager.markPushedIfNew(text)
+            ) {
                 currentVm?.pushText(text)
             }
         }

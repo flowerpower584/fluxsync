@@ -5,6 +5,9 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.view.accessibility.AccessibilityEvent
@@ -22,9 +25,14 @@ import java.io.File
  *
  * Responsibilities:
  *   1. Boot the Rust daemon (FluxsyncHandle) in onCreate()
- *   2. Track text selections across the entire OS
- *   3. Detect "Copy" button clicks and push selected text to the daemon
- *   4. Intercept Android 13+/Samsung clipboard overlay as fallback
+ *   2. Capture local copies — text AND image — via a system clipboard
+ *      listener. A connected AccessibilityService is exempt from Android's
+ *      background clipboard-read restriction, so this fires for every copy
+ *      regardless of locale, icon-only "copy" buttons, or whether a FluxSync
+ *      window is focused. This is the real background-capture path.
+ *   3. Detect "Copy" button clicks as a secondary fallback that pushes the
+ *      selected text (covers the rare case a copy never reaches the clipboard).
+ *   4. Push captured items to the daemon
  *   5. Ensure the FluxsyncService notification stays alive
  */
 class FluxsyncAccessibilityService : AccessibilityService() {
@@ -33,7 +41,10 @@ class FluxsyncAccessibilityService : AccessibilityService() {
 
     private var lastSelectedText: String = ""
     private var lastLongClickedText: String = ""
-    private var lastPushedText: String = ""
+
+    private lateinit var clipboard: ClipboardManager
+    private var clipListenerRegistered = false
+    private val clipListener = ClipboardManager.OnPrimaryClipChangedListener { handleLocalClipChange() }
 
     private var lastSentLevel: Int = -1
     private var lastSentCharging: Boolean = false
@@ -92,6 +103,91 @@ class FluxsyncAccessibilityService : AccessibilityService() {
             android.util.Log.w("FluxSync", "Failed to restore seen-hash set: ${e.message}")
             LinkedHashSet()
         }
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        // Now connected → the app counts as an enabled AccessibilityService,
+        // which Android exempts from the background clipboard-read restriction.
+        // A primary-clip listener therefore captures local copies (text AND
+        // image) even with no FluxSync window focused — the real background
+        // capture path. Guarded so a re-connect can't stack two listeners.
+        if (clipListenerRegistered) return
+        try {
+            clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.addPrimaryClipChangedListener(clipListener)
+            clipListenerRegistered = true
+        } catch (e: Exception) {
+            android.util.Log.w("FluxSync", "Clipboard listener registration failed: ${e.message}")
+        }
+    }
+
+    /**
+     * #1/#2: capture a LOCAL copy straight off the system clipboard. Reached
+     * only while the service is connected (background clipboard-read
+     * exemption), so it handles every locale and icon-only "copy" button the
+     * TYPE_VIEW_CLICKED text heuristic misses, plus images the heuristic can't
+     * see at all.
+     */
+    private fun handleLocalClipChange() {
+        val clip = try {
+            clipboard.primaryClip
+        } catch (e: Exception) {
+            android.util.Log.w("FluxSync", "Clipboard read failed: ${e.message}")
+            null
+        } ?: return
+        if (clip.itemCount == 0) return
+        val item = clip.getItemAt(0)
+
+        // Image first: coerceToText on an image item returns the URI string.
+        if (clip.description?.hasMimeType("image/*") == true && item.uri != null) {
+            val uri = item.uri
+            // Our own inbound peer images are staged via this app's
+            // FileProvider; a matching authority means this is an echo.
+            if (uri.authority == "$packageName.fileprovider") return
+            scope.launch {
+                val png = readClipboardImageAsPng(uri) ?: return@launch
+                FluxsyncManager.withHandle { it.pushItem("image", png) }
+                    ?: android.util.Log.w("FluxSync", "Image push failed: handle null")
+            }
+            return
+        }
+
+        val text = item.coerceToText(this)?.toString() ?: return
+        if (text.isEmpty()) return
+        // #6 echo guard: never bounce a peer item we just wrote back to it.
+        if (FluxsyncManager.isRecentPeerClip(text)) return
+        // pushTextToDaemon applies the #5 shared-dedup gate.
+        pushTextToDaemon(text)
+    }
+
+    /**
+     * Decode a clipboard image URI and re-encode as PNG (the phase-1 image
+     * wire format). Returns null on decode failure or if it exceeds the
+     * daemon's payload cap. Runs off the main thread by its caller.
+     */
+    private fun readClipboardImageAsPng(uri: Uri): ByteArray? = try {
+        val bitmap = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+        when {
+            bitmap == null -> {
+                android.util.Log.w("FluxSync", "Clipboard image decode failed: $uri")
+                null
+            }
+            else -> {
+                val out = java.io.ByteArrayOutputStream()
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                val bytes = out.toByteArray()
+                if (bytes.size > MAX_IMAGE_BYTES) {
+                    android.util.Log.w("FluxSync", "Clipboard image ${bytes.size}B over cap, skipping")
+                    null
+                } else {
+                    bytes
+                }
+            }
+        }
+    } catch (e: Exception) {
+        android.util.Log.w("FluxSync", "Clipboard image read error: ${e.message}")
+        null
     }
 
     /**
@@ -156,40 +252,15 @@ class FluxsyncAccessibilityService : AccessibilityService() {
             while (isActive) {
                 var linked = false
                 try {
-                    FluxsyncManager.withHandle { h ->
+                    // Snapshot under the handle lock, then release it BEFORE the
+                    // clipboard writes — those hop to Dispatchers.Main and must
+                    // not park a Main-thread write while holding handleLock.
+                    val parsed = FluxsyncManager.withHandle { h ->
                         val raw = h.pollState()
-                        if (raw.isNotEmpty()) {
-                            val parsed = sn.kaolack.fluxsync.vm.DaemonState.parse(raw)
-                            if (parsed != null) {
-                                linked = parsed.active
-                                FluxsyncManager.updateState(parsed)
-
-                                // Reset the echo guard on disconnect so a
-                                // fresh pair doesn't inherit a stale value.
-                                if (parsed.peerName.isEmpty()) {
-                                    FluxsyncManager.lastPeerClipText = ""
-                                }
-
-                                // Sync incoming clipboard items to system clipboard
-                                if (parsed.history.isNotEmpty()) {
-                                    // Process from oldest to newest to preserve order.
-                                    val fresh = newRemoteItems(parsed.history, seenHashes)
-                                    for (item in fresh) {
-                                        if (item.kind == "image") {
-                                            syncImageToSystemClipboard(item.hash)
-                                        } else {
-                                            syncToSystemClipboard(item.preview)
-                                        }
-                                        markSeen(item.hash)
-                                    }
-                                    // M-AND-01: persist only when the set actually grew,
-                                    // so the tight poll doesn't write SharedPreferences
-                                    // several times a second.
-                                    if (fresh.isNotEmpty()) {
-                                        persistSeenHashes()
-                                    }
-                                }
-                            }
+                        val state = if (raw.isNotEmpty()) {
+                            sn.kaolack.fluxsync.vm.DaemonState.parse(raw)
+                        } else {
+                            null
                         }
 
                         // Drain any new daemon log entries into the
@@ -213,6 +284,45 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                             }
                         } catch (e: Exception) {
                             android.util.Log.w("FluxSync", "Log poll error: ${e.message}")
+                        }
+                        state
+                    }
+
+                    if (parsed != null) {
+                        linked = parsed.active
+                        FluxsyncManager.updateState(parsed)
+
+                        // Reset the echo guard on disconnect so a fresh pair
+                        // doesn't inherit a stale value.
+                        if (parsed.peerName.isEmpty()) {
+                            FluxsyncManager.clearPeerClips()
+                        }
+
+                        // Sync incoming clipboard items to the system clipboard.
+                        if (parsed.history.isNotEmpty()) {
+                            // Oldest to newest to preserve order.
+                            val fresh = newRemoteItems(parsed.history, seenHashes)
+                            var grew = false
+                            for (item in fresh) {
+                                // #7: mark the hash seen ONLY after the write
+                                // actually lands. A thrown setPrimaryClip used
+                                // to mark-then-lose the item with no retry.
+                                val ok = if (item.kind == "image") {
+                                    syncImageToSystemClipboard(item.hash)
+                                } else {
+                                    syncToSystemClipboard(item.preview)
+                                }
+                                if (ok) {
+                                    markSeen(item.hash)
+                                    grew = true
+                                }
+                            }
+                            // M-AND-01: persist only when the set actually grew,
+                            // so the tight poll doesn't write SharedPreferences
+                            // several times a second.
+                            if (grew) {
+                                persistSeenHashes()
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -249,22 +359,24 @@ class FluxsyncAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun syncToSystemClipboard(text: String) {
-        scope.launch(Dispatchers.Main) {
+    /** Returns true only if the write to the OS clipboard actually landed. */
+    private suspend fun syncToSystemClipboard(text: String): Boolean =
+        withContext(Dispatchers.Main) {
             try {
-                // Important: Mark this as a peer item BEFORE writing to OS clipboard
-                // so MainActivity's clipListener ignores the event and doesn't echo it.
-                FluxsyncManager.lastPeerClipText = text.trim()
+                // Mark as a peer item BEFORE writing so MainActivity's clip
+                // listener treats the resulting change as an echo, not a copy.
+                FluxsyncManager.rememberPeerClip(text)
 
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 val clip = android.content.ClipData.newPlainText("FluxSync", text)
                 clipboard.setPrimaryClip(clip)
                 android.util.Log.i("FluxSync", "✅ CLIPBOARD SYNCED: [${text.take(30)}...]")
+                true
             } catch (e: Exception) {
                 android.util.Log.e("FluxSync", "Failed to write to system clipboard: ${e.message}")
+                false
             }
         }
-    }
 
     /**
      * Write an inbound peer image to the OS clipboard. The daemon keeps
@@ -275,35 +387,36 @@ class FluxsyncAccessibilityService : AccessibilityService() {
      * FileProvider — MainActivity's clip listener recognises that authority
      * and skips the echo.
      */
-    private fun syncImageToSystemClipboard(hash: String) {
+    /** Returns true only if the image actually reached the OS clipboard. */
+    private suspend fun syncImageToSystemClipboard(hash: String): Boolean {
         if (hash.isEmpty()) {
             android.util.Log.w("FluxSync", "Image history row carries no hash; cannot fetch")
-            return
+            return false
         }
-        scope.launch {
-            try {
-                val png = FluxsyncManager.withHandle { it.fetchItem(hash) }
-                if (png == null || png.isEmpty()) {
-                    android.util.Log.w("FluxSync", "fetchItem returned no bytes for $hash")
-                    return@launch
-                }
-                val dir = File(cacheDir, "images").apply { mkdirs() }
-                val file = File(dir, "clip.png")
-                file.writeBytes(png)
-                val uri = androidx.core.content.FileProvider.getUriForFile(
-                    this@FluxsyncAccessibilityService,
-                    "$packageName.fileprovider",
-                    file,
-                )
-                withContext(Dispatchers.Main) {
-                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    val clip = android.content.ClipData.newUri(contentResolver, "FluxSync", uri)
-                    clipboard.setPrimaryClip(clip)
-                    android.util.Log.i("FluxSync", "✅ IMAGE SYNCED: ${png.size} B")
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("FluxSync", "Failed to write image to clipboard: ${e.message}")
+        return try {
+            val png = FluxsyncManager.withHandle { it.fetchItem(hash) }
+            if (png == null || png.isEmpty()) {
+                android.util.Log.w("FluxSync", "fetchItem returned no bytes for $hash")
+                return false
             }
+            val dir = File(cacheDir, "images").apply { mkdirs() }
+            val file = File(dir, "clip.png")
+            file.writeBytes(png)
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this@FluxsyncAccessibilityService,
+                "$packageName.fileprovider",
+                file,
+            )
+            withContext(Dispatchers.Main) {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = android.content.ClipData.newUri(contentResolver, "FluxSync", uri)
+                clipboard.setPrimaryClip(clip)
+                android.util.Log.i("FluxSync", "✅ IMAGE SYNCED: ${png.size} B")
+            }
+            true
+        } catch (e: Exception) {
+            android.util.Log.e("FluxSync", "Failed to write image to clipboard: ${e.message}")
+            false
         }
     }
 
@@ -372,8 +485,10 @@ class FluxsyncAccessibilityService : AccessibilityService() {
     // ── Push to Daemon ─────────────────────────────────────────────
 
     private fun pushTextToDaemon(text: String) {
-        if (text == lastPushedText) return
-        lastPushedText = text
+        // #5: shared dedup window across the a11y copy detector and
+        // MainActivity's clip listener / onResume — one copy must not fan
+        // out into two pushes.
+        if (!FluxsyncManager.markPushedIfNew(text)) return
 
         scope.launch {
             // ✅ REMEDIATION: Acquire lock INSIDE coroutine to prevent Use-After-Free
@@ -401,6 +516,9 @@ class FluxsyncAccessibilityService : AccessibilityService() {
 
         /** Cap on remembered inbound hashes — bounds the persisted set. */
         private const val MAX_SEEN_HASHES = 256
+
+        /** Max image payload, mirrors the daemon proto `MAX_PAYLOAD` (16 MiB). */
+        private const val MAX_IMAGE_BYTES = 16 * 1024 * 1024
 
         /**
          * M-AND-01: remote history items not yet applied to the system
@@ -492,6 +610,11 @@ class FluxsyncAccessibilityService : AccessibilityService() {
             }
         }
 
+        if (clipListenerRegistered) {
+            try {
+                clipboard.removePrimaryClipChangedListener(clipListener)
+            } catch (_: Exception) {}
+        }
         try {
             unregisterReceiver(batteryReceiver)
         } catch (_: Exception) {}

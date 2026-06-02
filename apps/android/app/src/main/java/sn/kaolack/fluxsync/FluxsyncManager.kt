@@ -29,11 +29,76 @@ object FluxsyncManager {
     val logCursor: Long get() = _logCursor.get()
 
     /**
-     * Text most recently written to the system clipboard BY US (from peer).
-     * Used to prevent the MainActivity clipListener from echoing it back.
+     * #6 echo guard: trimmed texts recently written to the system clipboard
+     * BY US (inbound peer items). A bounded recency set, not a single
+     * @Volatile string — two peer items landing back-to-back must BOTH stay
+     * suppressed, and the older one can't be forgotten the instant the newer
+     * one arrives. Written by the a11y poll loop (IO), read by MainActivity's
+     * clip listener (Main) → its own monitor.
      */
-    @Volatile
-    var lastPeerClipText: String = ""
+    private const val PEER_CLIP_CAP = 16
+    private val peerClipLock = Any()
+    private val peerClips = LinkedHashSet<String>()
+
+    fun rememberPeerClip(text: String) {
+        val key = text.trim()
+        if (key.isEmpty()) return
+        synchronized(peerClipLock) {
+            peerClips.remove(key)
+            peerClips.add(key)
+            evict(peerClips, PEER_CLIP_CAP)
+        }
+    }
+
+    fun isRecentPeerClip(text: String): Boolean {
+        val key = text.trim()
+        if (key.isEmpty()) return false
+        return synchronized(peerClipLock) { peerClips.contains(key) }
+    }
+
+    /** Drop the echo guard on disconnect so a fresh pair starts clean. */
+    fun clearPeerClips() {
+        synchronized(peerClipLock) { peerClips.clear() }
+    }
+
+    /**
+     * #5 outbound dedup: trimmed texts recently pushed to the daemon. The
+     * a11y "Copy"-button detector and MainActivity's clip listener + onResume
+     * re-push all run in this one process; without a shared window a single
+     * copy fires two pushes, and onResume re-broadcasts a stale local item on
+     * every app open. [markPushedIfNew] is an atomic check-and-set: true means
+     * "newly recorded, caller should push", false means "duplicate, skip".
+     */
+    private const val PUSHED_CLIP_CAP = 16
+    private val pushedClipLock = Any()
+    private val pushedClips = LinkedHashSet<String>()
+
+    fun markPushedIfNew(text: String): Boolean {
+        val key = text.trim()
+        if (key.isEmpty()) return false
+        synchronized(pushedClipLock) {
+            if (!pushedClips.add(key)) {
+                // already present → refresh recency, signal duplicate
+                pushedClips.remove(key)
+                pushedClips.add(key)
+                return false
+            }
+            evict(pushedClips, PUSHED_CLIP_CAP)
+            return true
+        }
+    }
+
+    fun clearPushedClips() {
+        synchronized(pushedClipLock) { pushedClips.clear() }
+    }
+
+    private fun evict(set: LinkedHashSet<String>, cap: Int) {
+        while (set.size > cap) {
+            val it = set.iterator()
+            it.next()
+            it.remove()
+        }
+    }
 
     /**
      * FS-018: last transient FFI/daemon error, surfaced to the user as a
@@ -99,6 +164,7 @@ object FluxsyncManager {
         _logs.value = emptyList()
         _logCursor.set(0L)
         _lastError.value = null
-        lastPeerClipText = ""
+        clearPeerClips()
+        clearPushedClips()
     }
 }
