@@ -1,0 +1,19 @@
+[package]
+name = "fluxsync-linux-tray"
+version = "0.6.1"
+edition = "2021"
+description = "Minimal KDE/freedesktop StatusNotifierItem tray for the FluxSync daemon"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "fluxsync-tray"
+path = "src/main.rs"
+
+[dependencies]
+ksni = "0.2"
+serde_json = "1"
+
+# Own workspace root: keep this out of the parent Rust workspace so a
+# Mac/Windows `cargo build --workspace` never tries to compile the
+# Linux-only D-Bus tray.
+[workspace]
