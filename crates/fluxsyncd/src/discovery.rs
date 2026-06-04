@@ -13,7 +13,7 @@
 //! manual fallback.
 
 use anyhow::{Context, Result};
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -112,6 +112,15 @@ pub fn start(
     shutdown: CancellationToken,
 ) -> Result<ServiceDaemon> {
     let daemon = ServiceDaemon::new().context("create mdns daemon")?;
+
+    // Pin mDNS to the LAN interface we actually bind to. mdns-sd's default
+    // is "all interfaces"; on macOS that includes awdl0/utunN and the
+    // multicast egresses off-LAN, so announcements never reach peers.
+    // Restricting to `bind_ip`'s interface fixes cross-host discovery.
+    if !bind_ip.is_unspecified() && !bind_ip.is_loopback() {
+        let _ = daemon.disable_interface(IfKind::All);
+        let _ = daemon.enable_interface(bind_ip);
+    }
 
     let info = build_service_info(
         instance_name,

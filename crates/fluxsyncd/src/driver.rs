@@ -373,8 +373,14 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     let we_are_test_mode = transport.session.lock().await.is_some();
     if !disable_mdns && !we_are_test_mode {
         let (disc_tx, disc_rx) = mpsc::channel::<DiscoveryEvent>(DISCOVERY_CHANNEL_CAP);
-        let bind_ip: std::net::IpAddr = udp_bind
-            .parse()
+        // mDNS must advertise (and egress on) the real LAN interface, not
+        // 0.0.0.0. On multi-interface hosts (macOS awdl0/utunN) an
+        // unspecified bind_ip makes mdns-sd announce on every interface and
+        // pick a non-LAN one, so peers never see us. Resolve the egress LAN
+        // IP and pin mDNS to it.
+        let bind_ip: std::net::IpAddr = local_lan_addr(&udp_bind, udp_port)
+            .rsplit_once(':')
+            .and_then(|(ip, _)| ip.parse().ok())
             .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
         let peer_id_hex = hex::encode(identity.peer_id());
         let static_pub_hex = hex::encode(identity.public_key());
