@@ -25,5 +25,9 @@ apps/macos-tray/src-tauri/binaries/
 # Dev scratch
 crates/fluxsyncd/scratch/
 
+# Agent tooling — local knowledge base / locks, never shared
+.agents/
+.claude/scheduled_tasks.lock
+
 design/chats/
 PROMPT-BACKEND-CLAUDE-CODE.md
