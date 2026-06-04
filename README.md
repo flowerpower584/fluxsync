@@ -17,7 +17,7 @@
 **Universal clipboard. Local-first. Peer-to-peer. End-to-end encrypted.**
 One Rust daemon, dedicated apps for macOS + Android, zero servers.
 
-> **Platform status (v0.5.2):** Android app is the first-class GUI client. macOS ships a menu-bar tray app (Tauri v2) built from source — no signed DMG until an Apple Dev ID is funded. The daemon + CLI also build cleanly on Linux (cross-compile to `x86_64-unknown-linux-musl` is green) so headless Linux use is supported. The daemon + CLI carry a `#[cfg(windows)]` Named Pipe IPC path; the Windows menu-bar app is not built yet. No GUI on Linux/Windows — contributions welcome.
+> **Platform status (v0.6.1):** Android, macOS, Windows and Linux all ship a GUI. macOS = menu-bar / Dock app (Tauri v2, built from source — no signed DMG until an Apple Dev ID is funded). Windows = NSIS tray app (x64 + ARM64). Linux = full Tauri GUI (deb / AppImage) plus a native ksni `StatusNotifierItem` system-tray. Android is the first-class mobile client. The daemon + CLI also build cleanly everywhere for headless use.
 
 See [CHANGELOG.md](CHANGELOG.md) for the per-release history.
 
@@ -44,7 +44,7 @@ npm run tauri build            # → src-tauri/target/release/bundle/macos/FluxS
 The tray app gives you the menu-bar icon, the master toggle, the peer + battery card, and the QR pairing popup. Want a signed `.app` shipped on releases? Sponsor the Apple Dev ID.
 
 ### 🐧 Linux (terminal — headless)
-The daemon and CLI cross-compile cleanly to Linux (`x86_64-unknown-linux-musl` checked from this machine). No tray app yet, so this is a CLI / systemd-unit setup — fine for servers and power-users. Two ways to install:
+Linux ships a full Tauri GUI (deb / AppImage) and a native ksni system-tray, alongside the headless daemon + CLI for servers and power-users (systemd-unit friendly). Two ways to install:
 
 ```sh
 # Option A: cargo install (any distro with rustup)
@@ -161,7 +161,7 @@ at your option. This is the standard Rust ecosystem dual-license — pick whiche
     - **Clipboard Ping-Pong**: Trailing spaces in text can still cause sync loops in some cases.
 - **Roadmap (v0.6.0)**:
     - **Key Storage**: Secure OS Keychain integration (the long-term identity key currently lives in a `0600` file).
-    - **Windows menu-bar app**: the daemon + CLI already speak Named Pipe IPC on Windows; a Tauri tray app for Windows is not built yet.
+    - **Windows tray app**: built — NSIS installer (x64 + ARM64), Tauri v2 tray over Named Pipe IPC.
 
 ---
 Crafted in Kaolack, Senegal 🇸🇳
