@@ -574,6 +574,10 @@ fn show_menu(app: &tauri::AppHandle) {
     let Some(w) = app.get_webview_window("menu") else {
         return;
     };
+    // Undo the NSApp hide from `hide_menu` before re-showing, else the
+    // window lands on a still-hidden app and paints nothing.
+    #[cfg(target_os = "macos")]
+    let _ = app.show();
     if let Ok(Some(mon)) = app.primary_monitor() {
         let scale = mon.scale_factor();
         let msize = mon.size().to_logical::<f64>(scale);
@@ -589,21 +593,21 @@ fn show_menu(app: &tauri::AppHandle) {
     MENU_SHOWN.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Dismiss the menu window. macOS: park off-screen instead of `hide()` —
-/// `hide()` blanks the WKWebView so it repaints white on the next show.
-/// Off-screen keeps it composited. Dock re-show goes through
-/// `RunEvent::Reopen` → `show_menu`.
+/// Dismiss the menu cleanly. macOS: `NSApp hide` keeps the WKWebView
+/// composited (no white repaint on re-show) and leaves zero visible
+/// windows, so the tray click / Dock icon re-shows via `show_menu` /
+/// `RunEvent::Reopen`. Unlike the old off-screen park, this is a real
+/// hide — the red close button actually tucks the app to the menu bar.
 fn hide_menu(app: &tauri::AppHandle) {
-    let Some(w) = app.get_webview_window("menu") else {
-        return;
-    };
     #[cfg(target_os = "macos")]
     {
-        let _ = w.set_position(tauri::LogicalPosition::new(-30000.0, -30000.0));
+        let _ = app.hide();
         MENU_SHOWN.store(false, std::sync::atomic::Ordering::SeqCst);
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = w.hide();
+    if let Some(w) = app.get_webview_window("menu") {
+        let _ = w.hide();
+    }
 }
 
 /// Tray-click toggle.
@@ -634,7 +638,7 @@ fn open_pair_window(app: &tauri::AppHandle) {
     // on Windows: any `WebviewUrl::App("pair.html")` shows a blank
     // page. Pre-declared windows work because Tauri serves their URL
     // through the same path the menu/settings windows already use.
-    hide_menu(app);
+    // Separate-window UX: show it over the menu, don't hide the app.
     if let Some(w) = app.get_webview_window("pair") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -644,7 +648,6 @@ fn open_pair_window(app: &tauri::AppHandle) {
 
 /// Open the dedicated settings window.
 fn open_settings_window(app: &tauri::AppHandle) {
-    hide_menu(app);
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.show();
         let _ = w.set_focus();
