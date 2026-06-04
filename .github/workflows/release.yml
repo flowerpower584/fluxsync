@@ -1,0 +1,151 @@
+name: release
+
+# Builds the FluxSync desktop app (Tauri) for macOS, Windows and Linux and
+# attaches the bundles to a GitHub Release. Triggered by pushing a vX.Y.Z tag.
+# The release is created as a DRAFT — review the artifacts, then publish.
+#
+# The daemon (`fluxsyncd`) ships inside the app as a Tauri sidecar. It is
+# gitignored, so every job builds it for its target and stages it under
+# `apps/macos-tray/src-tauri/binaries/fluxsyncd-<target-triple>[.exe]` before
+# `tauri build` runs (the name Tauri expects for `externalBin: binaries/fluxsyncd`).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS (universal)
+            os: macos-latest
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            tauri-args: --target universal-apple-darwin
+          - label: Linux (x86_64)
+            os: ubuntu-22.04
+            rust-targets: x86_64-unknown-linux-gnu
+            tauri-args: ""
+          - label: Windows (x64)
+            os: windows-latest
+            rust-targets: x86_64-pc-windows-msvc
+            tauri-args: ""
+          - label: Windows (ARM64)
+            os: windows-latest
+            rust-targets: aarch64-pc-windows-msvc
+            tauri-args: --target aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            patchelf \
+            build-essential
+
+      - name: Stage fluxsyncd sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="apps/macos-tray/src-tauri/binaries"
+          mkdir -p "$dest"
+          IFS=',' read -ra TARGETS <<< "${{ matrix.rust-targets }}"
+          for t in "${TARGETS[@]}"; do
+            echo "::group::build fluxsyncd for $t"
+            cargo build -p fluxsyncd --release --target "$t"
+            ext=""
+            [[ "$t" == *windows* ]] && ext=".exe"
+            cp "target/$t/release/fluxsyncd$ext" "$dest/fluxsyncd-$t$ext"
+            echo "::endgroup::"
+          done
+          # macOS universal: lipo the two arch sidecars into one fat binary
+          if [[ "${{ matrix.os }}" == macos-* ]]; then
+            lipo -create -output "$dest/fluxsyncd-universal-apple-darwin" \
+              "$dest/fluxsyncd-aarch64-apple-darwin" \
+              "$dest/fluxsyncd-x86_64-apple-darwin"
+            lipo -info "$dest/fluxsyncd-universal-apple-darwin"
+          fi
+          ls -la "$dest"
+
+      - name: Build app + publish to release (draft)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # AppImage bundling on Linux fails in `linuxdeploy` if it tries to
+          # strip the binaries; skip the strip step.
+          NO_STRIP: "true"
+        with:
+          projectPath: apps/macos-tray
+          tagName: ${{ github.ref_name }}
+          releaseName: FluxSync ${{ github.ref_name }}
+          releaseBody: "See CHANGELOG.md for release notes."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.tauri-args }}
+
+  android:
+    name: Android (arm64-v8a)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # gradlew's preBuild runs the cargo-ndk cross-compile + UniFFI bindgen.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # `release` buildType signs with the debug key (see build.gradle.kts),
+      # so the APK is installable without a release keystore secret.
+      - name: Build release APK
+        working-directory: apps/android
+        run: ./gradlew :app:assembleRelease
+
+      - name: Rename APK
+        run: |
+          set -e
+          src=apps/android/app/build/outputs/apk/release/app-release.apk
+          cp "$src" "FluxSync-${{ github.ref_name }}-arm64-v8a.apk"
+          ls -la FluxSync-*.apk
+
+      - name: Attach APK to release (draft)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: FluxSync-${{ github.ref_name }}-arm64-v8a.apk

@@ -3,6 +3,40 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [SemVer](https://semver.org/).
 
+## [v0.6.1] — 2026-06-04
+
+**Pairing that actually works cross-device, plus a real Linux app.**
+
+### Added
+- Multi-screen pairing flow: QR scan **and** 6-digit PIN method, with a
+  symmetric SAS verify-words gate (FS-052) that now fires on both the
+  initiator and the responder.
+- Linux desktop: the full Tauri GUI now builds and runs (deb + AppImage),
+  alongside a native ksni `StatusNotifierItem` system-tray.
+- Android: background clipboard capture via the system clip listener.
+- Identity keychain escape hatch.
+
+### Changed
+- macOS tray reworked into a single-window Dock app (kills the white void;
+  the close button hides instead of quitting).
+- Daemon lifecycle: clean, deterministic shutdown.
+
+### Fixed
+- **mDNS discovery is pinned to the LAN interface.** It was advertising and
+  browsing on every interface (`bind_ip = 0.0.0.0`); on macOS that included
+  awdl0/utunN, so `_fluxsync` multicast egressed off-LAN and peers never saw
+  each other — PIN pairing failed with "code not found" and trusted peers
+  never auto-reconnected. Now resolved to the real egress IP and restricted
+  to that interface.
+- Tray: settings reachable while unpaired (header gear), real `NSApp` hide,
+  version/label corrections.
+
+### Security
+- Audit + QA hardening: trust-store wipe on revoke/drop-peer, outbound
+  TOFU/SAS gate, XSS fix in the webview, bounded mpsc channels.
+- Phase 3 + Phase 4 adversarial-drill hardening (C1/C2, H1/H2/H3, M1/M2,
+  SE-02/03/05/08/14).
+
 ## [v0.5.2] — 2026-05-17
 
 **Clipboard reliability.**
