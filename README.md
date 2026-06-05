@@ -162,11 +162,11 @@ at your option. This is the standard Rust ecosystem dual-license — pick whiche
 - **No Servers**: Peer discovery happens via mDNS (local network only); mDNS-advertised identities are always re-verified against the Noise static key.
 - **Verified pairing**: QR or 6-digit PIN, gated by a symmetric SAS verify-words check on both devices.
 - **Persistent Pairing**: Trusted peers are saved to `~/.fluxsync/peers.json` and reloaded on daemon start, so a pairing survives restarts.
+- **Key storage**: the long-term identity key lives in the **OS keychain** — macOS Keychain, Windows Credential Manager, Linux Secret Service. A legacy `identity.bin` is auto-migrated on first boot; set `FLUXSYNC_NO_KEYCHAIN=1` to fall back to a `0600` file (headless boxes with no keychain/dbus). Android uses app-private storage.
 - **Known issues**:
     - **Clipboard images**: image sync works Mac → Android; some desktop ↔ desktop cases are rough (transparent images paste as white; copying an image *file* sends its path, not the bytes).
 - **Roadmap**:
     - **Signed builds**: Apple Developer ID + Windows code-signing once funded (current desktop builds are unsigned).
-    - **Key storage**: full OS-keychain migration for the long-term identity key (an escape hatch exists; the key otherwise lives in a `0600` file).
 
 ---
 Crafted in Kaolack, Senegal 🇸🇳
