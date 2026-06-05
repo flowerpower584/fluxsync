@@ -52,9 +52,17 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # The Tauri app's lockfile is pnpm; tauri-action drives `pnpm tauri
+      # build`, so pnpm must be on PATH before it runs.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/macos-tray/pnpm-lock.yaml
 
       - name: Linux build deps
         if: runner.os == 'Linux'
