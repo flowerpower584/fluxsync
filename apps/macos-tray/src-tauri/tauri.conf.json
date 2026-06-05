@@ -57,7 +57,7 @@
     ],
     "targets": ["dmg", "app", "nsis", "deb", "appimage"],
     "windows": {
-      "webviewInstallMode": { "type": "offlineInstaller" },
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
       "nsis": {
         "installMode": "currentUser",
         "displayLanguageSelector": false,
