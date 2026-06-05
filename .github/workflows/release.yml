@@ -98,6 +98,9 @@ jobs:
           releaseBody: "See CHANGELOG.md for release notes."
           releaseDraft: true
           prerelease: false
+          # No auto-updater wired up — skip the latest.json / .app.tar.gz
+          # updater artifacts that otherwise clutter the release.
+          includeUpdaterJson: false
           args: --target ${{ matrix.target }}
 
   android:
