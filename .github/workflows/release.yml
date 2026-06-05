@@ -95,7 +95,15 @@ jobs:
           projectPath: apps/macos-tray
           tagName: ${{ github.ref_name }}
           releaseName: FluxSync ${{ github.ref_name }}
-          releaseBody: "See CHANGELOG.md for release notes."
+          releaseBody: |
+            **Universal clipboard — local-first, peer-to-peer, end-to-end encrypted.**
+            One Rust daemon, GUI apps for macOS, Windows, Linux and Android, zero servers.
+
+            Download the build for your platform from the assets below. Desktop builds are
+            **unsigned** — first launch needs right-click → Open (macOS) or SmartScreen →
+            More info → Run anyway (Windows).
+
+            See [CHANGELOG.md](https://github.com/flowerpower584/fluxsync/blob/main/CHANGELOG.md) for the full release notes.
           releaseDraft: true
           prerelease: false
           # No auto-updater wired up — skip the latest.json / .app.tar.gz
