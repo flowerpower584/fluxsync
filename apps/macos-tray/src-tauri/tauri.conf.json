@@ -55,7 +55,7 @@
     "externalBin": [
       "binaries/fluxsyncd"
     ],
-    "targets": ["dmg", "app", "nsis", "deb", "appimage"],
+    "targets": ["dmg", "nsis", "deb", "appimage"],
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" },
       "nsis": {
