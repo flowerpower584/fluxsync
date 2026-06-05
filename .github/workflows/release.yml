@@ -5,9 +5,9 @@ name: release
 # The release is created as a DRAFT — review the artifacts, then publish.
 #
 # The daemon (`fluxsyncd`) ships inside the app as a Tauri sidecar. It is
-# gitignored, so every job builds it for its target and stages it under
-# `apps/macos-tray/src-tauri/binaries/fluxsyncd-<target-triple>[.exe]` before
-# `tauri build` runs (the name Tauri expects for `externalBin: binaries/fluxsyncd`).
+# gitignored and staged by `apps/macos-tray/src-tauri/build.rs`, which builds
+# fluxsyncd for the active `--target` and writes `binaries/fluxsyncd-<triple>`
+# right before the app is compiled — so no manual sidecar step is needed here.
 
 on:
   push:
@@ -24,34 +24,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: macOS (universal)
+          - label: macOS (Apple Silicon)
             os: macos-latest
-            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
-            tauri-args: --target universal-apple-darwin
+            target: aarch64-apple-darwin
+          - label: macOS (Intel)
+            os: macos-latest
+            target: x86_64-apple-darwin
           - label: Linux (x86_64)
             os: ubuntu-22.04
-            rust-targets: x86_64-unknown-linux-gnu
-            tauri-args: ""
+            target: x86_64-unknown-linux-gnu
           - label: Windows (x64)
             os: windows-latest
-            rust-targets: x86_64-pc-windows-msvc
-            tauri-args: ""
+            target: x86_64-pc-windows-msvc
           - label: Windows (ARM64)
             os: windows-latest
-            rust-targets: aarch64-pc-windows-msvc
-            tauri-args: --target aarch64-pc-windows-msvc
+            target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust + targets
+      - name: Install Rust + target
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust-targets }}
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ". -> target"
+          key: ${{ matrix.target }}
 
       - uses: actions/setup-node@v4
         with:
@@ -66,39 +65,16 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             libsoup-3.0-dev \
+            libdbus-1-dev \
+            pkg-config \
             patchelf \
             build-essential
-
-      - name: Stage fluxsyncd sidecar
-        shell: bash
-        run: |
-          set -euo pipefail
-          dest="apps/macos-tray/src-tauri/binaries"
-          mkdir -p "$dest"
-          IFS=',' read -ra TARGETS <<< "${{ matrix.rust-targets }}"
-          for t in "${TARGETS[@]}"; do
-            echo "::group::build fluxsyncd for $t"
-            cargo build -p fluxsyncd --release --target "$t"
-            ext=""
-            [[ "$t" == *windows* ]] && ext=".exe"
-            cp "target/$t/release/fluxsyncd$ext" "$dest/fluxsyncd-$t$ext"
-            echo "::endgroup::"
-          done
-          # macOS universal: lipo the two arch sidecars into one fat binary
-          if [[ "${{ matrix.os }}" == macos-* ]]; then
-            lipo -create -output "$dest/fluxsyncd-universal-apple-darwin" \
-              "$dest/fluxsyncd-aarch64-apple-darwin" \
-              "$dest/fluxsyncd-x86_64-apple-darwin"
-            lipo -info "$dest/fluxsyncd-universal-apple-darwin"
-          fi
-          ls -la "$dest"
 
       - name: Build app + publish to release (draft)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # AppImage bundling on Linux fails in `linuxdeploy` if it tries to
-          # strip the binaries; skip the strip step.
+          # AppImage bundling fails in linuxdeploy if it strips binaries.
           NO_STRIP: "true"
         with:
           projectPath: apps/macos-tray
@@ -107,7 +83,7 @@ jobs:
           releaseBody: "See CHANGELOG.md for release notes."
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.tauri-args }}
+          args: --target ${{ matrix.target }}
 
   android:
     name: Android (arm64-v8a)

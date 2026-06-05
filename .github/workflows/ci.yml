@@ -39,6 +39,7 @@ jobs:
       # `clippy::all = "deny"` are tolerated until the open lint debt is
       # cleared. Once everything is clean we'll flip the explicit lint
       # back on for regression protection.
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo clippy --workspace --lib --bins --all-features -- -A clippy::all -A clippy::pedantic
 
   test:
@@ -58,6 +59,9 @@ jobs:
       # still compiles. We don't run the integration tests in CI yet —
       # 7 known logic regressions need fixing first — but compile failures
       # will block PRs immediately.
+      - name: dbus dev headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo build --workspace --tests --exclude fluxsync-mobile-ffi --exclude uniffi-bindgen
       # Run library unit tests on every OS. Integration tests are tracked
       # for fixup in a follow-up; once green they'll be added here.
@@ -83,6 +87,7 @@ jobs:
           toolchain: "1.88"
           rustflags: ""
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo build --workspace --exclude fluxsync-mobile-ffi --exclude uniffi-bindgen
 
   android-test:
