@@ -416,6 +416,7 @@ pub fn upsert_peer(peers: &mut Vec<StoredPeer>, new: StoredPeer) {
 #[cfg(test)]
 mod tests {
     use super::{load_peers, save_peers, upsert_peer, StoredPeer, IDENTITY_FILE, PEERS_FILE};
+    #[cfg(unix)]
     use super::{read_legacy_identity, write_secret_atomic};
 
     fn peer(name: &str) -> StoredPeer {
@@ -485,6 +486,7 @@ mod tests {
 
     /// FS-053: a legacy 32-byte `identity.bin` round-trips through
     /// `read_legacy_identity` — used by the keychain migration path.
+    #[cfg(unix)]
     #[test]
     fn fs053_read_legacy_identity_round_trip() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -502,6 +504,7 @@ mod tests {
 
     /// FS-053: corrupt files (wrong length) must error, not silently
     /// regenerate — otherwise migration would invalidate every paired peer.
+    #[cfg(unix)]
     #[test]
     fn fs053_read_legacy_identity_rejects_wrong_length() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -524,7 +527,7 @@ mod tests {
     /// legacy file. Verifies the file is gone after the call; the
     /// overwrite step is best-effort on COW filesystems and not asserted.
     #[test]
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(unix, not(target_os = "android")))]
     fn fs053_secure_wipe_removes_legacy_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(IDENTITY_FILE);
