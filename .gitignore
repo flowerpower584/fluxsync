@@ -31,3 +31,7 @@ crates/fluxsyncd/scratch/
 
 design/chats/
 PROMPT-BACKEND-CLAUDE-CODE.md
+
+# Agent tooling — not part of the public repo
+.claude/
+fluxsync-skill/
