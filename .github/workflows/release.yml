@@ -78,6 +78,13 @@ jobs:
             patchelf \
             build-essential
 
+      # tauri-action skips dependency install when there's no
+      # beforeBuildCommand, so the local @tauri-apps/cli is missing and
+      # `pnpm tauri build` errors with "tauri: not found". Install it here.
+      - name: Install app deps
+        working-directory: apps/macos-tray
+        run: pnpm install --frozen-lockfile
+
       - name: Build app + publish to release (draft)
         uses: tauri-apps/tauri-action@v0
         env:
