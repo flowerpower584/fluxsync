@@ -135,18 +135,6 @@ flowchart LR
     A_udp <-- "ChaCha20-Poly1305 ciphertext" --> B_udp
 ```
 
-## Why FluxSync vs the alternatives
-
-| Need                                     | KDE Connect | Apple Universal Clipboard | syncthing | **FluxSync** |
-|------------------------------------------|:-----------:|:-------------------------:|:---------:|:------------:|
-| Works across macOS, Windows, Linux + Android (apps shipped) |   partial (Linux+Android focus) |          macOS+iOS only  |   yes (file sync, not clipboard) |   **yes**    |
-| End-to-end encrypted by default          |   yes       |          yes              |   yes     |   **yes**    |
-| Zero servers / zero account              |   yes       |          no               |   yes     |   **yes**    |
-| Designed for clipboard (not file sync)   |   yes       |          yes              |   no      |   **yes**    |
-| Battery-aware auto-pause                 |   no        |          partial          |   no      |   **yes**    |
-| One Rust daemon, no GUI dep              |   no        |          —                |   yes     |   **yes**    |
-| Open source, permissive                  |   yes (GPL) |          no               |   yes (MPL) | **yes (MIT OR Apache-2.0)**     |
-
 ## License
 
 FluxSync is dual-licensed under either of:
