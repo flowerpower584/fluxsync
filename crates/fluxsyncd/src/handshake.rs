@@ -404,7 +404,7 @@ pub async fn run_pending_reaper(
                 // revoked peers — otherwise the attacker's already-installed
                 // session would keep accepting Hello/Heartbeat frames.
                 let dropped_peer_id = {
-                    let cur = *transport.last_peer_id.lock().await;
+                    let cur = transport.cached_peer_id().await;
                     match cur {
                         Some(cur) if expired.contains(&cur) => {
                             transport.drop_session().await;

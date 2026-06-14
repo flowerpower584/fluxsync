@@ -389,7 +389,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
 
     // mDNS discovery (skipped in test mode or when disabled).
     let mut _mdns_daemon = None;
-    let we_are_test_mode = transport.session.lock().await.is_some();
+    let we_are_test_mode = transport.has_session().await;
     if !disable_mdns && !we_are_test_mode {
         let (disc_tx, disc_rx) = mpsc::channel::<DiscoveryEvent>(DISCOVERY_CHANNEL_CAP);
         // mDNS must advertise (and egress on) the real LAN interface, not
@@ -637,7 +637,7 @@ async fn gate_outbound(
     transport: &Arc<Transport>,
     pending_pairs: &PendingSet,
 ) -> Vec<Action> {
-    let pending = match *transport.last_peer_id.lock().await {
+    let pending = match transport.cached_peer_id().await {
         Some(id) => pending_pairs.lock().await.contains_key(&id),
         None => false,
     };
@@ -769,8 +769,8 @@ async fn dispatch(
                 if frames.is_empty() {
                     tracing::error!("SendItem: nothing to send (encode failed)");
                 } else {
-                    let peer = *transport.peer_addr.lock().await;
-                    let has_session = transport.session.lock().await.is_some();
+                    let peer = transport.current_peer_addr().await;
+                    let has_session = transport.has_session().await;
                     tracing::info!(
                         ?peer,
                         has_session,
@@ -1162,7 +1162,7 @@ async fn handle_driver_cmd(
             CmdResponse::ok(req_id, Some(CmdData::Tail(entries)))
         }
         CmdOp::Peers => {
-            let addr = *transport.peer_addr.lock().await;
+            let addr = transport.current_peer_addr().await;
             let peer = peer_entry(app.snapshot(), addr);
             CmdResponse::ok(req_id, Some(CmdData::Peers(peer.into_iter().collect())))
         }
@@ -2162,7 +2162,7 @@ async fn transport_recv_loop(
                             );
                             continue;
                         }
-                        if transport.session.lock().await.is_some() {
+                        if transport.has_session().await {
                             // [FIX] Session Stability: NEVER accept a re-handshake while
                             // a session is active. The Android re-initiates handshakes
                             // every ~15s via mDNS rediscovery, which would destroy
@@ -2208,7 +2208,7 @@ async fn transport_recv_loop(
                         // heartbeat/clipboard stream to zero disk writes.
                         if last_persisted_addr != Some(from) {
                             if let Some(dir) = &keystore_dir {
-                                let current_p = *transport.peer_addr.lock().await;
+                                let current_p = transport.current_peer_addr().await;
                                 if current_p == Some(from) {
                                     if let Err(e) = save_current_peers(dir, &trusted, &transport).await {
                                         tracing::warn!(error = %e, "failed to persist roaming update");
@@ -2362,7 +2362,7 @@ async fn clipboard_watcher_loop(
         // FS-048: while unpaired there is nothing to poll. Sleep on the
         // session-install pulse instead of waking every 200ms only to
         // observe `session.is_none()` and `continue`.
-        if transport.session.lock().await.is_none() {
+        if !transport.has_session().await {
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => return Ok(()),
@@ -2374,8 +2374,8 @@ async fn clipboard_watcher_loop(
             biased;
             () = shutdown.cancelled() => return Ok(()),
             _ = interval.tick() => {
-                let est = transport.session_established_at_ms.load(std::sync::atomic::Ordering::SeqCst);
-                let session_active = transport.session.lock().await.is_some();
+                let est = transport.session_established_at();
+                let session_active = transport.has_session().await;
 
                 if !session_active {
                     continue;
@@ -2510,7 +2510,7 @@ async fn heartbeat_loop(
             biased;
             () = shutdown.cancelled() => return Ok(()),
             _ = interval.tick() => {
-                let session_active = transport.session.lock().await.is_some();
+                let session_active = transport.has_session().await;
 
                 if session_active {
                     // 1. Send Heartbeat (Ping)
@@ -2528,7 +2528,7 @@ async fn heartbeat_loop(
                     }
 
                     // 2. Check for receive timeout (10 seconds)
-                    let last_rx = transport.last_rx_ms.load(std::sync::atomic::Ordering::Relaxed);
+                    let last_rx = transport.last_rx();
                     let now = crate::transport::now_ms();
 
                     if now.saturating_sub(last_rx) > 5_000 {
@@ -2537,7 +2537,7 @@ async fn heartbeat_loop(
                         if missed_pings >= 6 {
                             tracing::warn!("Peer timed out (6 missed pings/30s). Dropping link.");
                             metrics.lock().await.on_disconnect(DisconnectReason::HeartbeatTimeout);
-                            transport.last_rx_ms.store(now, std::sync::atomic::Ordering::Relaxed);
+                            transport.set_last_rx(now);
                             let _ = event_tx.try_send(Event::PeerLost);
                             missed_pings = 0;
                         }
@@ -2547,7 +2547,7 @@ async fn heartbeat_loop(
                 } else {
                     // DISCOVERY PROBE: If no session but we have a last known peer IP,
                     // try a direct handshake poke.
-                    if let Some(_addr) = *transport.last_peer_addr.lock().await {
+                    if let Some(_addr) = transport.cached_peer_addr().await {
                          // We don't initiate here because we lack the peer's static_pub,
                          // but we can log that we are waiting for that specific IP.
                          // In a future PR, we could cache the static_pub too.
@@ -2754,7 +2754,7 @@ async fn dispatch_inbound_frame(
     // Msg::Item processing until the user runs --accept"*.
     let blocks_until_confirmed = matches!(frame.msg, Msg::ClipboardItem(_) | Msg::Chunk(_));
     if blocks_until_confirmed {
-        let cur_peer = *transport.last_peer_id.lock().await;
+        let cur_peer = transport.cached_peer_id().await;
         if let Some(id) = cur_peer {
             if pending_pairs.lock().await.contains_key(&id) {
                 tracing::warn!(
@@ -2969,7 +2969,7 @@ async fn dispatch_inbound_frame(
             // don't auto-reconnect into its next TOFU window. The frame
             // arrived over the established Noise session, so the sender is
             // authenticated — only its own entry is removed, never the rest.
-            match *transport.last_peer_id.lock().await {
+            match transport.cached_peer_id().await {
                 Some(peer_id) => {
                     let removed = trusted.lock().await.remove(&peer_id);
                     if removed.is_some() {
@@ -2997,7 +2997,7 @@ async fn dispatch_inbound_frame(
             // unknown (a race before the handshake fully completed) we
             // must NOT fall back to an all-zero sentinel: that id
             // bypasses the FSM peer-mismatch check. Drop the Hello.
-            match *transport.last_peer_id.lock().await {
+            match transport.cached_peer_id().await {
                 Some(peer_id) => {
                     let _ = event_tx.try_send(Event::PeerSeen {
                         peer_id,
@@ -3082,10 +3082,10 @@ async fn discovery_dispatcher(
             () = shutdown.cancelled() => return Ok(()),
             _ = interval.tick() => {
                 // PROACTIVE PROBE: If no session, try the last known peer
-                let has_session = transport.session.lock().await.is_some();
+                let has_session = transport.has_session().await;
                 if !has_session {
-                    let addr_opt = *transport.last_peer_addr.lock().await;
-                    let id_opt = *transport.last_peer_id.lock().await;
+                    let addr_opt = transport.cached_peer_addr().await;
+                    let id_opt = transport.cached_peer_id().await;
 
                     if let (Some(_addr), Some(id)) = (addr_opt, id_opt) {
                         let peer_opt = {
@@ -3094,7 +3094,7 @@ async fn discovery_dispatcher(
                         };
 
                         if let Some(peer) = peer_opt {
-                            let history = transport.roaming_history.lock().await.clone();
+                            let history = transport.roaming_history_snapshot().await;
                             for h_addr in history {
                                 let id_clone = identity.clone();
                                 let static_pub = peer.static_pub;
@@ -3180,7 +3180,7 @@ async fn discovery_dispatcher(
                             continue;
                         }
                         // Skip if a session is already up to this peer.
-                        if transport.session.lock().await.is_some() {
+                        if transport.has_session().await {
                             continue;
                         }
                         // Tie-break: only the side with the lower static_pub
@@ -3681,7 +3681,7 @@ mod tests {
             .expect("bind loopback transport");
         let transport = Arc::new(transport);
         let peer_id = [7u8; 32];
-        *transport.last_peer_id.lock().await = Some(peer_id);
+        transport.set_cached_peer_id(peer_id).await;
 
         let (event_tx, mut event_rx) = mpsc::channel(1024);
         let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =

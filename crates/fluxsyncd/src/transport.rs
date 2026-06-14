@@ -217,6 +217,51 @@ impl Transport {
         self.session_generation.fetch_add(1, Ordering::SeqCst);
     }
 
+    // ── Per-peer state accessors ──────────────────────────────────
+    // FluxMesh Phase 2 scaffolding: every read/write of the per-peer
+    // connection state goes through these so the backing storage can
+    // later become a per-peer map without re-touching every call site.
+    // Single-peer semantics are unchanged — each accessor takes one
+    // lock independently, introducing no new lock-ordering.
+
+    pub async fn has_session(&self) -> bool {
+        self.session.lock().await.is_some()
+    }
+
+    pub async fn current_peer_addr(&self) -> Option<SocketAddr> {
+        *self.peer_addr.lock().await
+    }
+
+    pub async fn cached_peer_addr(&self) -> Option<SocketAddr> {
+        *self.last_peer_addr.lock().await
+    }
+
+    pub async fn cached_peer_id(&self) -> Option<[u8; 32]> {
+        *self.last_peer_id.lock().await
+    }
+
+    pub async fn set_cached_peer_id(&self, id: [u8; 32]) {
+        *self.last_peer_id.lock().await = Some(id);
+    }
+
+    pub async fn roaming_history_snapshot(&self) -> Vec<SocketAddr> {
+        self.roaming_history.lock().await.clone()
+    }
+
+    #[must_use]
+    pub fn last_rx(&self) -> u64 {
+        self.last_rx_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn set_last_rx(&self, ms: u64) {
+        self.last_rx_ms.store(ms, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn session_established_at(&self) -> u64 {
+        self.session_established_at_ms.load(Ordering::SeqCst)
+    }
+
     /// Send a typed datagram to the given address, prefixing the body
     /// with the type byte.
     pub async fn send_typed(&self, type_byte: u8, body: &[u8], to: SocketAddr) -> Result<()> {
