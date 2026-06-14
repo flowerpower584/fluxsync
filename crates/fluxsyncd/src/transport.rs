@@ -482,10 +482,8 @@ impl Transport {
                             None => continue,
                         }
                     };
-                    let pt = match result {
-                        Ok(pt) => pt,
-                        Err(_) => continue, // not this peer's datagram; try next
-                    };
+                    // not this peer's datagram; try the next session
+                    let Ok(pt) = result else { continue };
 
                     // ROAMING: decryption success proves the packet is authentic,
                     // but a LAN attacker can replay/relay authentic ciphertext to

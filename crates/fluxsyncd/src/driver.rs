@@ -2830,6 +2830,7 @@ async fn forward_item(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_inbound_frame(
     frame: Frame,
     peer_id: [u8; 32],
