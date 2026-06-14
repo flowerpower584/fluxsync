@@ -27,6 +27,7 @@
 
 use anyhow::{anyhow, Result};
 use fluxsync_crypto::Session;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -92,9 +93,17 @@ impl PeerConn {
 
 pub struct Transport {
     pub socket: Arc<UdpSocket>,
-    /// The single active peer connection (one today; a per-peer map
-    /// in step 2B-2).
+    /// The primary peer connection — always present, and the slot every
+    /// legacy single-peer accessor reads/writes. It is also the peer the
+    /// single-peer `State` DTO projects (FluxMesh 2C-b keeps clients
+    /// single-peer-compatible).
     conn: Arc<PeerConn>,
+    /// FluxMesh 2C-b: additional simultaneous peers, keyed by peer id.
+    /// Empty in the single-peer steady state; the first time a *second*
+    /// distinct peer installs a session it lands here instead of evicting
+    /// the primary. `recv` tries `conn` then each entry; the peer-keyed
+    /// accessors (`*_for`) resolve an id to `conn` or one of these.
+    extra: Mutex<BTreeMap<[u8; 32], Arc<PeerConn>>>,
     pub metrics: Arc<Mutex<crate::metrics::MetricsTracker>>,
     /// Pulsed whenever a session is installed. Lets idle pollers
     /// (the clipboard watcher) sleep instead of busy-ticking while
@@ -130,6 +139,10 @@ pub enum RecvFrame {
     },
     Encrypted {
         from: SocketAddr,
+        /// Peer id whose session decrypted this datagram. FluxMesh 2C-b:
+        /// lets the inbound path route per source peer (FS-052 gate, Ack
+        /// reply, mesh anti-loop) instead of assuming a single peer.
+        peer_id: [u8; 32],
         plaintext: Vec<u8>,
     },
     Other {
@@ -175,6 +188,7 @@ impl Transport {
             Self {
                 socket: Arc::new(socket),
                 conn: Arc::new(PeerConn::new()),
+                extra: Mutex::new(BTreeMap::new()),
                 metrics: Arc::new(Mutex::new(crate::metrics::MetricsTracker::new())),
                 session_notify: Arc::new(Notify::new()),
                 peers_disk_lock: Arc::new(Mutex::new(())),
@@ -196,11 +210,41 @@ impl Transport {
         self.push_history(addr).await;
     }
 
+    /// Resolve the `PeerConn` a session install for `id` should target.
+    /// Reuses the primary slot when it is free, already this peer, or has no
+    /// live session; otherwise the peer joins the `extra` map so it runs
+    /// alongside the primary instead of evicting it (FluxMesh 2C-b).
+    async fn acquire_conn(&self, id: [u8; 32]) -> Arc<PeerConn> {
+        {
+            let cur = *self.conn.last_peer_id.lock().await;
+            let live = self.conn.session.lock().await.is_some();
+            if cur == Some(id) || cur.is_none() || !live {
+                return self.conn.clone();
+            }
+        }
+        self.extra
+            .lock()
+            .await
+            .entry(id)
+            .or_insert_with(|| Arc::new(PeerConn::new()))
+            .clone()
+    }
+
+    /// Resolve an existing `PeerConn` for `id` (primary or `extra`), or
+    /// `None` if that peer is unknown.
+    async fn conn_for(&self, id: [u8; 32]) -> Option<Arc<PeerConn>> {
+        if *self.conn.last_peer_id.lock().await == Some(id) {
+            return Some(self.conn.clone());
+        }
+        self.extra.lock().await.get(&id).cloned()
+    }
+
     pub async fn install_session(&self, id: [u8; 32], session: Session) {
-        *self.conn.session.lock().await = Some(session);
-        *self.conn.last_peer_id.lock().await = Some(id);
-        self.conn.session_generation.fetch_add(1, Ordering::SeqCst);
-        self.conn
+        let target = self.acquire_conn(id).await;
+        *target.session.lock().await = Some(session);
+        *target.last_peer_id.lock().await = Some(id);
+        target.session_generation.fetch_add(1, Ordering::SeqCst);
+        target
             .session_established_at_ms
             .store(now_ms(), Ordering::SeqCst);
         self.session_notify.notify_one();
@@ -217,16 +261,17 @@ impl Transport {
     /// CAS install: installs the session only if none is present.
     /// Returns true if the session was installed, false if a session already existed.
     pub async fn try_install_session(&self, id: [u8; 32], session: Session) -> bool {
-        let mut g = self.conn.session.lock().await;
+        let target = self.acquire_conn(id).await;
+        let mut g = target.session.lock().await;
         if g.is_some() {
             tracing::debug!("try_install_session: session already present, rejecting install");
             return false;
         }
         *g = Some(session);
         drop(g);
-        *self.conn.last_peer_id.lock().await = Some(id);
-        self.conn.session_generation.fetch_add(1, Ordering::SeqCst);
-        self.conn
+        *target.last_peer_id.lock().await = Some(id);
+        target.session_generation.fetch_add(1, Ordering::SeqCst);
+        target
             .session_established_at_ms
             .store(now_ms(), Ordering::SeqCst);
         self.session_notify.notify_one();
@@ -300,18 +345,33 @@ impl Transport {
     /// and the lock acquisition, the send is aborted to prevent nonce
     /// reuse across session epochs.
     pub async fn send_encrypted(&self, plaintext: &[u8]) -> Result<()> {
-        let gen_before = self.conn.session_generation.load(Ordering::SeqCst);
+        Self::send_on(&self.socket, &self.conn, plaintext).await
+    }
 
-        let addr = self
-            .conn
+    /// FluxMesh 2C-b: encrypt+send to a specific peer (primary or `extra`).
+    /// Used by the mesh forward path and per-source replies (Ack, Heartbeat
+    /// pong, Nak). Carries the same nonce-reuse guard as `send_encrypted`.
+    pub async fn send_encrypted_to(&self, peer_id: [u8; 32], plaintext: &[u8]) -> Result<()> {
+        let conn = self
+            .conn_for(peer_id)
+            .await
+            .ok_or_else(|| anyhow!("no connection for peer"))?;
+        Self::send_on(&self.socket, &conn, plaintext).await
+    }
+
+    /// Shared encrypt-and-send over one `PeerConn`. Snapshots
+    /// `session_generation` before locking and verifies it after, aborting if
+    /// a reconnect swapped the session mid-flight (nonce-reuse guard, A-002).
+    async fn send_on(socket: &UdpSocket, conn: &PeerConn, plaintext: &[u8]) -> Result<()> {
+        let gen_before = conn.session_generation.load(Ordering::SeqCst);
+        let addr = conn
             .peer_addr
             .lock()
             .await
             .ok_or_else(|| anyhow!("no peer addr set"))?;
         let ct = {
-            let mut g = self.conn.session.lock().await;
-            // Verify generation hasn't changed since we decided to send.
-            let gen_after = self.conn.session_generation.load(Ordering::SeqCst);
+            let mut g = conn.session.lock().await;
+            let gen_after = conn.session_generation.load(Ordering::SeqCst);
             if gen_after != gen_before {
                 return Err(anyhow!(
                     "session generation changed ({gen_before} → {gen_after}); \
@@ -321,7 +381,59 @@ impl Transport {
             let s = g.as_mut().ok_or_else(|| anyhow!("no session"))?;
             s.encrypt(plaintext)?
         };
-        self.send_typed(TYPE_ENCRYPTED, &ct, addr).await
+        let mut buf = Vec::with_capacity(ct.len() + 1);
+        buf.push(TYPE_ENCRYPTED);
+        buf.extend_from_slice(&ct);
+        socket.send_to(&buf, addr).await?;
+        Ok(())
+    }
+
+    /// True if a live session exists for `peer_id`.
+    pub async fn has_session_for(&self, peer_id: [u8; 32]) -> bool {
+        match self.conn_for(peer_id).await {
+            Some(c) => c.session.lock().await.is_some(),
+            None => false,
+        }
+    }
+
+    /// Drop only `peer_id`'s session (other peers stay linked).
+    pub async fn drop_session_for(&self, peer_id: [u8; 32]) {
+        if let Some(c) = self.conn_for(peer_id).await {
+            *c.session.lock().await = None;
+            c.session_generation.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Set the current peer address for `peer_id`, if known.
+    pub async fn set_peer_addr_for(&self, peer_id: [u8; 32], addr: SocketAddr) {
+        if let Some(c) = self.conn_for(peer_id).await {
+            *c.peer_addr.lock().await = Some(addr);
+            *c.last_peer_addr.lock().await = Some(addr);
+        }
+    }
+
+    /// Current peer address for `peer_id`, if any.
+    pub async fn peer_addr_for(&self, peer_id: [u8; 32]) -> Option<SocketAddr> {
+        match self.conn_for(peer_id).await {
+            Some(c) => *c.peer_addr.lock().await,
+            None => None,
+        }
+    }
+
+    /// Every peer id that currently has a live session (primary + `extra`).
+    pub async fn linked_peer_ids(&self) -> Vec<[u8; 32]> {
+        let mut out = Vec::new();
+        if self.conn.session.lock().await.is_some() {
+            if let Some(id) = *self.conn.last_peer_id.lock().await {
+                out.push(id);
+            }
+        }
+        for (id, c) in self.extra.lock().await.iter() {
+            if c.session.lock().await.is_some() {
+                out.push(*id);
+            }
+        }
+        out
     }
 
     /// Receive one datagram and dispatch by type byte.
@@ -342,78 +454,97 @@ impl Transport {
                 msg: body.to_vec(),
             }),
             TYPE_ENCRYPTED => {
-                // Decrypt under the `session` lock, then release it before
-                // touching `metrics` — acquiring `metrics` while holding
-                // `session` would pin a session→metrics lock order and
-                // deadlock any future metrics→session path (FS-033).
-                let result = {
-                    let mut g = self.conn.session.lock().await;
-                    let s = g
-                        .as_mut()
-                        .ok_or_else(|| anyhow!("encrypted frame but no session"))?;
-                    s.decrypt(body)
-                };
-                let pt = match result {
-                    Ok(pt) => pt,
-                    Err(e) => {
-                        self.metrics.lock().await.on_decrypt_failure();
-                        return Err(e.into());
-                    }
-                };
+                // FluxMesh 2C-b: try every peer's session. `Session::decrypt`
+                // re-pins its receiving nonce per call and only advances the
+                // replay window after a successful auth, so offering a datagram
+                // to the wrong peer's session fails cleanly — no nonce desync,
+                // no replay-window corruption. Decrypt under the `session` lock,
+                // then release it before touching `metrics` (session→metrics
+                // lock order would deadlock a future metrics→session path,
+                // FS-033).
+                let mut candidates: Vec<([u8; 32], Arc<PeerConn>)> = Vec::new();
+                if let Some(id) = *self.conn.last_peer_id.lock().await {
+                    candidates.push((id, self.conn.clone()));
+                }
+                for (id, c) in self.extra.lock().await.iter() {
+                    candidates.push((*id, c.clone()));
+                }
 
-                // ROAMING: decryption success proves the packet is authentic,
-                // but a LAN attacker can replay/relay authentic ciphertext to
-                // hijack `peer_addr`. Rate-limit re-pinning so at most one roam
-                // is accepted per ROAM_MIN_INTERVAL_MS (FS-034).
-                {
-                    let mut p = self.conn.peer_addr.lock().await;
-                    if Some(from) != *p {
-                        let now = now_ms();
-                        // F-CT1: CAS on `last_roam_ms` so two concurrent
-                        // recv() paths (post-multi-socket work) cannot both
-                        // pass the rate-limit check by reading the same
-                        // stale timestamp. Acquire/AcqRel pair the load
-                        // with the compare-exchange release.
-                        let last_roam = self.conn.last_roam_ms.load(Ordering::Acquire);
-                        let allowed = roam_allowed(now, last_roam)
-                            && self
-                                .conn
-                                .last_roam_ms
-                                .compare_exchange(
-                                    last_roam,
-                                    now,
-                                    Ordering::AcqRel,
-                                    Ordering::Acquire,
-                                )
-                                .is_ok();
-                        if allowed {
-                            tracing::warn!(
-                                old = ?*p, new = ?from,
-                                "roaming: updating peer address"
-                            );
-                            *p = Some(from);
-                            *self.conn.last_peer_addr.lock().await = Some(from);
-                            {
-                                let mut h = self.conn.roaming_history.lock().await;
-                                if !h.contains(&from) {
-                                    h.insert(0, from);
-                                    h.truncate(5); // Keep last 5 IPs
-                                }
+                let mut tried_any = false;
+                for (peer_id, c) in candidates {
+                    let result = {
+                        let mut g = c.session.lock().await;
+                        match g.as_mut() {
+                            Some(s) => {
+                                tried_any = true;
+                                s.decrypt(body)
                             }
-                            // last_peer_id is already set when the session was installed.
-                        } else {
-                            tracing::warn!(
-                                current = ?*p, rejected = ?from,
-                                "roaming: rejecting peer-address change (rate-limited or CAS lost)"
-                            );
+                            None => continue,
+                        }
+                    };
+                    let pt = match result {
+                        Ok(pt) => pt,
+                        Err(_) => continue, // not this peer's datagram; try next
+                    };
+
+                    // ROAMING: decryption success proves the packet is authentic,
+                    // but a LAN attacker can replay/relay authentic ciphertext to
+                    // hijack `peer_addr`. Rate-limit re-pinning so at most one roam
+                    // is accepted per ROAM_MIN_INTERVAL_MS, on THIS peer (FS-034).
+                    {
+                        let mut p = c.peer_addr.lock().await;
+                        if Some(from) != *p {
+                            let now = now_ms();
+                            // F-CT1: CAS on `last_roam_ms` so two concurrent
+                            // recv() paths cannot both pass the rate-limit check
+                            // by reading the same stale timestamp.
+                            let last_roam = c.last_roam_ms.load(Ordering::Acquire);
+                            let allowed = roam_allowed(now, last_roam)
+                                && c.last_roam_ms
+                                    .compare_exchange(
+                                        last_roam,
+                                        now,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_ok();
+                            if allowed {
+                                tracing::warn!(
+                                    old = ?*p, new = ?from,
+                                    "roaming: updating peer address"
+                                );
+                                *p = Some(from);
+                                *c.last_peer_addr.lock().await = Some(from);
+                                {
+                                    let mut h = c.roaming_history.lock().await;
+                                    if !h.contains(&from) {
+                                        h.insert(0, from);
+                                        h.truncate(5); // Keep last 5 IPs
+                                    }
+                                }
+                                // last_peer_id is already set at session install.
+                            } else {
+                                tracing::warn!(
+                                    current = ?*p, rejected = ?from,
+                                    "roaming: rejecting peer-address change (rate-limited or CAS lost)"
+                                );
+                            }
                         }
                     }
+                    c.last_rx_ms.store(now_ms(), Ordering::Relaxed);
+                    return Ok(RecvFrame::Encrypted {
+                        from,
+                        peer_id,
+                        plaintext: pt,
+                    });
                 }
-                self.conn.last_rx_ms.store(now_ms(), Ordering::Relaxed);
-                Ok(RecvFrame::Encrypted {
-                    from,
-                    plaintext: pt,
-                })
+
+                if tried_any {
+                    self.metrics.lock().await.on_decrypt_failure();
+                    Err(anyhow!("encrypted frame failed to decrypt under any session"))
+                } else {
+                    Err(anyhow!("encrypted frame but no session"))
+                }
             }
             other => Ok(RecvFrame::Other {
                 from,

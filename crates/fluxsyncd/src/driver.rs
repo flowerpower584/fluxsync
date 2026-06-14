@@ -2218,7 +2218,7 @@ async fn transport_recv_loop(
                             tracing::debug!("HandshakeResp with no pending initiator");
                         }
                     }
-                    RecvFrame::Encrypted { from, plaintext } => {
+                    RecvFrame::Encrypted { from, peer_id: _, plaintext } => {
                         // ROAMING persistence (M-DAEMON-17): only when the peer
                         // address actually changed since the last write — not on
                         // every frame. `peer_addr` updates on roam; comparing
