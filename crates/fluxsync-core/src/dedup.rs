@@ -7,6 +7,7 @@
 //! A `HashSet` would lose ordering and force more bookkeeping for the
 //! 50-item bound; a `VecDeque` is the smaller, less-surprising primitive.
 
+use crate::id::EventId;
 use std::collections::VecDeque;
 
 /// Default dedup capacity. The frontend exposes 5 history entries; we keep
@@ -112,6 +113,80 @@ impl DedupRing {
     }
 }
 
+/// Default capacity of the [`SeenSet`] mesh anti-loop ring. Larger than the
+/// content ring because a busy mesh fans the same items across several links,
+/// so a node observes more distinct `EventId`s than distinct local copies.
+pub const SEEN_CAPACITY: usize = 256;
+
+/// Bounded membership ring of [`EventId`]s a node has already applied or
+/// forwarded — the mesh anti-loop guard.
+///
+/// This is the second, independent dedup layer next to [`DedupRing`]:
+///   * [`DedupRing`] keys on **content hash** and suppresses OS clipboard
+///     read-back echoes (and chosen-collision poisoning, via [`ContentHash`]).
+///   * `SeenSet` keys on **`EventId`** (origin device + seq) and suppresses an
+///     item looping around the mesh or being re-applied after the content ring
+///     evicted its hash.
+///
+/// Membership-based on purpose: `EventId.seq` is monotonic only at the origin,
+/// so a node may receive a *lower* seq later (a delayed copy on another path).
+/// A per-origin high-water mark would wrongly drop that genuinely-unseen item;
+/// a recent-set does not. Like [`DedupRing`], an `EventId` evicted past the
+/// capacity window can be observed as fresh again — acceptable for a 256-deep
+/// window, same trade-off the content ring already makes.
+#[derive(Debug, Clone)]
+pub struct SeenSet {
+    capacity: usize,
+    inner: VecDeque<EventId>,
+}
+
+impl Default for SeenSet {
+    fn default() -> Self {
+        Self::new(SEEN_CAPACITY)
+    }
+}
+
+impl SeenSet {
+    /// Build an empty set with the given capacity.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            inner: VecDeque::with_capacity(capacity.max(1)),
+        }
+    }
+
+    /// Record `id`. Returns:
+    ///   * `true` — newly seen; the caller should apply/forward this event.
+    ///   * `false` — already in the recent window; the caller should drop it
+    ///     (it looped back, or is a duplicate from another mesh path).
+    pub fn observe(&mut self, id: EventId) -> bool {
+        if self.inner.contains(&id) {
+            return false;
+        }
+        if self.inner.len() == self.capacity {
+            self.inner.pop_front();
+        }
+        self.inner.push_back(id);
+        true
+    }
+
+    #[must_use]
+    pub fn contains(&self, id: &EventId) -> bool {
+        self.inner.contains(id)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +261,74 @@ mod tests {
         // r.observe(peer_supplied);
         // The right shape — caller has to acknowledge "this is a digest":
         assert!(r.observe(ContentHash::from_blake3(peer_supplied)));
+    }
+
+    use crate::id::{DeviceId, EventId};
+
+    fn ev(origin: u8, seq: u64) -> EventId {
+        EventId::new(DeviceId::from([origin; 32]), seq)
+    }
+
+    #[test]
+    fn seen_first_time_is_fresh() {
+        let mut s = SeenSet::default();
+        assert!(s.observe(ev(1, 0)));
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn seen_same_event_twice_is_dropped() {
+        let mut s = SeenSet::default();
+        assert!(s.observe(ev(1, 7)));
+        assert!(!s.observe(ev(1, 7)));
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn seen_distinguishes_seq_and_origin() {
+        let mut s = SeenSet::default();
+        assert!(s.observe(ev(1, 7)));
+        assert!(s.observe(ev(1, 8)), "different seq is a different event");
+        assert!(s.observe(ev(2, 7)), "different origin is a different event");
+        assert_eq!(s.len(), 3);
+    }
+
+    /// Anti-loop must be membership-based, not a per-origin high-water mark:
+    /// a lower seq arriving *after* a higher one (a delayed copy on another
+    /// mesh path) is a genuinely unseen item and must still be accepted.
+    #[test]
+    fn seen_accepts_late_lower_seq_from_same_origin() {
+        let mut s = SeenSet::default();
+        assert!(s.observe(ev(1, 500)));
+        assert!(
+            s.observe(ev(1, 3)),
+            "lower seq seen after higher must NOT be suppressed"
+        );
+    }
+
+    #[test]
+    fn seen_evicts_oldest_at_capacity() {
+        let mut s = SeenSet::new(2);
+        assert!(s.observe(ev(1, 1)));
+        assert!(s.observe(ev(1, 2)));
+        assert!(s.observe(ev(1, 3))); // evicts (1,1)
+        assert!(!s.contains(&ev(1, 1)));
+        assert!(s.contains(&ev(1, 2)));
+        assert!(s.contains(&ev(1, 3)));
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn seen_evicted_event_can_reappear() {
+        let mut s = SeenSet::new(2);
+        s.observe(ev(1, 1));
+        s.observe(ev(1, 2));
+        s.observe(ev(1, 3)); // evicts (1,1)
+        assert!(s.observe(ev(1, 1)), "evicted id is fresh again — by design");
+    }
+
+    #[test]
+    fn seen_default_capacity_is_256() {
+        assert_eq!(SeenSet::default().capacity, SEEN_CAPACITY);
     }
 }

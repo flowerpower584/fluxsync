@@ -18,16 +18,18 @@ pub mod dedup;
 pub mod error;
 pub mod events;
 pub mod fsm;
+pub mod id;
 pub mod policy;
 pub mod state;
 
 pub use app::App;
 pub use classify::{is_sensitive, kind_of};
 pub use clock::{Clock, LamportClock, StubWallClock, WallClock};
-pub use dedup::{ContentHash, DedupRing, DEDUP_CAPACITY};
+pub use dedup::{ContentHash, DedupRing, SeenSet, DEDUP_CAPACITY, SEEN_CAPACITY};
 pub use error::CoreError;
 pub use events::{Action, Event, LogEntry, LogLevel};
 pub use fsm::{transition, Phase};
+pub use id::{DeviceId, EventId};
 pub use policy::status_for;
 pub use state::{Config, HistoryItem, HistorySource, State, Status};
 

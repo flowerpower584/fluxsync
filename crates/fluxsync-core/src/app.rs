@@ -9,13 +9,49 @@
 //! cost.
 
 use crate::clock::{Clock, LamportClock, WallClock};
-use crate::dedup::{ContentHash, DedupRing};
+use crate::dedup::{ContentHash, DedupRing, SeenSet};
 use crate::events::{Action, Event, LogEntry};
 use crate::fsm::{transition, Phase};
+use crate::id::{DeviceId, EventId};
 use crate::policy::status_for;
 use crate::state::{Config, HistoryItem, State};
+use fluxsync_proto::Kind;
+use std::collections::BTreeMap;
 
 const HISTORY_SOFT_CAP: usize = 50;
+
+/// One per-peer link in the mesh. Today it carries only the FSM phase; later
+/// phases grow per-peer session metrics, role (send/receive-only), and
+/// last-seen. Keeping a phase *per link* is what lets several devices be in
+/// different states at once (one Linked, one Handshaking) — the core thing the
+/// single-peer `App.phase` cannot express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerLink {
+    pub phase: Phase,
+}
+
+impl PeerLink {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { phase: Phase::Idle }
+    }
+}
+
+impl Default for PeerLink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Result of ingesting a remote clipboard item at this node (mesh anti-loop).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ingest {
+    /// First time this `EventId` is seen here: apply it locally, then forward
+    /// it to the listed links (everyone Linked except the sender and origin).
+    Apply { forward_to: Vec<DeviceId> },
+    /// Already seen (looped back, or a duplicate from another path): drop it.
+    Dropped,
+}
 
 pub struct App {
     pub phase: Phase,
@@ -27,6 +63,21 @@ pub struct App {
     /// (which zeroes `state.peer_id`) so a later re-pair can tell whether the
     /// new peer is the same device or a different one — see FS-046.
     last_paired_peer_id: [u8; 32],
+    // ── FluxMesh foundation (Phase 1) ────────────────────────────────
+    // These back the multi-peer coordinator API (`handle_peer`,
+    // `broadcast_local`, `ingest_remote`). The single-peer `handle` path
+    // above is untouched and does NOT use them yet; the daemon migrates onto
+    // them in Phase 2 once it can route inbound frames per peer.
+    /// This device's own id, used as `EventId.origin` for locally-copied
+    /// items. `ZERO` until set via [`App::new_with_device`].
+    self_device: DeviceId,
+    /// Per-origin monotonic counter for `EventId`s this device originates.
+    local_seq: u64,
+    /// Mesh anti-loop guard — recently-seen `EventId`s. Independent of the
+    /// content-hash `dedup` ring (which guards OS clipboard echoes).
+    seen: SeenSet,
+    /// Per-peer link state, keyed by device. One entry per known peer.
+    links: BTreeMap<DeviceId, PeerLink>,
 }
 
 impl App {
@@ -40,7 +91,20 @@ impl App {
             dedup: DedupRing::default(),
             config,
             last_paired_peer_id: [0u8; 32],
+            self_device: DeviceId::ZERO,
+            local_seq: 0,
+            seen: SeenSet::default(),
+            links: BTreeMap::new(),
         }
+    }
+
+    /// Same as [`App::new`] but stamps this device's own id, used as the
+    /// `EventId.origin` of locally-copied items in the mesh coordinator.
+    #[must_use]
+    pub fn new_with_device(config: Config, self_device: DeviceId) -> Self {
+        let mut app = Self::new(config);
+        app.self_device = self_device;
+        app
     }
 
     /// Read-only snapshot. Cheap; no allocation.
@@ -65,6 +129,106 @@ impl App {
     pub fn set_charge_override(&mut self, value: bool) {
         self.config.charge_override = value;
         self.state.charge_override = value;
+    }
+
+    // ── FluxMesh coordinator API (Phase 1 foundation) ───────────────────
+    // Pure, peer-keyed primitives that the daemon adopts in Phase 2. They
+    // own only per-peer phase + the mesh seen-set; they never touch the
+    // single-peer `handle` path, so existing behaviour is unaffected.
+
+    /// This device's own id (`ZERO` unless set via [`App::new_with_device`]).
+    #[must_use]
+    pub fn self_device(&self) -> DeviceId {
+        self.self_device
+    }
+
+    /// Current FSM phase of one peer's link, or `None` if no such link.
+    #[must_use]
+    pub fn link_phase(&self, peer: DeviceId) -> Option<Phase> {
+        self.links.get(&peer).map(|l| l.phase)
+    }
+
+    /// Every peer whose link is currently `Linked`.
+    #[must_use]
+    pub fn linked_peers(&self) -> Vec<DeviceId> {
+        self.links
+            .iter()
+            .filter(|(_, l)| l.phase == Phase::Linked)
+            .map(|(d, _)| *d)
+            .collect()
+    }
+
+    /// Drive ONE peer's link with an event, returning that link's actions.
+    ///
+    /// Runs the same pure `transition` the single-peer `handle` does, but each
+    /// peer's phase advances independently in `links`, so devices can be in
+    /// different phases at once. Creates the link (Idle) on first sight. This
+    /// performs no global state mutation — phase is the only state it owns.
+    pub fn handle_peer(&mut self, peer: DeviceId, event: &Event) -> Vec<Action> {
+        let link = self.links.entry(peer).or_default();
+        let (next, actions) = transition(link.phase, event);
+        link.phase = next;
+        actions
+    }
+
+    /// Allocate the next `EventId` for an item this device originates.
+    pub fn next_local_event_id(&mut self) -> EventId {
+        let seq = self.local_seq;
+        self.local_seq += 1;
+        EventId::new(self.self_device, seq)
+    }
+
+    /// Fan a locally-copied item out to every `Linked` peer.
+    ///
+    /// Returns the fresh `EventId` stamped on the item (already recorded in the
+    /// seen-set so an echo can't loop back) and one `(peer, SendItem)` per live
+    /// link — the daemon sends each on that peer's transport.
+    pub fn broadcast_local(
+        &mut self,
+        hash: [u8; 32],
+        kind: Kind,
+        payload: &[u8],
+        sensitive: bool,
+    ) -> (EventId, Vec<(DeviceId, Action)>) {
+        let id = self.next_local_event_id();
+        self.seen.observe(id);
+        let targets = self
+            .links
+            .iter()
+            .filter(|(_, l)| l.phase == Phase::Linked)
+            .map(|(d, _)| {
+                (
+                    *d,
+                    Action::SendItem {
+                        hash,
+                        kind,
+                        payload: payload.to_vec(),
+                        sensitive,
+                    },
+                )
+            })
+            .collect();
+        (id, targets)
+    }
+
+    /// Ingest a remote item identified by `event_id`, arriving on link
+    /// `source`. Mesh anti-loop: drop if the id was already seen here;
+    /// otherwise mark it seen and forward to every `Linked` peer EXCEPT the
+    /// sender and the origin device — so it never echoes back the way it came
+    /// and never returns to whoever first created it.
+    pub fn ingest_remote(&mut self, source: DeviceId, event_id: EventId) -> Ingest {
+        if !self.seen.observe(event_id) {
+            return Ingest::Dropped;
+        }
+        let forward_to = self
+            .links
+            .iter()
+            .filter(|(d, l)| {
+                l.phase == Phase::Linked && **d != source && **d != event_id.origin
+            })
+            .map(|(d, _)| *d)
+            .collect();
+        Ingest::Apply { forward_to }
     }
 
     /// Drive the state machine with one event. Returns the side-effect
@@ -909,5 +1073,130 @@ mod tests {
                 msg: "hello".into()
             })
         );
+    }
+
+    // ── FluxMesh coordinator (Phase 1) ──────────────────────────────────
+    use crate::id::{DeviceId, EventId};
+
+    fn dev(b: u8) -> DeviceId {
+        DeviceId::from([b; 32])
+    }
+
+    /// Drive one peer's link Idle → Discovering → Handshaking → Linked via the
+    /// pure per-peer FSM.
+    fn link_to_linked(app: &mut App, peer: DeviceId) {
+        app.handle_peer(peer, &Event::ToggleOn);
+        app.handle_peer(
+            peer,
+            &Event::PeerSeen {
+                peer_id: peer.into_bytes(),
+                name: "p".into(),
+            },
+        );
+        app.handle_peer(peer, &Event::HandshakeOk);
+    }
+
+    #[test]
+    fn per_peer_phase_is_independent() {
+        let mut app = App::new_with_device(Config::default(), dev(0x5));
+        let a = dev(1);
+        let b = dev(2);
+        app.handle_peer(a, &Event::ToggleOn); // a → Discovering
+        link_to_linked(&mut app, b); // b → Linked
+        assert_eq!(app.link_phase(a), Some(Phase::Discovering));
+        assert_eq!(app.link_phase(b), Some(Phase::Linked));
+        assert_eq!(app.link_phase(dev(9)), None);
+        assert_eq!(app.linked_peers(), vec![b]);
+    }
+
+    #[test]
+    fn local_event_id_is_self_origin_and_monotonic() {
+        let mut app = App::new_with_device(Config::default(), dev(7));
+        let e0 = app.next_local_event_id();
+        let e1 = app.next_local_event_id();
+        assert_eq!(e0.origin, dev(7));
+        assert_eq!(e0.seq, 0);
+        assert_eq!(e1.seq, 1);
+    }
+
+    #[test]
+    fn broadcast_local_fans_out_to_linked_only() {
+        let mut app = App::new_with_device(Config::default(), dev(7));
+        let (a, b, c) = (dev(1), dev(2), dev(3));
+        link_to_linked(&mut app, a);
+        link_to_linked(&mut app, b);
+        app.handle_peer(c, &Event::ToggleOn); // c stays Discovering
+
+        let (id, targets) = app.broadcast_local([1; 32], Kind::Text, b"hi", false);
+        assert_eq!(id.origin, app.self_device());
+        let dests: Vec<_> = targets.iter().map(|(d, _)| *d).collect();
+        assert_eq!(dests, vec![a, b], "only Linked peers, sorted");
+        assert!(!dests.contains(&c));
+        assert!(targets
+            .iter()
+            .all(|(_, act)| matches!(act, Action::SendItem { hash, .. } if hash == &[1u8; 32])));
+    }
+
+    #[test]
+    fn ingest_remote_applies_once_then_drops_replay() {
+        let mut app = App::new_with_device(Config::default(), dev(7));
+        let src = dev(1);
+        let eid = EventId::new(dev(1), 5);
+        assert_eq!(
+            app.ingest_remote(src, eid),
+            Ingest::Apply { forward_to: vec![] }
+        );
+        assert_eq!(app.ingest_remote(src, eid), Ingest::Dropped);
+    }
+
+    #[test]
+    fn ingest_remote_forwards_to_others_not_source_or_origin() {
+        let mut app = App::new_with_device(Config::default(), dev(9));
+        let (a, b, c) = (dev(1), dev(2), dev(3));
+        link_to_linked(&mut app, a);
+        link_to_linked(&mut app, b);
+        link_to_linked(&mut app, c);
+        // item originated at `a` and arrives on link `a`.
+        match app.ingest_remote(a, EventId::new(a, 1)) {
+            Ingest::Apply { forward_to } => {
+                assert_eq!(forward_to, vec![b, c], "exclude source/origin a");
+            }
+            Ingest::Dropped => panic!("first sight must apply"),
+        }
+    }
+
+    /// Line topology A—B—C: an item from A reaches C exactly once and never
+    /// loops back. Three independent `App` nodes wired by hand.
+    #[test]
+    fn three_node_relay_arrives_once_and_never_loops() {
+        let mut a = App::new_with_device(Config::default(), dev(1));
+        let mut b = App::new_with_device(Config::default(), dev(2));
+        let mut c = App::new_with_device(Config::default(), dev(3));
+        let (a_id, b_id, c_id) = (dev(1), dev(2), dev(3));
+        link_to_linked(&mut a, b_id); // A ↔ B
+        link_to_linked(&mut b, a_id);
+        link_to_linked(&mut b, c_id); // B ↔ C
+        link_to_linked(&mut c, b_id);
+
+        // A originates → only neighbour is B.
+        let (eid, t) = a.broadcast_local([0xAB; 32], Kind::Text, b"x", false);
+        assert_eq!(eid.origin, a_id);
+        assert_eq!(t.iter().map(|(d, _)| *d).collect::<Vec<_>>(), vec![b_id]);
+
+        // B applies once, forwards to C (not back to A = source & origin).
+        assert_eq!(
+            b.ingest_remote(a_id, eid),
+            Ingest::Apply {
+                forward_to: vec![c_id]
+            }
+        );
+        // C applies once, forwards nowhere (only neighbour is B = source).
+        assert_eq!(
+            c.ingest_remote(b_id, eid),
+            Ingest::Apply { forward_to: vec![] }
+        );
+        // Any echo back is dropped — no loop.
+        assert_eq!(b.ingest_remote(c_id, eid), Ingest::Dropped);
+        assert_eq!(a.ingest_remote(b_id, eid), Ingest::Dropped);
     }
 }
