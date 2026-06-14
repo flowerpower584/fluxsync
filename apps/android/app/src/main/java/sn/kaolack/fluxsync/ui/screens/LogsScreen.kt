@@ -113,19 +113,21 @@ internal fun shouldAutoScrollLogs(
 
 @Composable
 private fun LogFilterChip(label: String, active: Boolean, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(8.dp)
     Box(
         Modifier
             .border(
                 width = 1.dp,
-                color = if (active) FsCrit else FsDarkBorder,
-                shape = RoundedCornerShape(2.dp)
+                color = if (active) FsAccent.copy(alpha = 0.4f) else FsDarkBorder,
+                shape = shape,
             )
+            .background(if (active) FsOkSoft else FsCardFlat, shape)
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .padding(horizontal = 9.dp, vertical = 4.dp)
     ) {
         Text(
             label,
-            color = if (active) FsCrit else FsDarkMuted,
+            color = if (active) FsAccent else FsDarkMuted,
             style = MaterialTheme.typography.labelSmall,
             fontSize = 9.sp
         )

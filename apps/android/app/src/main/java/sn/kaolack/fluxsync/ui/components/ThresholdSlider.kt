@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -24,14 +25,13 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import sn.kaolack.fluxsync.ui.theme.FsCrit
-import sn.kaolack.fluxsync.ui.theme.FsDarkBorder
+import sn.kaolack.fluxsync.ui.theme.FsAccent
+import sn.kaolack.fluxsync.ui.theme.FsDarkBorderStrong
 import sn.kaolack.fluxsync.ui.theme.FsDarkSurface
 import kotlin.math.roundToInt
 
 /**
- * Custom slider that matches the design's square thumb + 2dp track.
- * Material3's `Slider` only ships round thumbs.
+ * Custom slider — v6: green accent fill, round thumb, 4dp track.
  *
  * Behavior:
  *   * Tap anywhere on the track → seek to that position immediately.
@@ -82,8 +82,8 @@ fun ThresholdSlider(
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(2.dp)
-                .background(FsDarkBorder),
+                .height(4.dp)
+                .background(FsDarkBorderStrong, RoundedCornerShape(2.dp)),
         )
         // Filled portion (left edge → thumb).
         if (trackWidthPx > 0f) {
@@ -91,8 +91,8 @@ fun ThresholdSlider(
             Box(
                 Modifier
                     .width(fillWidthDp)
-                    .height(2.dp)
-                    .background(FsCrit),
+                    .height(4.dp)
+                    .background(FsAccent, RoundedCornerShape(2.dp)),
             )
         }
         // Thumb (centered on the percent position).
@@ -102,8 +102,8 @@ fun ThresholdSlider(
                 Modifier
                     .offset { IntOffset(thumbXPx.roundToInt(), 0) }
                     .size(thumbDp)
-                    .background(FsDarkSurface, RoundedCornerShape(1.dp))
-                    .border(width = 1.dp, color = FsCrit, shape = RoundedCornerShape(1.dp)),
+                    .background(FsAccent, CircleShape)
+                    .border(width = 2.dp, color = FsDarkSurface, shape = CircleShape),
             )
         }
     }

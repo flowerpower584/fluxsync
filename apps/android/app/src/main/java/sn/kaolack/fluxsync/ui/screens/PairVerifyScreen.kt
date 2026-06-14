@@ -12,9 +12,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -25,23 +28,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import org.json.JSONArray
+import sn.kaolack.fluxsync.ui.theme.FsAccent
+import sn.kaolack.fluxsync.ui.theme.FsCard
 import sn.kaolack.fluxsync.ui.theme.FsCrit
 import sn.kaolack.fluxsync.ui.theme.FsDarkBg
-import sn.kaolack.fluxsync.ui.theme.FsDarkBorder
 import sn.kaolack.fluxsync.ui.theme.FsDarkBorderStrong
 import sn.kaolack.fluxsync.ui.theme.FsDarkFg
 import sn.kaolack.fluxsync.ui.theme.FsDarkMuted
-import sn.kaolack.fluxsync.ui.theme.FsDarkSubtle
-import sn.kaolack.fluxsync.ui.theme.FsDarkSurface
-import sn.kaolack.fluxsync.ui.theme.FsLightSurface
-import sn.kaolack.fluxsync.ui.theme.FsOk
+import sn.kaolack.fluxsync.ui.theme.FsMono
+import sn.kaolack.fluxsync.ui.theme.FsOkSoft
+import sn.kaolack.fluxsync.ui.theme.FsOnAccent
+import sn.kaolack.fluxsync.ui.theme.FsRadius
+import sn.kaolack.fluxsync.ui.theme.FsSans
 import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
 /**
@@ -77,6 +82,15 @@ fun PairVerifyScreen(
                     return@LaunchedEffect
                 }
             }
+            // Re-pair of an already-confirmed peer: the daemon runs it as a
+            // reconnect — no pending entry, no SAS gate (driver.rs
+            // `already_confirmed`). Link up + nothing pending = nothing to
+            // verify, so jump straight to success instead of failing.
+            val st = vm.state.value
+            if (st != null && st.peerName.isNotEmpty() && st.peerName != "pending") {
+                onConfirmed()
+                return@LaunchedEffect
+            }
             delay(200)
         }
         failed = true
@@ -88,19 +102,38 @@ fun PairVerifyScreen(
             Modifier.fillMaxWidth().padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // Shield badge, `.m-sas .shield` in the mockup.
+            Box(
+                Modifier
+                    .size(52.dp)
+                    .background(FsOkSoft, RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.VerifiedUser,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp),
+                    tint = FsAccent,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
             Text(
-                "VERIFY",
-                color = FsDarkSubtle,
-                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.12.em),
+                "Verify the code",
+                color = FsDarkFg,
+                fontFamily = FsSans,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 14.5.sp,
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             Text(
                 "These 6 words must match the ones on the other device. If they differ, reject.",
                 color = FsDarkMuted,
-                style = MaterialTheme.typography.bodyMedium,
+                fontFamily = FsSans,
+                fontSize = 11.sp,
+                lineHeight = 17.sp,
                 textAlign = TextAlign.Center,
             )
-            Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(20.dp))
 
             when {
                 failed -> Text(
@@ -118,72 +151,80 @@ fun PairVerifyScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
-                else -> Box(
-                    Modifier.fillMaxWidth()
-                        .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
-                        .background(FsDarkSurface, RoundedCornerShape(8.dp))
-                        .padding(vertical = 24.dp, horizontal = 16.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        words.joinToString(" ").uppercase(),
-                        color = FsDarkFg,
-                        textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontFamily = FontFamily.Monospace,
-                            letterSpacing = 0.06.em,
-                        ),
-                    )
+                else -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    words.chunked(3).forEach { row ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            row.forEach { w ->
+                                Box(
+                                    Modifier
+                                        .weight(1f)
+                                        .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
+                                        .background(FsCard, RoundedCornerShape(8.dp))
+                                        .padding(vertical = 9.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        w,
+                                        color = FsDarkFg,
+                                        fontFamily = FsMono,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
         Spacer(Modifier.weight(1f))
-        HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
-        Row(
-            Modifier.fillMaxWidth().padding(20.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            // Reject — always available; also the escape hatch on failure.
-            Box(
-                Modifier.weight(1f)
-                    .border(1.dp, FsCrit, RoundedCornerShape(6.dp))
-                    .clickable(enabled = !busy) {
-                        busy = true
-                        peerId?.let { vm.pairConfirm(it, false) }
-                        onRejected()
-                    }
-                    .padding(vertical = 14.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "DON'T MATCH",
-                    color = FsCrit,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
+        Column(Modifier.fillMaxWidth().padding(20.dp)) {
             // Accept — only once words + peer_id are loaded.
             val canAccept = !busy && peerId != null && words.isNotEmpty()
             Box(
-                Modifier.weight(1f)
-                    .background(
-                        if (canAccept) FsOk else FsDarkBorderStrong,
-                        RoundedCornerShape(6.dp),
-                    )
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(FsRadius.Seg))
+                    .background(if (canAccept) FsAccent else FsDarkBorderStrong)
                     .clickable(enabled = canAccept) {
                         busy = true
                         peerId?.let { vm.pairConfirm(it, true) }
                         onConfirmed()
                     }
-                    .padding(vertical = 14.dp),
+                    .padding(vertical = 12.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    "WORDS MATCH",
-                    color = FsLightSurface,
-                    style = MaterialTheme.typography.labelLarge,
+                    "They match",
+                    color = if (canAccept) FsOnAccent else FsDarkMuted,
+                    fontFamily = FsSans,
                     fontWeight = FontWeight.Bold,
+                    fontSize = 12.5.sp,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            // Reject — always available; also the escape hatch on failure.
+            Box(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(FsRadius.Seg))
+                    .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(FsRadius.Seg))
+                    .clickable(enabled = !busy) {
+                        busy = true
+                        peerId?.let { vm.pairConfirm(it, false) }
+                        onRejected()
+                    }
+                    .padding(vertical = 11.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "They don't match",
+                    color = FsCrit,
+                    fontFamily = FsSans,
+                    fontWeight = FontWeight.W600,
+                    fontSize = 12.sp,
                 )
             }
         }

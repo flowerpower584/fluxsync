@@ -23,11 +23,21 @@ val FsSans: FontFamily = FontFamily(
     interTight(FontWeight.Normal),
     interTight(FontWeight.Medium),
     interTight(FontWeight.SemiBold),
+    interTight(FontWeight.Bold),
+    interTight(FontWeight.ExtraBold),
 )
 val FsMono: FontFamily = FontFamily(
     jetBrainsMono(FontWeight.Normal),
     jetBrainsMono(FontWeight.Medium),
     jetBrainsMono(FontWeight.SemiBold),
+)
+
+// 19px w800 — app header wordmark ("FluxSync"), v6 mockup `.ph-head .t`.
+val FsHeader = TextStyle(
+    fontFamily = FsSans,
+    fontWeight = FontWeight.ExtraBold,
+    fontSize = 19.sp,
+    letterSpacing = (-0.03).em,
 )
 
 // All sizes/weights are taken verbatim from `frame-android.jsx` and the

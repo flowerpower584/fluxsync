@@ -2,23 +2,17 @@ package sn.kaolack.fluxsync.ui.components
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import sn.kaolack.fluxsync.ui.theme.FsCrit
@@ -27,26 +21,23 @@ import sn.kaolack.fluxsync.ui.theme.FsOk
 import sn.kaolack.fluxsync.ui.theme.FsWarn
 
 /**
- * Battery glyph: 1px-outlined body + animated fill bar + 2dp cap.
+ * v6 battery bar: flat horizontal track + animated fill, matches
+ * `.batt .bar` in `design-preview.html` (30×6, radius 3). The `%`
+ * label and the charging bolt are rendered by callsites.
  *
  * Color thresholds:
  *   * `<= 5%`             → crit (red)
  *   * `<= threshold`      → warn (amber)
  *   * else                → ok   (green)
- *
- * Mirrors `Battery` in `components.jsx`. The body height is 0.45 ×
- * width; the cap is 50% of the body height, 2dp wide, 1dp gap on the
- * right edge.
  */
 @Composable
 fun BatteryGlyph(
     level: Int,
     threshold: Int = 15,
     charging: Boolean = false,
-    width: Dp = 28.dp,
+    width: Dp = 30.dp,
     modifier: Modifier = Modifier,
 ) {
-    val bodyHeight: Dp = width * 0.45f
     val color = batteryToneFor(level, threshold)
     val target = (level.coerceIn(0, 100)) / 100f
     val pct by animateFloatAsState(
@@ -55,34 +46,19 @@ fun BatteryGlyph(
         label = "fs-battery-pct",
     )
 
-    Row(
-        modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(0.dp),
+    val r = RoundedCornerShape(3.dp)
+    Box(
+        modifier = modifier
+            .width(width)
+            .height(6.dp)
+            .background(FsDarkBorderStrong, r),
     ) {
-        Canvas(
+        Box(
             Modifier
-                .width(width)
-                .height(bodyHeight)
-                .clip(RoundedCornerShape(2.dp)),
-        ) {
-            drawRect(
-                color = FsDarkBorderStrong,
-                size = Size(size.width, size.height),
-                style = Stroke(width = 1f),
-            )
-            val inset = 1f
-            val available = size.width - inset * 2
-            drawRect(
-                color = color,
-                topLeft = Offset(inset, inset),
-                size = Size(available * pct, size.height - inset * 2),
-            )
-        }
-        Spacer(Modifier.width(1.dp))
-        Canvas(Modifier.size(width = 2.dp, height = bodyHeight * 0.5f)) {
-            drawRect(color = FsDarkBorderStrong)
-        }
+                .fillMaxWidth(pct)
+                .fillMaxHeight()
+                .background(color, r),
+        )
     }
 }
 

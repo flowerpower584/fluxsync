@@ -4,21 +4,20 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import sn.kaolack.fluxsync.ui.theme.FsDarkBorder
+import androidx.compose.ui.unit.sp
 import sn.kaolack.fluxsync.ui.theme.FsDarkSubtle
+import sn.kaolack.fluxsync.ui.theme.FsSans
 
 /**
- * Uppercase mono caption above a panel, with an optional right-side
- * value (e.g. "5 ITEMS"). Underlined with a 1px divider.
- *
- * Matches `SectionLabel` in `components.jsx`.
+ * Section caption with an optional right-side value (e.g. "5 items").
+ * v6: sentence case, no divider — matches `.ph-sec` in
+ * `design-preview.html`.
  */
 @Composable
 fun SectionLabel(
@@ -29,18 +28,19 @@ fun SectionLabel(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp),
+            .padding(vertical = 6.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(
-            text = title.uppercase(),
+            text = title,
             color = FsDarkSubtle,
-            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FsSans,
+            fontWeight = FontWeight.W600,
+            fontSize = 11.5.sp,
         )
         if (right != null) {
             right()
         }
     }
-    HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
 }

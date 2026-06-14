@@ -2,22 +2,24 @@ package sn.kaolack.fluxsync.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import sn.kaolack.fluxsync.ui.Routes
+import sn.kaolack.fluxsync.ui.components.E2EBadge
 import sn.kaolack.fluxsync.ui.components.LoadingState
 import sn.kaolack.fluxsync.ui.components.TabIcon
 import sn.kaolack.fluxsync.ui.theme.*
@@ -51,11 +53,11 @@ fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
                     else -> "FluxSync"
                 },
                 subtitle = when(currentRoute) {
-                    Routes.HOME -> "v0.5.0 · android"
+                    Routes.HOME -> "v${sn.kaolack.fluxsync.BuildConfig.VERSION_NAME} · android"
                     Routes.DEVICES -> "paired peers"
                     Routes.LOGS -> "live stream"
                     Routes.SETTINGS -> "preferences"
-                    else -> "v0.5.0 · android"
+                    else -> "v${sn.kaolack.fluxsync.BuildConfig.VERSION_NAME} · android"
                 },
                 on = s.active,
             )
@@ -86,79 +88,64 @@ fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
 
 @Composable
 private fun AppBar(title: String, subtitle: String, on: Boolean) {
-    Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(FsDarkBg)
-                .padding(horizontal = 20.dp)
-                .padding(top = 18.dp, bottom = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                // Tray glyph: simulated as in the spec
-                Box(
-                    Modifier
-                        .size(18.dp)
-                        .border(width = 1.dp, color = if (on) FsCrit else FsDarkBorderStrong, shape = RoundedCornerShape(2.dp)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (on) {
-                        Box(Modifier.size(6.dp).background(FsOk, RoundedCornerShape(50)))
-                    }
-                }
-                Column {
-                    Text(title, color = FsDarkFg, style = MaterialTheme.typography.titleMedium)
-                    Text(subtitle.uppercase(), color = FsDarkSubtle, style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
-                }
-            }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(FsDarkBg)
+            .statusBarsPadding()
+            .padding(horizontal = 18.dp)
+            .padding(top = 14.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column {
+            Text(title, color = FsDarkFg, style = FsHeader)
+            Text(subtitle, color = FsDarkSubtle, fontFamily = FsMono, fontSize = 9.sp)
         }
-        HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
+        E2EBadge()
     }
 }
 
 @Composable
 private fun BottomNav(currentRoute: String, onNavigate: (String) -> Unit) {
-    Column {
-        HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
-        NavigationBar(
-            containerColor = FsDarkSurface,
-            tonalElevation = 0.dp,
-            modifier = Modifier.height(72.dp)
-        ) {
-            val tabs = listOf(
-                TabItem(Routes.HOME, "Home", "home"),
-                TabItem(Routes.DEVICES, "Devices", "devices"),
-                TabItem(Routes.LOGS, "Logs", "logs"),
-                TabItem(Routes.SETTINGS, "Settings", "settings")
-            )
+    val shape = RoundedCornerShape(FsRadius.Nav)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(FsDarkBg)
+            .navigationBarsPadding()
+            .padding(horizontal = 14.dp)
+            .padding(bottom = 10.dp, top = 4.dp)
+            .border(1.dp, FsDarkBorder, shape)
+            .background(FsCard, shape)
+            .padding(vertical = 9.dp),
+    ) {
+        val tabs = listOf(
+            TabItem(Routes.HOME, "Home", "home"),
+            TabItem(Routes.DEVICES, "Devices", "devices"),
+            TabItem(Routes.LOGS, "Logs", "logs"),
+            TabItem(Routes.SETTINGS, "Settings", "settings")
+        )
 
-            tabs.forEach { tab ->
-                val active = currentRoute == tab.id
-                NavigationBarItem(
-                    selected = active,
-                    onClick = { onNavigate(tab.id) },
-                    icon = {
-                        TabIcon(
-                            id = tab.icon,
-                            color = if (active) FsCrit else FsDarkMuted,
-                        )
-                    },
-                    label = {
-                        Text(
-                            tab.label.uppercase(),
-                            color = if (active) FsCrit else FsDarkMuted,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontSize = 9.sp
-                        )
-                    },
-                    colors = NavigationBarItemDefaults.colors(
-                        indicatorColor = Color.Transparent
-                    )
+        tabs.forEach { tab ->
+            val active = currentRoute == tab.id
+            val tint = if (active) FsAccent else FsDarkSubtle
+            Column(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onNavigate(tab.id) }
+                    .padding(vertical = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                TabIcon(id = tab.icon, color = tint, modifier = Modifier.size(15.dp))
+                Text(
+                    tab.label,
+                    color = tint,
+                    fontFamily = FsSans,
+                    fontWeight = FontWeight.W600,
+                    fontSize = 9.5.sp,
                 )
             }
         }

@@ -4,16 +4,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 
 private val DarkScheme = darkColorScheme(
-    // The Senegalese red is the brand + critical color. Material3
-    // exposes only one "primary" slot, so we put `FsCrit` there and
-    // use it sparingly in code (toggles, slider track, active nav).
-    primary = FsCrit,
-    onPrimary = FsLightSurface,
-    primaryContainer = FsCritSoft,
+    // v6: accent is the green `FsAccent` (toggles, slider track,
+    // active nav, CTAs). Red is reserved for destructive/critical.
+    primary = FsAccent,
+    onPrimary = FsOnAccent,
+    primaryContainer = FsOkSoft,
     onPrimaryContainer = FsDarkFg,
-    secondary = FsOk,
+    secondary = FsInfo,
     onSecondary = FsDarkBg,
     error = FsCrit,
     onError = FsLightSurface,
@@ -28,11 +28,11 @@ private val DarkScheme = darkColorScheme(
 )
 
 private val LightScheme = lightColorScheme(
-    primary = FsCrit,
+    primary = Color(0xFF19A85B),
     onPrimary = FsLightSurface,
-    primaryContainer = FsCritSoft,
+    primaryContainer = FsOkSoft,
     onPrimaryContainer = FsLightFg,
-    secondary = FsOk,
+    secondary = FsInfo,
     onSecondary = FsLightSurface,
     error = FsCrit,
     onError = FsLightSurface,

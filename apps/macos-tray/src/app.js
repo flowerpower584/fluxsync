@@ -24,7 +24,11 @@ let unlistenState = null;
     : 'unknown';
   document.body.dataset.os = os;
   const label = { windows: 'PC', macos: 'Mac', linux: 'Linux' }[os] || 'device';
-  void label;
+  const osName = { windows: 'Windows', macos: 'macOS', linux: 'Linux' }[os] || '—';
+  const selfName = document.getElementById('self-name');
+  const selfMeta = document.getElementById('self-meta');
+  if (selfName) selfName.textContent = 'This ' + label;
+  if (selfMeta) selfMeta.textContent = osName + ' · this device';
 })();
 
 // ── Authoritative sync state (avoids DOM-as-source-of-truth race) ──
@@ -51,12 +55,16 @@ function applyState(s) {
   if (isPaired) {
     renderHero(s);
     renderPeer(s);
+    renderSelf(s);
     renderRecent(s.history || []);
+    maybePulse(s);
   } else {
     setHero('off', 'NO DEVICE PAIRED');
     renderRecent([]);
   }
+  renderLink(s, isPaired);
   renderMetrics(s);
+  renderFooter(true, s);
 }
 
 async function refreshState() {
@@ -72,7 +80,9 @@ async function refreshState() {
     daemonReachable = false;
     syncOn = false;
     setHero('off', 'DAEMON OFFLINE');
+    renderLink(null, false);
     renderMetrics(null);
+    renderFooter(false, null);
   }
 }
 
@@ -117,6 +127,7 @@ function renderPeer(s) {
   peerSection.setAttribute('data-active', on ? 'true' : 'false');
 
   document.getElementById('peer-name-pill').textContent = peerName;
+  renderPeerDevice(s ? s.peer_platform : '');
   document.getElementById('peer-status-text').textContent = on ? 'LINKED' : 'STANDBY';
   
   const bar = document.getElementById('peer-battery-bar');
@@ -131,6 +142,29 @@ function renderPeer(s) {
   text.style.color = peerBat <= 5 ? 'var(--fs-crit)' : peerBat <= threshold ? 'var(--fs-warn)' : 'var(--fs-muted)';
 
   document.getElementById('pause-banner').style.display = (on && peerBat <= threshold && !peerCharging) ? 'flex' : 'none';
+}
+
+// Phone vs computer icon driven by the peer's OS family (s.peer_platform,
+// from Msg::Hello). The HTML ships a phone placeholder; without this every
+// peer — even a Mac/PC — rendered as a phone.
+const PEER_ICON_PHONE =
+  '<svg width="11" height="16" viewBox="0 0 11 16" fill="none">' +
+  '<rect x="0.5" y="0.5" width="10" height="15" rx="1.5" stroke="var(--fs-muted)"/>' +
+  '<circle cx="5.5" cy="13" r="0.7" fill="var(--fs-muted)"/></svg>';
+const PEER_ICON_COMPUTER =
+  '<svg width="16" height="14" viewBox="0 0 16 14" fill="none">' +
+  '<rect x="0.5" y="0.5" width="15" height="10" rx="1" stroke="var(--fs-muted)"/>' +
+  '<path d="M5 13h6M8 10.5V13" stroke="var(--fs-muted)" stroke-linecap="round"/></svg>';
+
+function renderPeerDevice(platform) {
+  const p = (platform || '').toLowerCase();
+  const isMobile = p === 'android' || p === 'ios';
+  const label = { macos: 'macOS', windows: 'Windows', linux: 'Linux',
+                  android: 'Android', ios: 'iOS' }[p] || (p ? p : '—');
+  const iconEl = document.getElementById('peer-device-icon');
+  if (iconEl) iconEl.innerHTML = isMobile ? PEER_ICON_PHONE : PEER_ICON_COMPUTER;
+  const metaEl = document.getElementById('peer-meta');
+  if (metaEl) metaEl.textContent = label;
 }
 
 // Inline RTT pill next to the E2E badge. Hidden until daemon reports a
@@ -154,27 +188,167 @@ function renderMetrics(s) {
   pill.textContent = `${rtt}MS`;
 }
 
+// Self side of the connection card: the daemon reports this device's own
+// battery via `battery_level` / `charging` (SetSelfBattery on mobile, host
+// watcher on desktop). Colors mirror the peer-side thresholds.
+function renderSelf(s) {
+  const fill = document.getElementById('self-batt-fill');
+  const pc = document.getElementById('self-batt-pc');
+  const box = document.getElementById('self-batt');
+  if (!fill || !pc || !box) return;
+  const lvl = s.battery_level ?? 0;
+  const threshold = s.battery_threshold ?? 20;
+  fill.style.width = `${Math.min(lvl, 100)}%`;
+  fill.style.background = lvl <= 5 ? 'var(--fs-crit)' : lvl <= threshold ? 'var(--fs-warn)' : 'var(--fs-ok)';
+  pc.textContent = `${lvl}%`;
+  box.classList.toggle('chg', !!s.charging);
+}
+
+// Beam between the two devices. `data-link` on the container drives the
+// CSS: on (solid green), paused (amber dashes), searching (gray crawl,
+// radar rings on the peer icon), off (inert). Phase comes straight from
+// the FSM (`s.phase`), pause mirrors the hero/pause-banner policy.
+function renderLink(s, isPaired) {
+  const c = document.getElementById('tray-container');
+  if (!c) return;
+  if (!s || !s.on || !isPaired) { c.dataset.link = 'off'; return; }
+  const phase = (s.phase || '').toLowerCase();
+  if (phase === 'discovering' || phase === 'handshaking') { c.dataset.link = 'searching'; return; }
+  const threshold = s.battery_threshold ?? 20;
+  const selfLow = (s.battery_level ?? 0) <= threshold && !s.charging;
+  const peerLow = (s.peer_battery ?? 0) <= threshold && !s.peer_charging;
+  c.dataset.link = (phase === 'paused' || selfLow || peerLow) ? 'paused' : 'on';
+}
+
+// Fire a pulse along the beam when a new item lands at the top of the
+// history. Direction follows `HistoryItem.source`: local → tx (out),
+// remote → rx (in). Keyed on the content hash so re-renders don't re-fire.
+let lastTopKey = null;
+function maybePulse(s) {
+  const top = s && s.history && s.history[0];
+  const key = top ? (top.hash || String(top.lamport)) : null;
+  if (key && lastTopKey && key !== lastTopKey) {
+    const pulse = document.getElementById('beam-pulse');
+    if (pulse) {
+      pulse.classList.remove('tx', 'rx');
+      void pulse.offsetWidth; // restart the CSS animation
+      pulse.classList.add(top.source === 'remote' ? 'rx' : 'tx');
+    }
+    const first = document.querySelector('#recent .history-item');
+    if (first) first.classList.add('new');
+  }
+  lastTopKey = key;
+}
+
+function renderFooter(up, s) {
+  const dot = document.getElementById('daemon-dot');
+  const lb = document.getElementById('daemon-label');
+  if (dot) dot.classList.toggle('down', !up);
+  if (lb) lb.textContent = up ? 'fluxsyncd active' : 'daemon unreachable';
+  if (up && s && s.version) {
+    const v = document.getElementById('brand-version');
+    if (v) v.textContent = `v${s.version}`;
+  }
+}
+
+const KIND_ICONS = {
+  text: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 2.5h8M2 6h8M2 9.5h5"/></svg>',
+  url: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M4.5 7.5l3-3M3.2 8.8L2 10a2 2 0 102.8 2.8L6 11.5M8.8 3.2L10 2a2 2 0 10-2.8-2.8L6 .5" transform="translate(0 .4)"/></svg>',
+  image: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="4" cy="4.5" r="1.2"/><path d="M0 9.5l3.5-3.5L12 12" stroke-linejoin="round"/></svg>',
+};
+const LOCK_ICON =
+  '<svg width="10" height="11" viewBox="0 0 9 10" fill="none">' +
+  '<rect x="1" y="4" width="7" height="5" stroke="currentColor" stroke-width="1.2"/>' +
+  '<path d="M2.5 4V2.5a2 2 0 014 0V4" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>';
+
+// Copy a history item's text back to the OS clipboard. The async Clipboard
+// API is tried first; WKWebView sometimes rejects it, so fall back to the
+// legacy execCommand path, which still works on a user gesture.
+async function copyText(text) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch {}
+    ta.remove();
+  }
+  showToast('Copied');
+}
+
+// History rows render every `HistoryItem` field the daemon sends: kind
+// (icon), sensitive (masked preview + lock), source (local/peer badge),
+// time (HH:MM from the daemon's wall clock).
 function renderRecent(history) {
   const list = document.getElementById('recent');
-  document.getElementById('recent-count').textContent = `${history.length} ITEMS`;
+  document.getElementById('recent-count').textContent = `${history.length} items`;
   list.innerHTML = '';
-  history.slice(0, 5).forEach(h => {
+  if (!history.length) {
+    const empty = document.createElement('div');
+    empty.className = 'history-empty';
+    empty.textContent = 'Nothing copied yet.';
+    list.append(empty);
+    return;
+  }
+  history.forEach(h => {
     const item = document.createElement('button');
     item.className = 'history-item';
-    
-    const k = document.createElement('span'); 
-    k.className = 'kind mono'; 
-    k.textContent = (h.kind || 'TEXT').toUpperCase();
-    
-    const p = document.createElement('span'); 
-    p.className = 'preview'; 
-    p.textContent = h.preview || '';
-    
-    const t = document.createElement('span'); 
-    t.className = 'time mono'; 
+
+    const kind = (h.kind || 'text').toLowerCase();
+    const ic = document.createElement('span');
+    ic.className = 'kind-ic' + (kind === 'image' ? ' thumb' : '');
+    ic.innerHTML = KIND_ICONS[kind] || KIND_ICONS.text;
+
+    const p = document.createElement('span');
+    if (h.sensitive) {
+      p.className = 'preview masked';
+      p.textContent = '••••••••••••';
+    } else {
+      p.className = 'preview';
+      p.textContent = h.preview || '';
+    }
+
+    item.append(ic, p);
+
+    if (h.sensitive) {
+      const lock = document.createElement('span');
+      lock.className = 'lock';
+      lock.title = 'Marked sensitive — masked';
+      lock.innerHTML = LOCK_ICON;
+      item.append(lock);
+    }
+
+    const src = document.createElement('span');
+    const remote = h.source === 'remote';
+    src.className = 'src ' + (remote ? 'remote' : 'local');
+    src.textContent = remote ? 'peer' : 'local';
+    item.append(src);
+
+    // Text rows carry their full payload in `preview` (only the CSS clips it),
+    // so clicking copies it straight back. Image previews are just a "N KB"
+    // label — the bytes aren't in the snapshot — so those rows aren't copyable.
+    if (kind !== 'image' && h.preview) {
+      item.classList.add('copyable');
+      item.title = 'Click to copy';
+      const hint = document.createElement('span');
+      hint.className = 'copy-hint';
+      hint.textContent = 'Copy';
+      item.append(hint);
+      item.addEventListener('click', () => copyText(h.preview));
+    } else {
+      item.style.cursor = 'default';
+    }
+
+    const t = document.createElement('span');
+    t.className = 'time';
     t.textContent = h.time || '—';
-    
-    item.append(k, p, t);
+    item.append(t);
+
     list.append(item);
   });
 }

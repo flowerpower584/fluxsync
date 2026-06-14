@@ -101,15 +101,15 @@ private fun SuccessState(name: String) {
     ) {
         Box(
             Modifier
-                .size(80.dp)
-                .background(FsOk.copy(alpha = 0.1f), RoundedCornerShape(40.dp))
-                .border(2.dp, FsOk, RoundedCornerShape(40.dp)),
+                .size(64.dp)
+                .background(FsAccent, RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Text("✓", color = FsOk, fontSize = 40.sp, fontWeight = FontWeight.Bold)
+            Text("✓", color = FsOnAccent, fontSize = 30.sp, fontWeight = FontWeight.Bold)
         }
-        Spacer(Modifier.height(24.dp))
-        Text("Successfully Paired!", color = FsDarkFg, style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(18.dp))
+        Text("Devices linked", color = FsDarkFg, fontFamily = FsSans, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+        Spacer(Modifier.height(4.dp))
         Text("Linked with $name", color = FsDarkMuted, style = MaterialTheme.typography.bodyMedium)
     }
 }
@@ -120,31 +120,37 @@ private fun ModeToggle(mode: PairMode, onModeChange: (PairMode) -> Unit) {
         Modifier
             .fillMaxWidth()
             .height(44.dp)
-            .background(FsDarkSurface, RoundedCornerShape(8.dp))
-            .padding(4.dp)
+            .border(1.dp, FsDarkBorder, RoundedCornerShape(FsRadius.Seg))
+            .background(FsCardFlat, RoundedCornerShape(FsRadius.Seg))
+            .padding(3.dp)
     ) {
-        Box(
-            Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .clip(RoundedCornerShape(6.dp))
-                .background(if (mode == PairMode.SHOW) FsDarkBorderStrong else FsDarkSurface)
-                .clickable { onModeChange(PairMode.SHOW) },
-            contentAlignment = Alignment.Center
-        ) {
-            Text("Show QR", color = if (mode == PairMode.SHOW) FsDarkFg else FsDarkMuted, style = MaterialTheme.typography.labelLarge)
+        Segment("Show this phone", selected = mode == PairMode.SHOW, modifier = Modifier.weight(1f)) {
+            onModeChange(PairMode.SHOW)
         }
-        Box(
-            Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .clip(RoundedCornerShape(6.dp))
-                .background(if (mode == PairMode.SCAN) FsDarkBorderStrong else FsDarkSurface)
-                .clickable { onModeChange(PairMode.SCAN) },
-            contentAlignment = Alignment.Center
-        ) {
-            Text("Scan QR", color = if (mode == PairMode.SCAN) FsDarkFg else FsDarkMuted, style = MaterialTheme.typography.labelLarge)
+        Segment("Scan", selected = mode == PairMode.SCAN, modifier = Modifier.weight(1f)) {
+            onModeChange(PairMode.SCAN)
         }
+    }
+}
+
+@Composable
+private fun Segment(label: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (selected) FsOkSoft else androidx.compose.ui.graphics.Color.Transparent)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = if (selected) FsAccent else FsDarkMuted,
+            fontFamily = FsSans,
+            fontWeight = FontWeight.Bold,
+            fontSize = 11.5.sp,
+            maxLines = 1,
+        )
     }
 }
 
@@ -194,32 +200,34 @@ private fun ScanCTA(onScan: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
-            .border(1.dp, FsDarkBorder, RoundedCornerShape(8.dp))
-            .background(FsDarkSurface, RoundedCornerShape(8.dp))
+            .border(1.dp, FsDarkBorder, RoundedCornerShape(FsRadius.Hero))
+            .background(FsCard, RoundedCornerShape(FsRadius.Hero))
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
             Modifier
                 .size(48.dp)
-                .background(FsCrit.copy(alpha = 0.1f), RoundedCornerShape(24.dp)),
+                .background(FsOkSoft, RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Text("📷", fontSize = 24.sp)
+            Text("📷", fontSize = 22.sp)
         }
-        Spacer(Modifier.height(16.dp))
-        Text("Use Camera", color = FsDarkFg, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(14.dp))
+        Text("Use camera", color = FsDarkFg, fontFamily = FsSans, fontWeight = FontWeight.Bold, fontSize = 14.5.sp)
+        Spacer(Modifier.height(4.dp))
         Text("Scan the QR code on your Mac or other phone.", color = FsDarkMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 20.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(20.dp))
         Box(
             Modifier
                 .fillMaxWidth()
-                .background(FsCrit, RoundedCornerShape(4.dp))
+                .clip(RoundedCornerShape(FsRadius.Btn))
+                .background(FsAccent)
                 .clickable { onScan() }
                 .padding(vertical = 12.dp),
             contentAlignment = Alignment.Center
         ) {
-            Text("LAUNCH SCANNER", color = FsLightSurface, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+            Text("Launch scanner", color = FsOnAccent, fontFamily = FsSans, fontWeight = FontWeight.Bold, fontSize = 13.sp)
         }
     }
 }
@@ -231,9 +239,8 @@ private fun QrPanel(uri: String) {
         Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
-            .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(4.dp))
-            .background(FsLightSurface, RoundedCornerShape(4.dp))
-            .padding(20.dp),
+            .background(FsLightSurface, RoundedCornerShape(FsRadius.Item))
+            .padding(14.dp),
         contentAlignment = Alignment.Center,
     ) {
         Image(
@@ -250,25 +257,24 @@ private fun Header(onBack: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 18.dp),
+            .statusBarsPadding()
+            .padding(horizontal = 18.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Box(
             Modifier
-                .size(32.dp)
-                .border(1.dp, FsDarkBorder, RoundedCornerShape(4.dp))
+                .size(30.dp)
+                .clip(RoundedCornerShape(FsRadius.IconMd))
+                .border(1.dp, FsDarkBorder, RoundedCornerShape(FsRadius.IconMd))
+                .background(FsCardFlat, RoundedCornerShape(FsRadius.IconMd))
                 .clickable { onBack() },
             contentAlignment = Alignment.Center
         ) {
-            Text("←", color = FsDarkMuted, fontSize = 18.sp)
+            Text("←", color = FsDarkMuted, fontSize = 15.sp)
         }
-        Column {
-            Text("Pair Device", color = FsDarkFg, style = MaterialTheme.typography.titleMedium)
-            Text("SYNC IN SECONDS", color = FsDarkSubtle, style = MaterialTheme.typography.labelSmall)
-        }
+        Text("Pair a device", color = FsDarkFg, fontFamily = FsSans, fontWeight = FontWeight.Bold, fontSize = 16.sp)
     }
-    HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
 }
 
 private data class PairInfo(val uri: String, val addrHint: String, val words: List<String>) {

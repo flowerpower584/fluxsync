@@ -55,8 +55,8 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
             SettingsGroup(title = "General") {
@@ -198,7 +198,7 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
             SettingsGroup(title = "About") {
                 SettingsItem(
                     label = "Version",
-                    right = { Text(s.version.ifEmpty { "0.5.2" }, color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) }
+                    right = { Text(s.version.ifEmpty { BuildConfig.VERSION_NAME }, color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) }
                 )
                 SettingsItem(
                     label = "Build",
@@ -282,8 +282,8 @@ private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> 
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .border(width = 1.dp, color = FsDarkBorder, shape = RoundedCornerShape(4.dp))
-                .background(FsDarkSurface, RoundedCornerShape(4.dp))
+                .border(width = 1.dp, color = FsDarkBorder, shape = RoundedCornerShape(FsRadius.Item))
+                .background(FsCard, RoundedCornerShape(FsRadius.Item))
         ) {
             content()
         }

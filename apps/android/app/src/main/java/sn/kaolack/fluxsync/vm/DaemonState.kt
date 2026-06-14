@@ -32,6 +32,7 @@ data class DaemonState(
     val status: String,
     val active: Boolean,
     val peerName: String,
+    val peerPlatform: String,
     val peerBattery: Int,
     val peerCharging: Boolean,
     val selfBattery: Int,
@@ -59,6 +60,7 @@ data class DaemonState(
                 // `on` boolean.
                 active = o.optBoolean("on", false),
                 peerName = o.optString("peer_name", ""),
+                peerPlatform = o.optString("peer_platform", ""),
                 peerBattery = o.optInt("peer_battery", 0),
                 peerCharging = o.optBoolean("peer_charging", false),
                 selfBattery = o.optInt("battery_level", 0),
@@ -104,6 +106,20 @@ data class DaemonState(
             return out
         }
     }
+}
+
+/**
+ * Friendly OS label for a peer's `peer_platform` (from `Msg::Hello`), or null
+ * when the platform is unknown / not yet received. Lets the UI show what the
+ * peer is instead of assuming a phone.
+ */
+fun platformLabel(platform: String): String? = when (platform.lowercase()) {
+    "macos" -> "macOS"
+    "windows" -> "Windows"
+    "linux" -> "Linux"
+    "android" -> "Android"
+    "ios" -> "iOS"
+    else -> null
 }
 
 data class HistoryItem(

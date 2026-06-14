@@ -1,36 +1,44 @@
-/* FluxSync Design System Tokens - v0.5.0-hardened */
+/* FluxSync Design System Tokens — v6 "calm premium"
+   Same variable names as v0.5 (settings.css / pair.html depend on them),
+   reworked values: translucent cards, bright green accent, normal case
+   (mono now used for data only). */
 
 :root {
-  /* Light Theme (default on macOS) */
-  --fs-light-bg: #FAFAF9;
+  /* Light */
+  --fs-light-bg: #F6F6F7;
   --fs-light-surface: #FFFFFF;
-  --fs-light-fg: #0A0A0A;
-  --fs-light-muted: #71717A;
-  --fs-light-subtle: #A1A1AA;
-  --fs-light-border: #E4E4E7;
-  --fs-light-border-strong: #D4D4D8;
-  --fs-light-hover: #F4F4F5;
+  --fs-light-surface-alt: #F1F1F2;
+  --fs-light-fg: #111114;
+  --fs-light-muted: #5F5F6B;
+  --fs-light-subtle: #9A9AA4;
+  --fs-light-border: rgba(17,17,20,.08);
+  --fs-light-border-strong: rgba(17,17,20,.16);
+  --fs-light-hover: rgba(17,17,20,.045);
+  --fs-light-ok: #1E8F4F;
+  --fs-light-ok-deep: #177642;
 
-  /* Dark Theme */
-  --fs-dark-bg: #0B0B0C;
-  --fs-dark-surface: #131316;
-  --fs-dark-fg: #FAFAFA;
-  --fs-dark-muted: #A1A1AA;
-  --fs-dark-subtle: #71717A;
-  --fs-dark-border: #1F1F22;
-  --fs-dark-border-strong: #2A2A2E;
-  --fs-dark-hover: #1A1A1D;
+  /* Dark */
+  --fs-dark-bg: #09090B;
+  --fs-dark-surface: #0C0C0F;
+  --fs-dark-surface-alt: rgba(255,255,255,.045);
+  --fs-dark-fg: #F4F4F5;
+  --fs-dark-muted: #9D9DA8;
+  --fs-dark-subtle: #5C5C68;
+  --fs-dark-border: rgba(255,255,255,.075);
+  --fs-dark-border-strong: rgba(255,255,255,.14);
+  --fs-dark-hover: rgba(255,255,255,.06);
+  --fs-dark-ok: #4CC272;
+  --fs-dark-ok-deep: #36A35C;
 
-  /* Semantics */
-  --fs-ok: #3FAE5A;
-  --fs-ok-soft: rgba(63, 174, 90, 0.12);
-  --fs-warn: #D9A441;
-  --fs-warn-soft: rgba(217, 164, 65, 0.14);
-  --fs-crit: #D43F3F;
-  --fs-crit-soft: rgba(212, 63, 63, 0.12);
-  --fs-info: #5B7FBF;
+  /* Semantic (stable across themes except ok, overridden below) */
+  --fs-warn: #D9A23A;
+  --fs-warn-soft: rgba(217,162,58,.13);
+  --fs-crit: #E0635E;
+  --fs-crit-soft: rgba(224,99,94,.12);
+  --fs-info: #5B8FD4;
+  --fs-info-soft: rgba(91,143,212,.13);
 
-  /* Typography */
+  /* Typo */
   --fs-ui: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   --fs-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
 }
@@ -38,23 +46,35 @@
 [data-theme="light"] {
   --fs-bg: var(--fs-light-bg);
   --fs-surface: var(--fs-light-surface);
+  --fs-surface-alt: var(--fs-light-surface-alt);
   --fs-fg: var(--fs-light-fg);
   --fs-muted: var(--fs-light-muted);
   --fs-subtle: var(--fs-light-subtle);
   --fs-border: var(--fs-light-border);
   --fs-border-strong: var(--fs-light-border-strong);
   --fs-hover: var(--fs-light-hover);
+  --fs-ok: var(--fs-light-ok);
+  --fs-ok-deep: var(--fs-light-ok-deep);
+  --fs-ok-soft: rgba(30,143,79,.10);
+  --fs-card: #FFFFFF;
+  --fs-hairline: rgba(255,255,255,.6);
 }
 
 [data-theme="dark"] {
   --fs-bg: var(--fs-dark-bg);
   --fs-surface: var(--fs-dark-surface);
+  --fs-surface-alt: var(--fs-dark-surface-alt);
   --fs-fg: var(--fs-dark-fg);
   --fs-muted: var(--fs-dark-muted);
   --fs-subtle: var(--fs-dark-subtle);
   --fs-border: var(--fs-dark-border);
   --fs-border-strong: var(--fs-dark-border-strong);
   --fs-hover: var(--fs-dark-hover);
+  --fs-ok: var(--fs-dark-ok);
+  --fs-ok-deep: var(--fs-dark-ok-deep);
+  --fs-ok-soft: rgba(76,194,114,.12);
+  --fs-card: rgba(255,255,255,.045);
+  --fs-hairline: rgba(255,255,255,.045);
 }
 
 /* ── Toast (shared primitive — used by tray and settings) ──────── */
@@ -64,13 +84,14 @@
   bottom: 14px;
   transform: translate(-50%, 12px);
   max-width: calc(100% - 28px);
-  padding: 8px 12px;
+  padding: 9px 14px;
   background: var(--fs-fg);
   color: var(--fs-surface);
-  border-radius: 4px;
-  font-size: 11px;
+  border-radius: 10px;
+  font-size: 11.5px;
+  font-weight: 600;
   line-height: 1.35;
-  box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
   opacity: 0;
   pointer-events: none;
   transition: transform .2s ease, opacity .2s ease;

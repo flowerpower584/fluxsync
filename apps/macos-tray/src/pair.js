@@ -322,7 +322,7 @@ function showPinError(msg) {
 
 // ─── Verify-words flow (both QR + PIN) ──────────────────────────
 
-async function enterVerifyScreen(_peerDisplayName) {
+async function enterVerifyScreen(peerDisplayName) {
   showScreen('verify');
   $('verify-error').style.display = 'none';
   // Poll pair_pending briefly: the daemon writes the entry from the
@@ -338,6 +338,21 @@ async function enterVerifyScreen(_peerDisplayName) {
       }
     } catch (_) {}
     await new Promise(r => setTimeout(r, 200));
+  }
+  // Re-pair of an already-confirmed peer: the daemon treats it as a
+  // reconnect (no pending entry, no SAS gate — see driver.rs
+  // `already_confirmed`). Pending empty + link up means there is nothing
+  // to verify, so showing "paired" is truthful here, unlike the QA #4
+  // case below where a pending entry exists but failed to surface.
+  if (!entry) {
+    try {
+      const st = await invoke('fluxsync_status');
+      const peerName = (st && st.data && st.data.peer_name) || '';
+      if (peerName && peerName !== 'pending') {
+        showPaired(peerName);
+        return;
+      }
+    } catch (_) {}
   }
   const fp = $('verify-fp');
   fp.innerHTML = '';

@@ -1,5 +1,6 @@
 package sn.kaolack.fluxsync.ui.screens
 
+import android.widget.Toast
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
@@ -25,7 +26,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -78,8 +83,8 @@ fun HomeScreen(vm: FluxsyncViewModel) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(11.dp),
     ) {
         item {
             HeroCard(
@@ -93,12 +98,7 @@ fun HomeScreen(vm: FluxsyncViewModel) {
             )
         }
         item { DeviceRow(s) }
-        item {
-            SectionLabel(
-                title = "Conditions",
-                right = { E2EBadge() },
-            )
-        }
+        item { SectionLabel(title = "Conditions") }
         item {
             ConditionsPanel(
                 s = s,
@@ -112,12 +112,13 @@ fun HomeScreen(vm: FluxsyncViewModel) {
         }
         item {
             SectionLabel(
-                title = "Recent",
+                title = "Recent clipboard",
                 right = {
                     Text(
-                        "${s.history.size} ITEMS",
+                        "${s.history.size} items",
                         color = FsDarkSubtle,
-                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FsMono,
+                        fontSize = 10.sp,
                     )
                 },
             )
@@ -125,7 +126,7 @@ fun HomeScreen(vm: FluxsyncViewModel) {
         if (s.history.isEmpty()) {
             item { EmptyHistory() }
         } else {
-            items(s.history.take(4)) { h ->
+            items(s.history) { h ->
                 RecentRow(h)
             }
         }
@@ -134,10 +135,7 @@ fun HomeScreen(vm: FluxsyncViewModel) {
 
 private data class HeroVisuals(
     val borderColor: Color,
-    val bg: Color,
     val dotColor: Color,
-    val statusLabel: String,
-    val title: String,
     val sub: String,
 )
 
@@ -155,64 +153,118 @@ private fun HeroCard(
     val syncPaused = on && below && !charging
 
     val visuals = when {
-        !on -> HeroVisuals(FsDarkBorder, FsDarkSurface, Color(0xFF52525B), "INACTIVE", "Offline", "Tap the switch to start sharing your clipboard.")
-        critical -> HeroVisuals(FsCrit, FsCritSoft, FsCrit, "CRITICAL", "Halted", "Battery critical. All sync stopped.")
-        syncPaused -> HeroVisuals(FsWarn, FsWarnSoft, FsWarn, "PAUSED", "On hold", "Battery below ${s.threshold}%. Resumes when you charge.")
-        else -> HeroVisuals(FsOk, FsDarkSurface, FsOk, "SYNCHRONIZING", "Live", "Linked with ${s.peerName.ifEmpty { "..." }}.")
+        !on -> HeroVisuals(FsDarkBorder, FsDarkSubtle, "Off — tap the switch to start syncing.")
+        critical -> HeroVisuals(FsCrit.copy(alpha = 0.35f), FsCrit, "Halted — battery critical, all sync stopped.")
+        syncPaused -> HeroVisuals(FsWarn.copy(alpha = 0.35f), FsWarn, "On hold — battery below ${s.threshold}%.")
+        else -> HeroVisuals(FsHeroOkBorder, FsAccent, "Active — synchronizing")
     }
 
-    // Tween the colors so transitions between Inactive/Live/Paused/Halted
-    // glide rather than snap. 220 ms feels responsive without smearing.
+    // Tween so transitions between states glide rather than snap.
     val animatedBorder by animateColorAsState(visuals.borderColor, animationSpec = tween(220), label = "hero-border")
-    val animatedBg by animateColorAsState(visuals.bg, animationSpec = tween(220), label = "hero-bg")
     val animatedDot by animateColorAsState(visuals.dotColor, animationSpec = tween(220), label = "hero-dot")
 
-    Box(
+    val shape = RoundedCornerShape(FsRadius.Hero)
+    Column(
         Modifier
             .fillMaxWidth()
-            .border(width = 1.dp, color = animatedBorder, shape = RoundedCornerShape(4.dp))
-            .background(animatedBg, RoundedCornerShape(4.dp))
-            .padding(18.dp),
+            .border(width = 1.dp, color = animatedBorder, shape = shape)
+            .background(FsCard, shape)
+            .padding(16.dp),
     ) {
-        Row(verticalAlignment = Alignment.Top) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusDot(color = animatedDot, pulse = on && !syncPaused && !critical)
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        if (isStalled) "CONNECTING…" else visuals.statusLabel,
-                        color = animatedDot,
-                        style = MaterialTheme.typography.labelMedium,
-                        letterSpacing = 1.sp
-                    )
-                }
-                Spacer(Modifier.height(8.dp))
-                AnimatedContent(
-                    targetState = visuals.title,
-                    transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(120)) },
-                    label = "hero-title",
-                ) { title ->
-                    Text(title, color = FsDarkFg, style = MaterialTheme.typography.headlineSmall)
-                }
+                Text(
+                    "Clipboard sync",
+                    color = FsDarkFg,
+                    fontFamily = FsSans,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.5.sp,
+                )
                 Spacer(Modifier.height(4.dp))
-                AnimatedContent(
-                    targetState = visuals.sub,
-                    transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(120)) },
-                    label = "hero-sub",
-                ) { sub ->
-                    Text(sub, color = FsDarkMuted, style = MaterialTheme.typography.bodySmall)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusDot(color = animatedDot, size = 7.dp, pulse = on && !syncPaused && !critical)
+                    Spacer(Modifier.width(7.dp))
+                    AnimatedContent(
+                        targetState = if (isStalled) "Connecting…" else visuals.sub,
+                        transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(120)) },
+                        label = "hero-sub",
+                    ) { sub ->
+                        Text(sub, color = FsDarkMuted, fontFamily = FsSans, fontSize = 12.sp, maxLines = 1)
+                    }
                 }
             }
             FluxToggle(on = on, onChange = onToggle, size = FluxToggleSize.Md)
+        }
+        Spacer(Modifier.height(15.dp))
+        LinkDiagram(linked = on && !critical, dimmed = syncPaused)
+    }
+}
+
+/** phone — beam — computer mini-diagram, `.ph-link` in the mockup. */
+@Composable
+private fun LinkDiagram(linked: Boolean, dimmed: Boolean) {
+    val beam = when {
+        linked && !dimmed -> FsAccent
+        linked -> FsWarn.copy(alpha = 0.6f)
+        else -> FsDarkBorderStrong
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+        LinkNode { DeviceGlyph(phone = true, color = FsDarkMuted) }
+        Box(
+            Modifier
+                .weight(1f)
+                .height(3.dp)
+                .background(beam, RoundedCornerShape(2.dp)),
+        )
+        LinkNode { DeviceGlyph(phone = false, color = FsDarkMuted) }
+    }
+}
+
+@Composable
+private fun LinkNode(content: @Composable () -> Unit) {
+    Box(
+        Modifier
+            .size(30.dp)
+            .border(1.dp, FsDarkBorder, RoundedCornerShape(FsRadius.IconMd))
+            .background(FsCardFlat, RoundedCornerShape(FsRadius.IconMd)),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+/** Outline phone / computer glyph, same stroke style as TabIcon. */
+@Composable
+private fun DeviceGlyph(phone: Boolean, color: Color) {
+    androidx.compose.foundation.Canvas(Modifier.size(14.dp)) {
+        val k = size.width / 16f
+        val sw = 1.2f * k
+        val stroke = androidx.compose.ui.graphics.drawscope.Stroke(width = sw)
+        if (phone) {
+            drawRoundRect(
+                color = color,
+                topLeft = androidx.compose.ui.geometry.Offset(4f * k, 1f * k),
+                size = androidx.compose.ui.geometry.Size(8f * k, 14f * k),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(2f * k, 2f * k),
+                style = stroke,
+            )
+        } else {
+            drawRoundRect(
+                color = color,
+                topLeft = androidx.compose.ui.geometry.Offset(1f * k, 2.5f * k),
+                size = androidx.compose.ui.geometry.Size(14f * k, 8.5f * k),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.5f * k, 1.5f * k),
+                style = stroke,
+            )
+            drawLine(color, androidx.compose.ui.geometry.Offset(5f * k, 13.5f * k), androidx.compose.ui.geometry.Offset(11f * k, 13.5f * k), strokeWidth = sw)
+            drawLine(color, androidx.compose.ui.geometry.Offset(8f * k, 11f * k), androidx.compose.ui.geometry.Offset(8f * k, 13.5f * k), strokeWidth = sw)
         }
     }
 }
 
 @Composable
 private fun DeviceRow(s: DaemonState) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         DevicePill(
-            label = "THIS DEVICE",
+            label = "This device",
             name = android.os.Build.MODEL,
             level = s.selfBattery,
             charging = s.selfCharging,
@@ -220,7 +272,8 @@ private fun DeviceRow(s: DaemonState) {
             modifier = Modifier.weight(1f),
         )
         DevicePill(
-            label = "PEER",
+            label = sn.kaolack.fluxsync.vm.platformLabel(s.peerPlatform)
+                ?.let { "Peer · $it" } ?: "Peer",
             name = s.peerName.ifEmpty { "..." },
             level = s.peerBattery,
             charging = s.peerCharging,
@@ -239,19 +292,39 @@ private fun DevicePill(
     threshold: Int,
     modifier: Modifier = Modifier,
 ) {
+    val shape = RoundedCornerShape(FsRadius.Pill)
     Column(
         modifier = modifier
-            .border(width = 1.dp, color = FsDarkBorder, shape = RoundedCornerShape(4.dp))
-            .background(FsDarkSurface, RoundedCornerShape(4.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .border(width = 1.dp, color = FsDarkBorder, shape = shape)
+            .background(FsCard, shape)
+            .padding(13.dp),
     ) {
-        Text(label, color = FsDarkSubtle, style = MaterialTheme.typography.labelSmall)
-        Spacer(Modifier.height(4.dp))
-        Text(name, color = FsDarkFg, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium), maxLines = 1)
+        Text(
+            label,
+            color = FsDarkSubtle,
+            fontFamily = FsSans,
+            fontWeight = FontWeight.W600,
+            fontSize = 10.5.sp,
+            maxLines = 1,
+        )
         Spacer(Modifier.height(8.dp))
+        Text(
+            name,
+            color = FsDarkFg,
+            fontFamily = FsSans,
+            fontWeight = FontWeight.W600,
+            fontSize = 12.5.sp,
+            maxLines = 1,
+        )
+        Spacer(Modifier.height(9.dp))
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            BatteryGlyph(level = level, charging = charging, threshold = threshold, width = 24.dp)
-            Text("$level%${if (charging) "⚡" else ""}", color = batteryToneFor(level, threshold), style = MaterialTheme.typography.labelLarge)
+            BatteryGlyph(level = level, charging = charging, threshold = threshold, width = 30.dp)
+            Text(
+                "$level%${if (charging) " ⚡" else ""}",
+                color = FsDarkMuted,
+                fontFamily = FsMono,
+                fontSize = 10.5.sp,
+            )
         }
     }
 }
@@ -261,21 +334,27 @@ private fun ConditionsPanel(s: DaemonState, onThresholdChange: (Int) -> Unit, on
     val below = s.selfBattery <= s.threshold
     val delta = s.selfBattery - s.threshold
 
+    val shape = RoundedCornerShape(FsRadius.Item)
     Column(
         Modifier
             .fillMaxWidth()
-            .border(width = 1.dp, color = FsDarkBorder, shape = RoundedCornerShape(4.dp))
-            .background(FsDarkSurface, RoundedCornerShape(4.dp))
+            .border(width = 1.dp, color = FsDarkBorder, shape = shape)
+            .background(FsCard, shape)
             .padding(14.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Column {
-                Text("PAUSE SYNC BELOW", color = FsDarkMuted, style = MaterialTheme.typography.labelMedium)
-                Text("${s.threshold}%", color = FsDarkFg, style = MaterialTheme.typography.titleLarge)
+                Text("Pause sync below", color = FsDarkMuted, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
+                Text("${s.threshold}%", color = FsDarkFg, fontFamily = FsMono, fontWeight = FontWeight.SemiBold, fontSize = 20.sp)
             }
             Column(horizontalAlignment = Alignment.End) {
-                Text("STATUS", color = FsDarkSubtle, style = MaterialTheme.typography.labelSmall)
-                Text(if (below) "${-delta}% BELOW" else "$delta% ABOVE", color = if (below) FsWarn else FsOk, style = MaterialTheme.typography.labelMedium)
+                Text("Status", color = FsDarkSubtle, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 10.5.sp)
+                Text(
+                    if (below) "${-delta}% below" else "$delta% above",
+                    color = if (below) FsWarn else FsAccent,
+                    fontFamily = FsMono,
+                    fontSize = 11.sp,
+                )
             }
         }
         Spacer(Modifier.height(12.dp))
@@ -293,29 +372,88 @@ private fun ConditionsPanel(s: DaemonState, onThresholdChange: (Int) -> Unit, on
 
 @Composable
 private fun RecentRow(h: HistoryItem) {
+    val shape = RoundedCornerShape(FsRadius.Item)
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    // Text rows carry their full payload in `preview`; tapping copies it back.
+    // Image previews are just a size label, so those rows aren't copyable.
+    val copyable = h.kind.lowercase() != "image" && h.preview.isNotEmpty()
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .border(width = 1.dp, color = FsDarkBorder, shape = RoundedCornerShape(4.dp))
-            .background(FsDarkSurface, RoundedCornerShape(4.dp))
+            .clip(shape)
+            .border(width = 1.dp, color = FsDarkBorder, shape = shape)
+            .background(FsCard, shape)
+            .then(
+                if (copyable) {
+                    Modifier.clickable {
+                        clipboard.setText(AnnotatedString(h.preview))
+                        Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Modifier
+                }
+            )
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(h.kind.uppercase(), color = FsDarkSubtle, style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(28.dp))
+        KindIcon(h.kind)
         Spacer(Modifier.width(10.dp))
-        Text(h.preview, color = FsDarkFg, style = MaterialTheme.typography.bodySmall, maxLines = 1, modifier = Modifier.weight(1f))
+        Text(h.preview, color = FsDarkFg, fontFamily = FsSans, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
         Spacer(Modifier.width(10.dp))
-        Text(h.time.ifEmpty { "—" }, color = FsDarkSubtle, style = MaterialTheme.typography.labelSmall)
+        if (copyable) {
+            Text("Copy", color = FsDarkMuted, fontFamily = FsSans, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(h.time.ifEmpty { "—" }, color = FsDarkSubtle, fontFamily = FsMono, fontSize = 10.sp)
+    }
+}
+
+/** 26dp rounded square with a per-kind glyph, `.ph-item .ic` in the mockup. */
+@Composable
+private fun KindIcon(kind: String) {
+    val image = kind.lowercase() == "image"
+    val shape = RoundedCornerShape(FsRadius.IconSm)
+    val bg = if (image) Color(0xFF34506E) else FsCardFlat
+    val fg = if (image) Color(0xFFA8C3E2) else FsDarkMuted
+    Box(
+        Modifier
+            .size(26.dp)
+            .then(if (image) Modifier else Modifier.border(1.dp, FsDarkBorder, shape))
+            .background(bg, shape),
+        contentAlignment = Alignment.Center,
+    ) {
+        androidx.compose.foundation.Canvas(Modifier.size(11.dp)) {
+            val k = size.width / 12f
+            val sw = 1.2f * k
+            when (kind.lowercase()) {
+                "image" -> {
+                    drawCircle(fg, radius = 1.2f * k, center = androidx.compose.ui.geometry.Offset(4f * k, 4.5f * k), style = androidx.compose.ui.graphics.drawscope.Stroke(sw))
+                    drawPath(
+                        androidx.compose.ui.graphics.vector.PathParser().parsePathString("M0 9.5l3.5-3.5L12 12").toPath().apply {},
+                        color = fg,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(sw),
+                    )
+                }
+                else -> {
+                    // three text lines
+                    drawLine(fg, androidx.compose.ui.geometry.Offset(2f * k, 2.5f * k), androidx.compose.ui.geometry.Offset(10f * k, 2.5f * k), strokeWidth = sw)
+                    drawLine(fg, androidx.compose.ui.geometry.Offset(2f * k, 6f * k), androidx.compose.ui.geometry.Offset(10f * k, 6f * k), strokeWidth = sw)
+                    drawLine(fg, androidx.compose.ui.geometry.Offset(2f * k, 9.5f * k), androidx.compose.ui.geometry.Offset(7f * k, 9.5f * k), strokeWidth = sw)
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun EmptyHistory() {
+    val shape = RoundedCornerShape(FsRadius.Item)
     Box(
         Modifier
             .fillMaxWidth()
-            .border(width = 1.dp, color = FsDarkBorder, shape = RoundedCornerShape(4.dp))
-            .background(FsDarkSurface, RoundedCornerShape(4.dp))
+            .border(width = 1.dp, color = FsDarkBorder, shape = shape)
+            .background(FsCard, shape)
             .padding(20.dp),
         contentAlignment = Alignment.Center
     ) {

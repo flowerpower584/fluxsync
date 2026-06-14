@@ -24,8 +24,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,8 +39,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -50,14 +53,15 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.launch
-import sn.kaolack.fluxsync.ui.theme.FsCrit
+import sn.kaolack.fluxsync.ui.theme.FsAccent
+import sn.kaolack.fluxsync.ui.theme.FsCardFlat
 import sn.kaolack.fluxsync.ui.theme.FsDarkBg
 import sn.kaolack.fluxsync.ui.theme.FsDarkBorder
-import sn.kaolack.fluxsync.ui.theme.FsDarkBorderStrong
 import sn.kaolack.fluxsync.ui.theme.FsDarkFg
 import sn.kaolack.fluxsync.ui.theme.FsDarkMuted
-import sn.kaolack.fluxsync.ui.theme.FsDarkSubtle
-import sn.kaolack.fluxsync.ui.theme.FsLightSurface
+import sn.kaolack.fluxsync.ui.theme.FsOnAccent
+import sn.kaolack.fluxsync.ui.theme.FsRadius
+import sn.kaolack.fluxsync.ui.theme.FsSans
 import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
 /**
@@ -107,35 +111,24 @@ private fun Header(onBack: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .background(FsDarkBg)
-            .padding(horizontal = 20.dp)
-            .padding(top = 18.dp, bottom = 14.dp),
+            .statusBarsPadding()
+            .padding(horizontal = 18.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        Box(
+            Modifier
+                .size(30.dp)
+                .clip(RoundedCornerShape(FsRadius.IconMd))
+                .border(1.dp, FsDarkBorder, RoundedCornerShape(FsRadius.IconMd))
+                .background(FsCardFlat, RoundedCornerShape(FsRadius.IconMd))
+                .clickable(onClick = onBack),
+            contentAlignment = Alignment.Center,
         ) {
-            Box(
-                Modifier
-                    .size(32.dp)
-                    .border(1.dp, FsDarkBorder, RoundedCornerShape(2.dp))
-                    .clickable(onClick = onBack),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("←", color = FsDarkMuted, fontSize = 16.sp)
-            }
-            Column {
-                Text("Scan peer", color = FsDarkFg, style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "POINT THE CAMERA AT THE OTHER DEVICE'S QR",
-                    color = FsDarkSubtle,
-                    style = MaterialTheme.typography.labelSmall,
-                )
-            }
+            Text("←", color = FsDarkMuted, fontSize = 15.sp)
         }
+        Text("Scan peer", color = FsDarkFg, fontFamily = FsSans, fontWeight = FontWeight.Bold, fontSize = 16.sp)
     }
-    HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
 }
 
 @Composable
@@ -162,16 +155,18 @@ private fun PermissionPrompt(onRequest: () -> Unit) {
         Box(
             Modifier
                 .fillMaxWidth()
-                .border(1.dp, FsCrit, RoundedCornerShape(4.dp))
-                .background(FsCrit, RoundedCornerShape(4.dp))
+                .clip(RoundedCornerShape(FsRadius.Btn))
+                .background(FsAccent)
                 .clickable(onClick = onRequest)
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+                .padding(horizontal = 16.dp, vertical = 13.dp),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 "Grant permission",
-                color = FsLightSurface,
-                style = MaterialTheme.typography.titleMedium,
+                color = FsOnAccent,
+                fontFamily = FsSans,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
             )
         }
     }
@@ -259,9 +254,9 @@ private fun ScannerView(vm: FluxsyncViewModel, onPaired: () -> Unit) {
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(4.dp))
-                .clip(RoundedCornerShape(4.dp))
-                .background(FsDarkBorder, RoundedCornerShape(4.dp)),
+                .border(1.dp, FsDarkBorder, RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xFF101015), RoundedCornerShape(12.dp)),
         ) {
             if (provider != null) {
                 AndroidView(
@@ -274,14 +269,42 @@ private fun ScannerView(vm: FluxsyncViewModel, onPaired: () -> Unit) {
                     Text("Starting camera…", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall)
                 }
             }
+            ScanCorners()
         }
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(14.dp))
         Text(
-            "ALIGN THE QR INSIDE THE SQUARE",
-            color = FsDarkSubtle,
-            style = MaterialTheme.typography.labelSmall,
+            "Align the QR inside the frame",
+            color = FsDarkMuted,
+            fontFamily = FsSans,
+            fontSize = 11.5.sp,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),
         )
+    }
+}
+
+/** Four green viewfinder corners, `.scan-box .corner` in the mockup. */
+@Composable
+private fun ScanCorners() {
+    androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+        val m = 14.dp.toPx()
+        val len = 26.dp.toPx()
+        val sw = 2.5.dp.toPx()
+        val c = FsAccent
+        val w = size.width
+        val h = size.height
+        // top-left
+        drawLine(c, Offset(m, m), Offset(m + len, m), sw)
+        drawLine(c, Offset(m, m), Offset(m, m + len), sw)
+        // top-right
+        drawLine(c, Offset(w - m, m), Offset(w - m - len, m), sw)
+        drawLine(c, Offset(w - m, m), Offset(w - m, m + len), sw)
+        // bottom-left
+        drawLine(c, Offset(m, h - m), Offset(m + len, h - m), sw)
+        drawLine(c, Offset(m, h - m), Offset(m, h - m - len), sw)
+        // bottom-right
+        drawLine(c, Offset(w - m, h - m), Offset(w - m - len, h - m), sw)
+        drawLine(c, Offset(w - m, h - m), Offset(w - m, h - m - len), sw)
     }
 }
 

@@ -15,7 +15,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -57,8 +58,8 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(11.dp)
     ) {
         item { SectionLabel(title = "This device") }
 
@@ -77,9 +78,10 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
                 title = "Paired peers",
                 right = {
                     Text(
-                        "${devices.size} LINKED",
+                        "${devices.size} linked",
                         color = FsDarkSubtle,
-                        style = MaterialTheme.typography.labelSmall
+                        fontFamily = FsMono,
+                        fontSize = 10.sp,
                     )
                 }
             )
@@ -100,6 +102,7 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
             items(devices) { d ->
                 DeviceItem(
                     name = d.peerName,
+                    platform = d.peerPlatform,
                     batt = d.peerBattery,
                     charging = d.peerCharging,
                     threshold = s.threshold,
@@ -111,18 +114,30 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
         }
 
         item {
+            val dashShape = RoundedCornerShape(12.dp)
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .border(width = 1.dp, color = FsDarkBorderStrong, shape = RoundedCornerShape(4.dp))
+                    .clip(dashShape)
                     .clickable { onAddDevice() }
+                    .drawBehind {
+                        val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
+                            width = 1.dp.toPx(),
+                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(8f, 6f)),
+                        )
+                        drawRoundRect(
+                            color = FsDarkBorderStrong,
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(13.dp.toPx()),
+                            style = stroke,
+                        )
+                    }
                     .padding(14.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("+", color = FsCrit, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("+", color = FsAccent, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(8.dp))
-                    Text("Pair new device", color = FsDarkFg, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                    Text("Pair new device", color = FsDarkMuted, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
                 }
             }
             Text(
@@ -142,6 +157,7 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
 @Composable
 private fun DeviceItem(
     name: String,
+    platform: String,
     batt: Int,
     charging: Boolean,
     threshold: Int,
@@ -149,63 +165,68 @@ private fun DeviceItem(
     onDisable: () -> Unit,
     onUnpair: () -> Unit,
 ) {
+    val shape = RoundedCornerShape(FsRadius.Item)
     Column(
         Modifier
             .fillMaxWidth()
-            .border(width = 1.dp, color = FsDarkBorder, shape = RoundedCornerShape(4.dp))
-            .background(FsDarkSurface, RoundedCornerShape(4.dp))
+            .border(width = 1.dp, color = FsDarkBorder, shape = shape)
+            .background(FsCard, shape)
             .padding(14.dp)
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusDot(color = FsOk, pulse = true)
+                    StatusDot(color = FsAccent, pulse = true)
                     Spacer(Modifier.width(6.dp))
                     Text(name, color = FsDarkFg, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
                 }
-                Text("REMOTELY LINKED", color = FsDarkSubtle, style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+                val linkLabel = sn.kaolack.fluxsync.vm.platformLabel(platform)
+                    ?.let { "$it · linked" } ?: "linked"
+                Text(linkLabel, color = FsDarkSubtle, fontFamily = FsSans, fontSize = 10.5.sp, modifier = Modifier.padding(top = 4.dp))
             }
             Column(horizontalAlignment = Alignment.End) {
-                BatteryGlyph(level = batt, charging = charging, threshold = threshold, width = 24.dp)
-                Text("$batt%", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
+                BatteryGlyph(level = batt, charging = charging, threshold = threshold, width = 30.dp)
+                Text("$batt%", color = FsDarkMuted, fontFamily = FsMono, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
             }
         }
         // Compact telemetry strip — RTT + reconnects, mono caption style.
         // Renders "—" placeholders before the daemon publishes metrics.
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            val rtt = metrics?.lastRttMs?.takeIf { it > 0 }?.let { "$it MS" } ?: "—"
+            val rtt = metrics?.lastRttMs?.takeIf { it > 0 }?.let { "$it ms" } ?: "—"
             val reconnects = metrics?.reconnects ?: 0L
             Text(
-                "RTT $rtt · $reconnects RECONNECTS",
+                "rtt $rtt · $reconnects reconnects",
                 color = FsDarkSubtle,
-                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FsMono,
                 fontSize = 10.sp,
             )
         }
         Spacer(Modifier.height(12.dp))
         androidx.compose.material3.HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
         Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(
                 Modifier
                     .weight(1f)
-                    .border(1.dp, FsDarkBorder, RoundedCornerShape(2.dp))
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
                     .clickable { onDisable() }
-                    .padding(vertical = 6.dp),
+                    .padding(vertical = 7.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text("DISABLE", color = FsDarkFg, style = MaterialTheme.typography.labelSmall, fontSize = 11.sp)
+                Text("Disable", color = FsDarkFg, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
             }
             Box(
                 Modifier
                     .weight(1f)
-                    .border(1.dp, FsCrit, RoundedCornerShape(2.dp))
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
                     .clickable { onUnpair() }
-                    .padding(vertical = 6.dp),
+                    .padding(vertical = 7.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text("UNPAIR", color = FsCrit, style = MaterialTheme.typography.labelSmall, fontSize = 11.sp)
+                Text("Unpair", color = FsCrit, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
             }
         }
     }
@@ -213,33 +234,34 @@ private fun DeviceItem(
 
 @Composable
 private fun OwnDeviceCard(battery: Int, charging: Boolean, threshold: Int) {
+    val shape = RoundedCornerShape(FsRadius.Item)
     Column(
         Modifier
             .fillMaxWidth()
-            .border(width = 1.dp, color = FsDarkBorder, shape = RoundedCornerShape(4.dp))
-            .background(FsDarkSurface, RoundedCornerShape(4.dp))
+            .border(width = 1.dp, color = FsDarkBorder, shape = shape)
+            .background(FsCard, shape)
             .padding(14.dp)
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusDot(color = FsOk)
+                    StatusDot(color = FsAccent)
                     Spacer(Modifier.width(6.dp))
                     Text(Build.MODEL, color = FsDarkFg, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(6.dp))
                     Box(
                         Modifier
-                            .border(1.dp, FsCrit, RoundedCornerShape(2.dp))
-                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                            .background(FsOkSoft, RoundedCornerShape(5.dp))
+                            .padding(horizontal = 5.dp, vertical = 1.dp)
                     ) {
-                        Text("THIS", color = FsCrit, style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
+                        Text("this", color = FsAccent, fontFamily = FsSans, fontWeight = FontWeight.Bold, fontSize = 9.sp)
                     }
                 }
-                Text("THIS DEVICE", color = FsDarkSubtle, style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+                Text("This device", color = FsDarkSubtle, fontFamily = FsSans, fontSize = 10.5.sp, modifier = Modifier.padding(top = 4.dp))
             }
             Column(horizontalAlignment = Alignment.End) {
-                BatteryGlyph(level = battery, charging = charging, threshold = threshold, width = 24.dp)
-                Text("$battery%", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
+                BatteryGlyph(level = battery, charging = charging, threshold = threshold, width = 30.dp)
+                Text("$battery%", color = FsDarkMuted, fontFamily = FsMono, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
             }
         }
     }
