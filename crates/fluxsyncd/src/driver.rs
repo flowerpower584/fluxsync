@@ -32,8 +32,8 @@ use anyhow::{anyhow, Context, Result};
 use base32::Alphabet;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use fluxsync_core::{
-    dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, Event, LogEntry, LogLevel, State,
-    WallClock,
+    dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, DeviceId, Event, EventId,
+    LogEntry, LogLevel, SeenSet, State, WallClock,
 };
 use fluxsync_crypto::gen_pair_pin;
 use fluxsync_crypto::{fingerprint, Identity};
@@ -42,6 +42,7 @@ use fluxsync_proto::{
 };
 use hex;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -248,6 +249,10 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // and the transport loop's retransmit timer.
     let inflight: InflightMap = Arc::new(Mutex::new(HashMap::new()));
 
+    // FluxMesh 2C-b: shared mesh anti-loop guard (EventId seen-set). Used by
+    // the recv loop to forward each item exactly once and never loop.
+    let mesh_seen: MeshSeen = Arc::new(Mutex::new(SeenSet::default()));
+
     // ── Test path: install session + jump to Linked ────────────────
     if let Some(tp) = test_pair {
         let TestPair {
@@ -344,6 +349,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let metrics = metrics.clone();
         let inflight = inflight.clone();
         let pending_pairs_for_recv = pending_pairs.clone();
+        let mesh_seen_for_recv = mesh_seen.clone();
         tasks.spawn(async move {
             transport_recv_loop(
                 transport,
@@ -357,6 +363,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 metrics,
                 inflight,
                 pending_pairs_for_recv,
+                mesh_seen_for_recv,
                 lan_only_handshakes,
             )
             .await
@@ -787,53 +794,53 @@ async fn dispatch(
                 if frames.is_empty() {
                     tracing::error!("SendItem: nothing to send (encode failed)");
                 } else {
-                    let peer = transport.current_peer_addr().await;
-                    let has_session = transport.has_session().await;
-                    tracing::info!(
-                        ?peer,
-                        has_session,
-                        frames = frames.len(),
-                        "SendItem: sending item"
-                    );
-                    let multi = frames.len() > 1;
-                    for (i, bytes) in frames.iter().enumerate() {
-                        if let Err(e) = transport.send_encrypted(bytes).await {
-                            tracing::error!(error = %e, "SendItem: send_encrypted FAILED");
+                    // FluxMesh 2C-b: fan the item out to every linked peer.
+                    let targets = transport.linked_peer_ids().await;
+                    if targets.is_empty() {
+                        tracing::warn!("SendItem: no linked peers; nothing to send");
+                    } else {
+                        tracing::info!(
+                            peers = targets.len(),
+                            frames = frames.len(),
+                            "SendItem: fanning item out to linked peers"
+                        );
+                        let multi = frames.len() > 1;
+                        for peer in &targets {
+                            for (i, bytes) in frames.iter().enumerate() {
+                                if let Err(e) = transport.send_encrypted_to(*peer, bytes).await {
+                                    tracing::error!(error = %e, "SendItem: send_encrypted_to FAILED");
+                                }
+                                // Pace multi-frame (chunked) items to avoid UDP
+                                // congestion. A flat 10 ms per chunk would cost
+                                // ~163 s for a 16 MiB image (16384 chunks); burst
+                                // 16 frames then pause 2 ms instead (~2 s total).
+                                if multi && (i + 1) % 16 == 0 {
+                                    tokio::time::sleep(Duration::from_millis(2)).await;
+                                }
+                            }
                         }
-                        // Pace multi-frame (chunked) items to avoid UDP
-                        // congestion. A flat 10 ms per chunk would cost
-                        // ~163 s for a 16 MiB image (16384 chunks); burst
-                        // 16 frames then pause 2 ms instead (~2 s total).
-                        if multi && (i + 1) % 16 == 0 {
-                            tokio::time::sleep(Duration::from_millis(2)).await;
-                        }
+                        // Retransmit until every targeted peer acks this hash.
+                        // Without this a single dropped datagram loses the item —
+                        // UDP gives no delivery guarantee.
+                        inflight.lock().await.insert(
+                            hash,
+                            Inflight {
+                                frames,
+                                attempts: 0,
+                                last_sent: Instant::now(),
+                                first_sent: Instant::now(),
+                                pending_peers: targets.into_iter().collect(),
+                            },
+                        );
                     }
-                    // Retransmit until the peer acks this hash. Without
-                    // this a single dropped datagram loses the item — UDP
-                    // gives no delivery guarantee.
-                    inflight.lock().await.insert(
-                        hash,
-                        Inflight {
-                            frames,
-                            attempts: 0,
-                            last_sent: Instant::now(),
-                            first_sent: Instant::now(),
-                        },
-                    );
                 }
             }
             Action::AckItem { hash } => {
-                use fluxsync_core::Clock;
-                let frame = Frame {
-                    version: PROTOCOL_VERSION,
-                    msg: Msg::Ack(fluxsync_proto::Ack {
-                        lamport: app.clock.now(),
-                        hash,
-                    }),
-                };
-                if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                    let _ = transport.send_encrypted(&bytes).await;
-                }
+                // FluxMesh 2C-b: acks are sent by the recv loop straight to the
+                // source peer (the only place the source peer_id is known), so
+                // the FSM-emitted AckItem is a no-op here. Kept as a variant so
+                // the core FSM contract stays unchanged.
+                let _ = hash;
             }
             Action::WriteClipboard { kind, payload } => {
                 // Mark the hash before writing so the watcher's next
@@ -1998,6 +2005,7 @@ async fn transport_recv_loop(
     metrics: Arc<Mutex<MetricsTracker>>,
     inflight: InflightMap,
     pending_pairs: PendingSet,
+    mesh_seen: MeshSeen,
     lan_only_handshakes: bool,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
@@ -2020,9 +2028,10 @@ async fn transport_recv_loop(
             biased;
             () = shutdown.cancelled() => return Ok(()),
             _ = retransmit_interval.tick() => {
-                // Re-send any clipboard item the peer hasn't acked yet.
-                // Frames whose item exceeds MAX_RETRANSMIT are dropped.
-                let mut to_send: Vec<Vec<u8>> = Vec::new();
+                // Re-send any clipboard item a peer hasn't acked yet, to the
+                // peers still pending. Frames whose item exceeds MAX_RETRANSMIT
+                // are dropped.
+                let mut to_send: Vec<([u8; 32], Vec<u8>)> = Vec::new();
                 {
                     let mut map = inflight.lock().await;
                     let mut done: Vec<[u8; 32]> = Vec::new();
@@ -2055,16 +2064,21 @@ async fn transport_recv_loop(
                         tracing::debug!(
                             item = ?&hash[..6],
                             attempt = item.attempts,
+                            pending = item.pending_peers.len(),
                             "retransmitting unacked item"
                         );
-                        to_send.extend(item.frames.iter().cloned());
+                        for peer in &item.pending_peers {
+                            for f in &item.frames {
+                                to_send.push((*peer, f.clone()));
+                            }
+                        }
                     }
                     for h in done {
                         map.remove(&h);
                     }
                 }
-                for bytes in &to_send {
-                    let _ = transport.send_encrypted(bytes).await;
+                for (peer, bytes) in &to_send {
+                    let _ = transport.send_encrypted_to(*peer, bytes).await;
                 }
             }
             _ = nak_interval.tick() => {
@@ -2238,7 +2252,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, peer_id, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, keystore_dir.as_ref()).await,
+                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, keystore_dir.as_ref()).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -2751,9 +2765,58 @@ pub(crate) async fn upsert_peer_persist(
     Err(last_err.unwrap_or_else(|| anyhow!("upsert_peer_persist exhausted retries")))
 }
 
+/// Send an item Ack straight to the source peer. FluxMesh 2C-b: acks are a
+/// transport concern routed to whoever sent the datagram (the only place the
+/// source peer_id is known), not an FSM-emitted action.
+async fn ack_source(transport: &Arc<Transport>, peer_id: [u8; 32], hash: [u8; 32]) {
+    let frame = Frame {
+        version: PROTOCOL_VERSION,
+        msg: Msg::Ack(fluxsync_proto::Ack { lamport: 0, hash }),
+    };
+    if let Ok(bytes) = fluxsync_proto::encode(&frame) {
+        let _ = transport.send_encrypted_to(peer_id, &bytes).await;
+    }
+}
+
+/// Relay a freshly-seen item to every linked peer except its `source` and
+/// `origin`, tracking the relayed hash in `inflight` so retransmits cover a
+/// dropped relay datagram (FluxMesh 2C-b mesh forwarding).
+async fn forward_item(
+    transport: &Arc<Transport>,
+    inflight: &InflightMap,
+    source: [u8; 32],
+    origin: [u8; 32],
+    hash: [u8; 32],
+    frame_bytes: Vec<u8>,
+) {
+    let targets: Vec<[u8; 32]> = transport
+        .linked_peer_ids()
+        .await
+        .into_iter()
+        .filter(|d| *d != source && *d != origin)
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    for peer in &targets {
+        let _ = transport.send_encrypted_to(*peer, &frame_bytes).await;
+    }
+    inflight.lock().await.insert(
+        hash,
+        Inflight {
+            frames: vec![frame_bytes],
+            attempts: 0,
+            last_sent: Instant::now(),
+            first_sent: Instant::now(),
+            pending_peers: targets.into_iter().collect(),
+        },
+    );
+}
+
 async fn dispatch_inbound_frame(
     frame: Frame,
     peer_id: [u8; 32],
+    mesh_seen: &MeshSeen,
     event_tx: &mpsc::Sender<Event>,
     transport: &Arc<Transport>,
     reassembly: &Arc<Mutex<HashMap<[u8; 32], Reassembly>>>,
@@ -2819,6 +2882,10 @@ async fn dispatch_inbound_frame(
                     map.remove(&item.hash);
                     drop(map);
 
+                    // FluxMesh 2C-b: ack the source on completion. (Chunked
+                    // relay across a third hop is not yet wired — chunked items
+                    // sync to direct neighbours only; see plan.)
+                    ack_source(transport, peer_id, item.hash).await;
                     let preview = preview_label(kind, &full_payload);
                     let _ = event_tx.try_send(Event::FrameReceivedClipboard {
                         hash: item.hash,
@@ -2830,15 +2897,31 @@ async fn dispatch_inbound_frame(
                     });
                 }
             } else {
-                let preview = preview_label(item.kind, &item.payload);
-                let _ = event_tx.try_send(Event::FrameReceivedClipboard {
-                    hash: item.hash,
-                    kind: item.kind,
-                    payload: item.payload,
-                    preview,
-                    sensitive: item.sensitive,
-                    lamport: item.lamport,
-                });
+                // FluxMesh 2C-b: ack the sender, then ingest by EventId for mesh
+                // anti-loop. Forward + apply only on first sight here; a later
+                // arrival of the same id via another path is dropped (the ack
+                // still goes out so the sender stops retransmitting).
+                ack_source(transport, peer_id, item.hash).await;
+                let eid = EventId::new(DeviceId::from(item.origin), item.event_seq);
+                let first_sight = mesh_seen.lock().await.observe(eid);
+                if first_sight {
+                    if let Ok(bytes) = fluxsync_proto::encode(&Frame {
+                        version: PROTOCOL_VERSION,
+                        msg: Msg::ClipboardItem(item.clone()),
+                    }) {
+                        forward_item(transport, inflight, peer_id, item.origin, item.hash, bytes)
+                            .await;
+                    }
+                    let preview = preview_label(item.kind, &item.payload);
+                    let _ = event_tx.try_send(Event::FrameReceivedClipboard {
+                        hash: item.hash,
+                        kind: item.kind,
+                        payload: item.payload,
+                        preview,
+                        sensitive: item.sensitive,
+                        lamport: item.lamport,
+                    });
+                }
             }
         }
         Msg::Chunk(c) => {
@@ -2889,6 +2972,7 @@ async fn dispatch_inbound_frame(
                 map.remove(&c.item_id);
                 drop(map);
 
+                ack_source(transport, peer_id, c.item_id).await;
                 let preview = preview_label(kind, &full_payload);
                 let _ = event_tx.try_send(Event::FrameReceivedClipboard {
                     hash: c.item_id,
@@ -2926,9 +3010,17 @@ async fn dispatch_inbound_frame(
             if ack.hash == [0u8; 32] {
                 // Heartbeat pong — no item to clear.
                 tracing::debug!("Heartbeat: received ack (pong)");
-            } else if inflight.lock().await.remove(&ack.hash).is_some() {
-                // Item delivery confirmed — stop retransmitting it.
-                tracing::debug!(item = ?&ack.hash[..6], "item acked; retransmit cleared");
+            } else {
+                // FluxMesh 2C-b: clear this peer from the item's pending set;
+                // the item is removed only once every targeted peer has acked.
+                let mut map = inflight.lock().await;
+                if let Some(item) = map.get_mut(&ack.hash) {
+                    item.pending_peers.remove(&peer_id);
+                    if item.pending_peers.is_empty() {
+                        map.remove(&ack.hash);
+                        tracing::debug!(item = ?&ack.hash[..6], "item fully acked; retransmit cleared");
+                    }
+                }
             }
         }
         Msg::Nak(nak) => {
@@ -3038,10 +3130,22 @@ struct Inflight {
     /// whole-item retransmit forever — so this is the backstop that
     /// drops an item that never converges. See `INFLIGHT_MAX_AGE`.
     first_sent: Instant,
+    /// FluxMesh 2C-b: peers this item still awaits an Ack from. An item
+    /// (locally copied or relayed) is fanned out to every linked peer; each
+    /// peer's Ack removes it from this set, and the item is cleared only
+    /// when the set empties. Retransmits go to whoever is still pending.
+    pending_peers: HashSet<[u8; 32]>,
 }
 
 /// Map of clipboard items sent but not yet acked, keyed by item hash.
 type InflightMap = Arc<Mutex<HashMap<[u8; 32], Inflight>>>;
+
+/// FluxMesh 2C-b: shared mesh anti-loop guard. Keyed on `EventId`
+/// (origin + sequence), it records every item already relayed/applied at
+/// this node so a fan-out that arrives via two paths is forwarded exactly
+/// once and never loops. Independent of the per-`App` content-hash
+/// `DedupRing` (which guards the OS-clipboard *apply*).
+type MeshSeen = Arc<Mutex<SeenSet>>;
 
 /// Wait this long for an ack before re-sending an inflight item.
 const RETRANSMIT_INTERVAL: Duration = Duration::from_secs(2);
@@ -3646,6 +3750,7 @@ mod tests {
         dispatch_inbound_frame(
             frame,
             [0u8; 32],
+            &Arc::new(Mutex::new(super::SeenSet::default())),
             &event_tx,
             &transport,
             &reassembly,
@@ -3702,6 +3807,7 @@ mod tests {
                 msg: Msg::Revoke,
             },
             peer_id,
+            &Arc::new(Mutex::new(super::SeenSet::default())),
             &event_tx,
             &transport,
             &reassembly,
