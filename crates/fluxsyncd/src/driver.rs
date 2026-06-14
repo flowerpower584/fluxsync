@@ -144,6 +144,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         start_on,
         last_peer_addr: _,
         test_pair,
+        test_pairs,
         test_pending_pair,
         lan_only_handshakes,
     } = cfg;
@@ -293,6 +294,28 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 charging: false,
             })
             .ok();
+    }
+
+    // FluxMesh 2C-b: install ADDITIONAL pre-paired peers (mesh test harness).
+    // Secondary peers get a session + trust + address so clipboard fans out
+    // and relays to them, but they do NOT drive the single FSM — the primary
+    // `test_pair` already drove it to Linked.
+    for tp in test_pairs {
+        let TestPair {
+            session,
+            peer_addr,
+            peer_name,
+            peer_id,
+        } = tp;
+        transport.install_session(peer_id, session).await;
+        transport.set_peer_addr_for(peer_id, peer_addr).await;
+        trusted.lock().await.insert(
+            peer_id,
+            TrustedPeer {
+                static_pub: [0u8; 32],
+                name: peer_name,
+            },
+        );
     }
 
     if let Some(addr) = cfg.last_peer_addr {

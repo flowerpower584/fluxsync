@@ -40,6 +40,12 @@ pub struct DaemonConfig {
     pub start_on: bool,
     pub last_peer_addr: Option<SocketAddr>,
     pub test_pair: Option<TestPair>,
+    /// Test injection: ADDITIONAL pre-paired peers beyond `test_pair`, used
+    /// by the FluxMesh 3-node test to boot a daemon already linked to several
+    /// devices. Each gets an installed session + trust entry + peer address
+    /// but does NOT drive the single FSM (those are secondary mesh peers).
+    /// Production binaries leave this empty.
+    pub test_pairs: Vec<TestPair>,
     /// Test injection: pre-populate the `PendingSet` so a test can drive
     /// `PairConfirm` without running the real handshake. Production
     /// binaries always set this to `None`.
@@ -80,6 +86,7 @@ impl DaemonConfig {
             start_on: false,
             last_peer_addr: None,
             test_pair: None,
+            test_pairs: Vec::new(),
             test_pending_pair: None,
             lan_only_handshakes: true,
         }
