@@ -2979,10 +2979,16 @@ async fn dispatch_inbound_frame(
             }
         }
         Msg::BatteryStatus(b) => {
-            let _ = event_tx.try_send(Event::BatteryChangedPeer {
-                level: b.level,
-                charging: b.charging,
-            });
+            // FluxMesh 2C-b: only the primary peer's battery drives the
+            // single-peer State + the battery policy. A secondary mesh peer's
+            // level must not overwrite the projected peer_battery or pause the
+            // whole daemon.
+            if transport.cached_peer_id().await == Some(peer_id) {
+                let _ = event_tx.try_send(Event::BatteryChangedPeer {
+                    level: b.level,
+                    charging: b.charging,
+                });
+            }
         }
         Msg::Heartbeat(_) => {
             // Heartbeat Received (Ping) -> Send Ack (Pong)
@@ -3097,15 +3103,20 @@ async fn dispatch_inbound_frame(
         Msg::Hello(h) => {
             // peer_id is whoever's session decrypted this Hello — always the
             // real id, no all-zero sentinel that would bypass the FSM
-            // peer-mismatch check.
-            let _ = event_tx.try_send(Event::PeerSeen {
-                peer_id,
-                name: h.name,
-            });
-            if !h.platform.is_empty() {
-                let _ = event_tx.try_send(Event::PeerPlatform {
-                    platform: h.platform,
+            // peer-mismatch check. FluxMesh 2C-b: only the primary peer's
+            // identity is projected into the single-peer State DTO; secondary
+            // mesh peers sync clipboard but are not shown (clients stay
+            // single-peer-compatible).
+            if transport.cached_peer_id().await == Some(peer_id) {
+                let _ = event_tx.try_send(Event::PeerSeen {
+                    peer_id,
+                    name: h.name,
                 });
+                if !h.platform.is_empty() {
+                    let _ = event_tx.try_send(Event::PeerPlatform {
+                        platform: h.platform,
+                    });
+                }
             }
         }
     }
