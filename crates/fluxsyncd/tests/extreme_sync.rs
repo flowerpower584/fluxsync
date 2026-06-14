@@ -335,6 +335,8 @@ async fn extreme_dual_daemon_stress_test() {
         payload: b"roaming-test".to_vec(),
         sensitive: false,
         wall_time_ms: 0,
+        origin: [0; 32],
+        event_seq: 0,
     };
     let frame = fluxsync_proto::Frame {
         version: fluxsync_proto::PROTOCOL_VERSION,

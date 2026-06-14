@@ -26,15 +26,21 @@ fn arb_clipboard_item() -> impl Strategy<Value = ClipboardItem> {
         prop::collection::vec(any::<u8>(), 0..4096),
         any::<bool>(),
         any::<u64>(),
+        arb_array32(),
+        any::<u64>(),
     )
         .prop_map(
-            |(lamport, hash, kind, payload, sensitive, wall_time_ms)| ClipboardItem {
-                lamport,
-                hash,
-                kind,
-                payload,
-                sensitive,
-                wall_time_ms,
+            |(lamport, hash, kind, payload, sensitive, wall_time_ms, origin, event_seq)| {
+                ClipboardItem {
+                    lamport,
+                    hash,
+                    kind,
+                    payload,
+                    sensitive,
+                    wall_time_ms,
+                    origin,
+                    event_seq,
+                }
             },
         )
 }

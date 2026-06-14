@@ -149,6 +149,8 @@ mod tests {
             payload: b"https://github.com".to_vec(),
             sensitive: false,
             wall_time_ms: 1_700_000_000_000,
+            origin: [4; 32],
+            event_seq: 12,
         }));
         let bytes = encode(&f).unwrap();
         assert_eq!(decode(&bytes).unwrap(), f);
@@ -190,7 +192,7 @@ mod tests {
                 err,
                 ProtoError::Version {
                     got: 0x99,
-                    expected: 0x01
+                    expected: 0x02
                 }
             ),
             "got {err:?}"
@@ -208,7 +210,7 @@ mod tests {
             err,
             ProtoError::Version {
                 got: 0x42,
-                expected: 0x01
+                expected: 0x02
             }
         ));
     }
@@ -222,6 +224,8 @@ mod tests {
             payload: vec![0u8; MAX_PAYLOAD + 1],
             sensitive: false,
             wall_time_ms: 0,
+            origin: [0; 32],
+            event_seq: 0,
         };
         let err = encode(&frame(Msg::ClipboardItem(item))).unwrap_err();
         assert!(matches!(err, ProtoError::PayloadTooLarge(n) if n == MAX_PAYLOAD + 1));
@@ -261,6 +265,8 @@ mod tests {
             payload: vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0xFE, 0x01],
             sensitive: false,
             wall_time_ms: 1_700_000_000_000,
+            origin: [0xAB; 32],
+            event_seq: 3,
         }));
         let bytes = encode(&f).unwrap();
         assert_eq!(decode(&bytes).unwrap(), f);

@@ -19,7 +19,11 @@ pub use types::{
 };
 
 /// Wire-format version. Bumped on any breaking change to the CBOR shapes.
-pub const PROTOCOL_VERSION: u8 = 0x01;
+///
+/// 0x02 (FluxMesh): `ClipboardItem` gained `origin` + `event_seq`. The
+/// codec rejects any other version on both encode and decode, so a v2
+/// daemon does not interoperate with v1 — all devices must run v2.
+pub const PROTOCOL_VERSION: u8 = 0x02;
 
 /// Largest reassembled clipboard payload we accept (16 MiB) — sized for
 /// Retina / S21-Ultra PNG screenshots, which run 8-12 MiB.

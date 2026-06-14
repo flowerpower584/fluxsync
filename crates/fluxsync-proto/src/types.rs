@@ -73,6 +73,13 @@ pub struct ClipboardItem {
     pub payload: Vec<u8>,
     pub sensitive: bool,
     pub wall_time_ms: u64,
+    /// FluxMesh: the device that first introduced this item — its
+    /// `peer_id` / `DeviceId` bytes. With `event_seq` it forms the
+    /// item's `EventId`, the mesh anti-loop identity that is independent
+    /// of `hash` (a relay quotes the original origin, not its own id).
+    pub origin: [u8; 32],
+    /// Origin device's strictly-increasing per-item sequence number.
+    pub event_seq: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -148,13 +148,19 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     } = cfg;
 
     // ── App + channels ────────────────────────────────────────────
-    let mut app = App::new(CoreConfig {
-        peer_name_self: peer_name_self.clone(),
-        charge_override,
-        version: String::from(env!("CARGO_PKG_VERSION")),
-        build_id: String::from(env!("FLUXSYNCD_BUILD_ID")),
-        cipher: String::from("chacha20-poly1305"),
-    });
+    let mut app = App::new_with_device(
+        CoreConfig {
+            peer_name_self: peer_name_self.clone(),
+            charge_override,
+            version: String::from(env!("CARGO_PKG_VERSION")),
+            build_id: String::from(env!("FLUXSYNCD_BUILD_ID")),
+            cipher: String::from("chacha20-poly1305"),
+        },
+        // This daemon's stable mesh identity: the BLAKE3 id of its Noise
+        // static key, the same bytes peers see as `peer_id`. Stamped as
+        // `EventId.origin` on every locally-copied item.
+        fluxsync_core::DeviceId::from(identity.peer_id()),
+    );
 
     let initial = app.snapshot().clone();
     let (state_watch_tx, state_watch_rx) = watch::channel(initial);
@@ -706,6 +712,14 @@ async fn dispatch(
                     payload
                 };
 
+                // FluxMesh: stamp this item with its origin device + a
+                // per-origin sequence so the mesh dedups/anti-loops on
+                // identity rather than content hash. Allocated once per
+                // item; the chunked header carries the same EventId.
+                let event_id = app.next_local_event_id();
+                let origin = event_id.origin.into_bytes();
+                let event_seq = event_id.seq;
+
                 // Build every datagram for this item up front, encoded.
                 // The same bytes are kept in the inflight table so the
                 // retransmit timer can re-send them verbatim until acked.
@@ -718,6 +732,8 @@ async fn dispatch(
                         payload,
                         sensitive,
                         wall_time_ms: 0,
+                        origin,
+                        event_seq,
                     };
                     let frame = Frame {
                         version: PROTOCOL_VERSION,
@@ -738,6 +754,8 @@ async fn dispatch(
                         payload: Vec::new(),
                         sensitive,
                         wall_time_ms: 0,
+                        origin,
+                        event_seq,
                     };
                     let frame = Frame {
                         version: PROTOCOL_VERSION,
