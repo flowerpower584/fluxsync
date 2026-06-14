@@ -2218,7 +2218,7 @@ async fn transport_recv_loop(
                             tracing::debug!("HandshakeResp with no pending initiator");
                         }
                     }
-                    RecvFrame::Encrypted { from, peer_id: _, plaintext } => {
+                    RecvFrame::Encrypted { from, peer_id, plaintext } => {
                         // ROAMING persistence (M-DAEMON-17): only when the peer
                         // address actually changed since the last write — not on
                         // every frame. `peer_addr` updates on roam; comparing
@@ -2238,7 +2238,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, keystore_dir.as_ref()).await,
+                            Ok(f) => dispatch_inbound_frame(f, peer_id, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, keystore_dir.as_ref()).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -2753,6 +2753,7 @@ pub(crate) async fn upsert_peer_persist(
 
 async fn dispatch_inbound_frame(
     frame: Frame,
+    peer_id: [u8; 32],
     event_tx: &mpsc::Sender<Event>,
     transport: &Arc<Transport>,
     reassembly: &Arc<Mutex<HashMap<[u8; 32], Reassembly>>>,
@@ -2771,17 +2772,12 @@ async fn dispatch_inbound_frame(
     // `docs/THREAT-MODEL.md` §3 row B-S: *"a hard gate that blocks
     // Msg::Item processing until the user runs --accept"*.
     let blocks_until_confirmed = matches!(frame.msg, Msg::ClipboardItem(_) | Msg::Chunk(_));
-    if blocks_until_confirmed {
-        let cur_peer = transport.cached_peer_id().await;
-        if let Some(id) = cur_peer {
-            if pending_pairs.lock().await.contains_key(&id) {
-                tracing::warn!(
-                    peer = ?&id[..6],
-                    "FS-052 gate: dropping clipboard frame — peer not yet verbally confirmed"
-                );
-                return;
-            }
-        }
+    if blocks_until_confirmed && pending_pairs.lock().await.contains_key(&peer_id) {
+        tracing::warn!(
+            peer = ?&peer_id[..6],
+            "FS-052 gate: dropping clipboard frame — peer not yet verbally confirmed"
+        );
+        return;
     }
     match frame.msg {
         Msg::ClipboardItem(item) => {
@@ -2922,7 +2918,7 @@ async fn dispatch_inbound_frame(
                 }),
             };
             if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                let _ = transport.send_encrypted(&bytes).await;
+                let _ = transport.send_encrypted_to(peer_id, &bytes).await;
             }
         }
         Msg::Ack(ack) => {
@@ -2962,7 +2958,7 @@ async fn dispatch_inbound_frame(
                     "NAK: resending missing frames"
                 );
                 for (i, bytes) in to_send.iter().enumerate() {
-                    let _ = transport.send_encrypted(bytes).await;
+                    let _ = transport.send_encrypted_to(peer_id, bytes).await;
                     // Same burst-16/pause-2ms pacing as the initial send.
                     if (i + 1) % 16 == 0 {
                         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -2977,59 +2973,45 @@ async fn dispatch_inbound_frame(
             }
         }
         Msg::Bye => {
-            // Peer announced a clean disconnect: tear down the session and
-            // signal PeerLost so the FSM closes the session and re-discovers.
-            transport.drop_session().await;
+            // Peer announced a clean disconnect: tear down THAT peer's session
+            // and signal PeerLost so the FSM closes the session and re-discovers.
+            transport.drop_session_for(peer_id).await;
             let _ = event_tx.try_send(Event::PeerLost);
         }
         Msg::Revoke => {
             // Peer manually unpaired: remove it from our trust store so we
             // don't auto-reconnect into its next TOFU window. The frame
             // arrived over the established Noise session, so the sender is
-            // authenticated — only its own entry is removed, never the rest.
-            match transport.cached_peer_id().await {
-                Some(peer_id) => {
-                    let removed = trusted.lock().await.remove(&peer_id);
-                    if removed.is_some() {
-                        if let Some(dir) = keystore_dir {
-                            if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
-                                tracing::error!("Revoke: failed to persist peer removal: {e}");
-                            }
-                        }
-                        tracing::info!(peer = ?&peer_id[..6], "Revoke: peer unpaired us; trust entry removed");
+            // authenticated (peer_id is whose session decrypted it) — only its
+            // own entry is removed, never the rest.
+            let removed = trusted.lock().await.remove(&peer_id);
+            if removed.is_some() {
+                if let Some(dir) = keystore_dir {
+                    if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
+                        tracing::error!("Revoke: failed to persist peer removal: {e}");
                     }
-                    pending_pairs.lock().await.remove(&peer_id);
                 }
-                None => {
-                    tracing::warn!("Received Revoke with no last_peer_id; dropping");
-                }
+                tracing::info!(peer = ?&peer_id[..6], "Revoke: peer unpaired us; trust entry removed");
             }
-            transport.drop_session().await;
+            pending_pairs.lock().await.remove(&peer_id);
+            transport.drop_session_for(peer_id).await;
             let _ = event_tx.try_send(Event::PeerLost);
         }
         Msg::HandshakeInit(_) | Msg::HandshakeResp(_) => {
             // Handshake frames are driven by the handshake task, not here.
         }
         Msg::Hello(h) => {
-            // Recover the real peer_id from the transport. If it is
-            // unknown (a race before the handshake fully completed) we
-            // must NOT fall back to an all-zero sentinel: that id
-            // bypasses the FSM peer-mismatch check. Drop the Hello.
-            match transport.cached_peer_id().await {
-                Some(peer_id) => {
-                    let _ = event_tx.try_send(Event::PeerSeen {
-                        peer_id,
-                        name: h.name,
-                    });
-                    if !h.platform.is_empty() {
-                        let _ = event_tx.try_send(Event::PeerPlatform {
-                            platform: h.platform,
-                        });
-                    }
-                }
-                None => {
-                    tracing::warn!("Received Hello with no last_peer_id; dropping");
-                }
+            // peer_id is whoever's session decrypted this Hello — always the
+            // real id, no all-zero sentinel that would bypass the FSM
+            // peer-mismatch check.
+            let _ = event_tx.try_send(Event::PeerSeen {
+                peer_id,
+                name: h.name,
+            });
+            if !h.platform.is_empty() {
+                let _ = event_tx.try_send(Event::PeerPlatform {
+                    platform: h.platform,
+                });
             }
         }
     }
@@ -3663,6 +3645,7 @@ mod tests {
         };
         dispatch_inbound_frame(
             frame,
+            [0u8; 32],
             &event_tx,
             &transport,
             &reassembly,
@@ -3718,6 +3701,7 @@ mod tests {
                 version: PROTOCOL_VERSION,
                 msg: Msg::Revoke,
             },
+            peer_id,
             &event_tx,
             &transport,
             &reassembly,
