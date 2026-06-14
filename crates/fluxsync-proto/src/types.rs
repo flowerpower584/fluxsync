@@ -39,6 +39,10 @@ pub enum Msg {
     /// item — the difference between converging and not under UDP loss.
     Nak(Nak),
     Bye,
+    /// Sent on manual unpair, before `Bye`. Tells the peer to remove the
+    /// sender from its trust store so it does not silently re-pair through
+    /// the next TOFU window without a fresh QR scan.
+    Revoke,
     /// Sent once per side immediately after the Linked transition.
     /// Carries the sender's `peer_name_self` so the receiver can drop
     /// the TOFU "pending" placeholder and show the real device name.
@@ -52,6 +56,12 @@ pub enum Msg {
 #[serde(deny_unknown_fields)]
 pub struct Hello {
     pub name: String,
+    /// Sender's OS family: `macos` | `windows` | `linux` | `android` | `ios`
+    /// | `unknown`. Lets the peer render the right device icon instead of a
+    /// hardcoded one. `#[serde(default)]` keeps an older peer's platform-less
+    /// `Hello` decodable as `""`.
+    #[serde(default)]
+    pub platform: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

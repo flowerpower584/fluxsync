@@ -46,3 +46,9 @@ pub const MAX_NAK_MISSING: usize = 512;
 /// without a bound a hostile peer could ship a ~datagram-sized name. 256 bytes
 /// is far above any real device name.
 pub const MAX_HELLO_NAME: usize = 256;
+
+/// Hard cap on `Hello.platform`. Legitimate values come from a closed set
+/// (`macos`/`windows`/`linux`/`android`/`ios`/`unknown`, longest 7 bytes);
+/// the bound only guards against a hostile peer shipping a datagram-sized
+/// blob that would be re-broadcast over IPC on every state emit.
+pub const MAX_HELLO_PLATFORM: usize = 16;

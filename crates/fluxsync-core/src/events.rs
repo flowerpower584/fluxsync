@@ -14,6 +14,12 @@ pub enum Event {
         peer_id: [u8; 32],
         name: String,
     },
+    /// Peer's OS family, carried by `Msg::Hello` (after the handshake). Kept
+    /// separate from `PeerSeen` so the discovery/handshake paths — which don't
+    /// know the platform — stay untouched.
+    PeerPlatform {
+        platform: String,
+    },
     PeerLost,
     HandshakeOk,
     HandshakeTimeout,

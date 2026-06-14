@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn defaults_to_text() {
         assert_eq!(kind_of(""), Kind::Text);
-        assert_eq!(kind_of("Merci frère"), Kind::Text);
+        assert_eq!(kind_of("Thanks brother"), Kind::Text);
     }
 
     // ── is_sensitive ───────────────────────────────────────────────────────

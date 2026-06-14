@@ -235,6 +235,8 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
         (phase, E::BatteryChangedSelf { .. } | E::BatteryChangedPeer { .. }) => {
             (phase, vec![A::EmitState])
         }
+        // Peer platform learned from Hello — push it to the UI, no phase change.
+        (phase, E::PeerPlatform { .. }) => (phase, vec![A::EmitState]),
 
         // Reconnect events.
         (P::Linked, E::Reconnect) => (P::Linked, vec![A::BurstReplay]),

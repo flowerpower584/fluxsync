@@ -37,12 +37,26 @@ fn ipc(path: &Path, req: &str) -> Option<Value> {
     serde_json::from_str(line.trim()).ok()
 }
 
+/// Appends a friendly OS suffix to the peer name, e.g. `mac-mini (macOS)`.
+/// `peer_platform` arrives via `Msg::Hello`; empty until then.
+fn with_platform(peer: &str, platform: Option<&str>) -> String {
+    match platform {
+        Some("macos") => format!("{peer} (macOS)"),
+        Some("windows") => format!("{peer} (Windows)"),
+        Some("linux") => format!("{peer} (Linux)"),
+        Some("android") => format!("{peer} (Android)"),
+        Some("ios") => format!("{peer} (iOS)"),
+        _ => peer.to_string(),
+    }
+}
+
 #[derive(Default, Clone)]
 struct Snapshot {
     online: bool,
     on: bool,
     status: String,
     peer: Option<String>,
+    platform: Option<String>,
     history: usize,
     version: String,
 }
@@ -56,6 +70,10 @@ fn query() -> Snapshot {
                 on: d["on"].as_bool().unwrap_or(false),
                 status: d["status"].as_str().unwrap_or("").to_string(),
                 peer: d["peer_name"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                platform: d["peer_platform"]
                     .as_str()
                     .filter(|s| !s.is_empty())
                     .map(str::to_string),
@@ -93,6 +111,7 @@ impl Tray for FluxTray {
         let description = if !self.snap.online {
             "Daemon unreachable".into()
         } else if let Some(p) = &self.snap.peer {
+            let p = with_platform(p, self.snap.platform.as_deref());
             format!("{} · {} · {} items", self.snap.status, p, self.snap.history)
         } else if self.snap.on {
             "Discovering — no peer".into()
@@ -111,7 +130,7 @@ impl Tray for FluxTray {
         let statusline = if !self.snap.online {
             "● daemon unreachable".to_string()
         } else if let Some(p) = &self.snap.peer {
-            format!("● linked — {p}")
+            format!("● linked — {}", with_platform(p, self.snap.platform.as_deref()))
         } else if self.snap.on {
             "○ discovering".to_string()
         } else {

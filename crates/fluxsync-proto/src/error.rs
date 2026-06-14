@@ -29,6 +29,9 @@ pub enum ProtoError {
     #[error("hello name too long: {0} bytes (max 256)")]
     HelloNameTooLong(usize),
 
+    #[error("hello platform too long: {0} bytes (max 16)")]
+    HelloPlatformTooLong(usize),
+
     #[error("CBOR decode failed: {0}")]
     Cbor(String),
 

@@ -51,6 +51,9 @@ class FluxsyncAccessibilityService : AccessibilityService() {
 
     private var pollingJob: Job? = null
 
+    /** Tracks the peer link across polls so an empty→active edge can seed the guards. */
+    private var peerWasActive = false
+
     private val batteryReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent == null) return
@@ -292,11 +295,21 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                         linked = parsed.active
                         FluxsyncManager.updateState(parsed)
 
-                        // Reset the echo guard on disconnect so a fresh pair
-                        // doesn't inherit a stale value.
-                        if (parsed.peerName.isEmpty()) {
+                        // Session-seed guard (mirrors fluxsyncd driver.rs:2392).
+                        // On a fresh peer link, record whatever is already on the
+                        // OS clipboard as "known" so a value left over from a
+                        // previous session — e.g. the last inbound peer item still
+                        // sitting on the clipboard — is NOT bounced back to the new
+                        // peer by the clip listener or an onResume re-push. Without
+                        // it, clearing the echo guard on disconnect let a stale
+                        // remote value resurface on the peer at reconnect.
+                        val peerActive = parsed.peerName.isNotEmpty()
+                        if (!peerActive) {
                             FluxsyncManager.clearPeerClips()
+                        } else if (!peerWasActive) {
+                            seedGuardsFromClipboard()
                         }
+                        peerWasActive = peerActive
 
                         // Sync incoming clipboard items to the system clipboard.
                         if (parsed.history.isNotEmpty()) {
@@ -356,6 +369,31 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                 .apply()
         } catch (e: Exception) {
             android.util.Log.w("FluxSync", "Failed to persist seen-hash set: ${e.message}")
+        }
+    }
+
+    /**
+     * Session-seed guard: record the current OS clipboard text in the echo
+     * guard + outbound dedup WITHOUT sending, so a value present at (re)connect
+     * isn't broadcast to the freshly linked peer. Mirrors the desktop watcher's
+     * fresh-session seeding in fluxsyncd driver.rs. Images are already echo-
+     * guarded by their FileProvider authority, so only text needs seeding.
+     */
+    private suspend fun seedGuardsFromClipboard() {
+        val text = withContext(Dispatchers.Main) {
+            try {
+                val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = cb.primaryClip ?: return@withContext null
+                if (clip.itemCount == 0) return@withContext null
+                clip.getItemAt(0).coerceToText(this@FluxsyncAccessibilityService)?.toString()
+            } catch (e: Exception) {
+                android.util.Log.w("FluxSync", "Seed clipboard read failed: ${e.message}")
+                null
+            }
+        }
+        if (!text.isNullOrEmpty()) {
+            FluxsyncManager.rememberPeerClip(text)
+            FluxsyncManager.markPushedIfNew(text)
         }
     }
 

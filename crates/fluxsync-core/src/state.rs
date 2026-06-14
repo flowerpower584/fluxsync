@@ -22,6 +22,10 @@ pub struct State {
     pub peer_id: [u8; 32],
     pub peer_name: String,
     pub trusted_peer_name: Option<String>,
+    /// Peer's OS family (`macos`/`windows`/`linux`/`android`/`ios`), learned
+    /// from `Msg::Hello`. Empty until the peer's Hello arrives. Frontends key
+    /// the device icon off this instead of hardcoding one.
+    pub peer_platform: String,
     pub peer_battery: u8,
     pub peer_charging: bool,
     pub history: Vec<HistoryItem>,
@@ -60,7 +64,7 @@ pub struct ConnectionMetrics {
 #[serde(rename_all = "snake_case")]
 pub enum DisconnectReason {
     HeartbeatTimeout, // 3 missed = peer offline
-    NetworkChanged,   // if-watch a détecté un changement
+    NetworkChanged,   // if-watch detected a network change
     DecryptFailure,   // tag invalide → session destroyed
     PeerSentBye,
     IpcShutdown,
@@ -141,6 +145,7 @@ impl State {
             peer_id: [0u8; 32],
             peer_name: String::new(),
             trusted_peer_name: None,
+            peer_platform: String::new(),
             peer_battery: 100, // Default to 100 so it doesn't trigger Critical threshold before the first update
             peer_charging: false,
             history: Vec::new(),

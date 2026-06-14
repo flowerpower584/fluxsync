@@ -54,6 +54,25 @@ use tokio_util::sync::CancellationToken;
 
 const BASE32_ALPHA: Alphabet = Alphabet::Rfc4648 { padding: false };
 
+/// This device's OS family, sent in `Msg::Hello` so the peer renders the
+/// correct device icon. Mobile builds compile `fluxsyncd` for `android`/`ios`
+/// via `fluxsync-mobile-ffi`, so those arms are reachable too.
+const fn self_platform() -> &'static str {
+    if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────
 // PR2 — PIN-method pairing state
 // ─────────────────────────────────────────────────────────────────
@@ -890,7 +909,10 @@ async fn dispatch(
                 let name = app.config().peer_name_self.clone();
                 let frame = Frame {
                     version: PROTOCOL_VERSION,
-                    msg: Msg::Hello(fluxsync_proto::Hello { name }),
+                    msg: Msg::Hello(fluxsync_proto::Hello {
+                        name,
+                        platform: self_platform().to_string(),
+                    }),
                 };
                 if let Ok(bytes) = fluxsync_proto::encode(&frame) {
                     if let Err(e) = transport.send_encrypted(&bytes).await {
@@ -1231,6 +1253,17 @@ async fn handle_driver_cmd(
         }
         CmdOp::Unpair {} => {
             tracing::info!("Manual unpair requested via IPC");
+            // Tell the live peer to drop us from its trust store, otherwise
+            // it auto-reconnects through the next TOFU window and re-pairs
+            // without a QR scan. Best-effort: if the session is down the
+            // peer keeps a stale entry, which only it can clean up.
+            let revoke = Frame {
+                version: PROTOCOL_VERSION,
+                msg: Msg::Revoke,
+            };
+            if let Ok(bytes) = fluxsync_proto::encode(&revoke) {
+                let _ = transport.send_encrypted(&bytes).await;
+            }
             // VULN-001 variant V1: snapshot+retry+rollback. Without this,
             // a disk failure during unpair would clear live trust while
             // peers.json still trusts every peer; a daemon restart would
@@ -1464,13 +1497,12 @@ async fn handle_driver_cmd(
         }
 
         CmdOp::PairShow {} => {
-            // Refuse to open the TOFU window while already paired: a
-            // re-share of the QR would otherwise let a LAN attacker
-            // handshake-join the trusted set. The proper two-step
-            // pairing (pending_peer + pair_confirm) is tracked as FS-052.
-            if !trusted.lock().await.is_empty() {
-                return reply_err(reply, req_id, "already_paired");
-            }
+            // Re-pairing while already paired is allowed: FS-052 gates any
+            // peer that TOFU-joins through this window behind the SAS verify
+            // (pending entry + reaper revoke), so an attacker handshaking in
+            // is no better off than during a first pair. Without this, a
+            // device whose peer was reset or unreachable for a long time
+            // could never re-pair (the old `already_paired` refusal).
             let static_pub = identity.public_key();
             let peer_id = identity.peer_id();
             let pubkey_b32 = base32::encode(BASE32_ALPHA, &static_pub);
@@ -1516,7 +1548,6 @@ async fn handle_driver_cmd(
                 spawn_pin_watchdog(
                     pin_advert.clone(),
                     mdns_ctx.clone(),
-                    trusted.clone(),
                     pairing_window.clone(),
                 );
             }
@@ -1598,6 +1629,13 @@ async fn handle_driver_cmd(
                     );
                 }
             }
+            // Re-pairing a peer the user already SAS-confirmed must behave
+            // like a reconnect, not a fresh pair: passing the pending set to
+            // the initiator would re-gate clipboard AND let the reaper revoke
+            // the long-standing trust if the user abandons the verify screen.
+            // "Confirmed" = in trusted with no live pending entry.
+            let already_confirmed = trusted.lock().await.contains_key(&peer_id)
+                && !pending_pairs.lock().await.contains_key(&peer_id);
             trusted.lock().await.insert(
                 peer_id,
                 TrustedPeer {
@@ -1670,7 +1708,11 @@ async fn handle_driver_cmd(
                         transport.clone(),
                         pending_initiator_tx.clone(),
                         event_tx.clone(),
-                        Some(pending_pairs.clone()),
+                        if already_confirmed {
+                            None
+                        } else {
+                            Some(pending_pairs.clone())
+                        },
                     )
                     .await;
                 } else {
@@ -1710,6 +1752,9 @@ async fn handle_driver_cmd(
                     );
                 }
             }
+            // Same reconnect-not-fresh-pair rule as PairFromUri.
+            let already_confirmed = trusted.lock().await.contains_key(&peer_id)
+                && !pending_pairs.lock().await.contains_key(&peer_id);
             trusted.lock().await.insert(
                 peer_id,
                 TrustedPeer {
@@ -1777,7 +1822,11 @@ async fn handle_driver_cmd(
                             transport.clone(),
                             pending_initiator_tx.clone(),
                             event_tx.clone(),
-                            Some(pending_pairs.clone()),
+                            if already_confirmed {
+                                None
+                            } else {
+                                Some(pending_pairs.clone())
+                            },
                         )
                         .await;
                     }
@@ -1831,6 +1880,9 @@ async fn handle_driver_cmd(
                     );
                 }
             }
+            // Same reconnect-not-fresh-pair rule as PairFromUri.
+            let already_confirmed = trusted.lock().await.contains_key(&peer_id)
+                && !pending_pairs.lock().await.contains_key(&peer_id);
             trusted.lock().await.insert(
                 peer_id,
                 TrustedPeer {
@@ -1887,7 +1939,11 @@ async fn handle_driver_cmd(
                 transport.clone(),
                 pending_initiator_tx.clone(),
                 event_tx.clone(),
-                Some(pending_pairs.clone()),
+                if already_confirmed {
+                    None
+                } else {
+                    Some(pending_pairs.clone())
+                },
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -2172,7 +2228,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs).await,
+                            Ok(f) => dispatch_inbound_frame(f, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, keystore_dir.as_ref()).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -2366,7 +2422,7 @@ async fn clipboard_watcher_loop(
                 // image/png on the clipboard means the user copied an
                 // image. Browsers attach text/html + text/x-moz-url
                 // alongside it; probing text first would let that URL
-                // shadow the image (FS: "des fois ça donne l'URL"). So
+                // shadow the image (FS: "sometimes it yields the URL"). So
                 // probe the image first and, when present, skip text.
                 let img_res = tokio::task::spawn_blocking(|| {
                     arboard::Clipboard::new().and_then(|mut cb| cb.get_image())
@@ -2693,6 +2749,8 @@ async fn dispatch_inbound_frame(
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
     pending_pairs: &PendingSet,
+    trusted: &TrustedSet,
+    keystore_dir: Option<&std::path::PathBuf>,
 ) {
     // FS-052 strict gate (VULN-002 fix): if the active session's peer
     // landed via TOFU and has not been verbally confirmed yet, drop all
@@ -2914,6 +2972,31 @@ async fn dispatch_inbound_frame(
             transport.drop_session().await;
             let _ = event_tx.try_send(Event::PeerLost);
         }
+        Msg::Revoke => {
+            // Peer manually unpaired: remove it from our trust store so we
+            // don't auto-reconnect into its next TOFU window. The frame
+            // arrived over the established Noise session, so the sender is
+            // authenticated — only its own entry is removed, never the rest.
+            match *transport.last_peer_id.lock().await {
+                Some(peer_id) => {
+                    let removed = trusted.lock().await.remove(&peer_id);
+                    if removed.is_some() {
+                        if let Some(dir) = keystore_dir {
+                            if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
+                                tracing::error!("Revoke: failed to persist peer removal: {e}");
+                            }
+                        }
+                        tracing::info!(peer = ?&peer_id[..6], "Revoke: peer unpaired us; trust entry removed");
+                    }
+                    pending_pairs.lock().await.remove(&peer_id);
+                }
+                None => {
+                    tracing::warn!("Received Revoke with no last_peer_id; dropping");
+                }
+            }
+            transport.drop_session().await;
+            let _ = event_tx.try_send(Event::PeerLost);
+        }
         Msg::HandshakeInit(_) | Msg::HandshakeResp(_) => {
             // Handshake frames are driven by the handshake task, not here.
         }
@@ -2928,6 +3011,11 @@ async fn dispatch_inbound_frame(
                         peer_id,
                         name: h.name,
                     });
+                    if !h.platform.is_empty() {
+                        let _ = event_tx.try_send(Event::PeerPlatform {
+                            platform: h.platform,
+                        });
+                    }
                 }
                 None => {
                     tracing::warn!("Received Hello with no last_peer_id; dropping");
@@ -3186,11 +3274,16 @@ async fn start_initiator(
 ///
 /// While `pin_advert` is `Some(_)`, sleeps until its `expires_at`,
 /// then either:
-///   * trusted set is non-empty (someone paired) → clear PIN +
-///     republish the mDNS record without a `pair_pin` TXT and exit.
-///   * pairing_window has elapsed → same cleanup as above (user did
-///     not pair in time; stale PIN must not linger on the LAN).
+///   * pairing_window has elapsed → clear PIN + republish the mDNS
+///     record without a `pair_pin` TXT and exit (user did not pair in
+///     time; stale PIN must not linger on the LAN).
 ///   * otherwise → generate a fresh PIN, republish the TXT, and loop.
+///
+/// Note the trusted set deliberately does NOT stop the rotation: with
+/// re-pairing allowed while already paired, a non-empty trusted set
+/// says nothing about whether the user is done with the window. The
+/// window deadline (refreshed by each `PairShow` the UI issues while
+/// its pair screen stays open) is the single source of truth.
 ///
 /// Exactly one watchdog runs per `PairShow`-opened session — callers
 /// guard the spawn behind `was_active` (the previous `pin_advert`
@@ -3199,7 +3292,6 @@ async fn start_initiator(
 fn spawn_pin_watchdog(
     pin_advert: PinAdvertisement,
     mdns_ctx: MdnsCtx,
-    trusted: TrustedSet,
     pairing_window: PairingWindow,
 ) {
     tokio::spawn(async move {
@@ -3213,14 +3305,13 @@ fn spawn_pin_watchdog(
                 tokio::time::sleep(sleep_until - now).await;
             }
             // After sleeping: decide whether to rotate or stop.
-            let trusted_empty = trusted.lock().await.is_empty();
             let window_open = match *pairing_window.lock().await {
                 Some(deadline) => deadline > Instant::now(),
                 None => false,
             };
-            if !trusted_empty || !window_open {
-                // Pair landed (or window closed) — strip the PIN from
-                // mDNS so a stale code can't be used by a late scanner.
+            if !window_open {
+                // Window closed — strip the PIN from mDNS so a stale
+                // code can't be used by a late scanner.
                 *pin_advert.lock().await = None;
                 if let Some(ctx) = mdns_ctx.lock().await.as_ref() {
                     if let Err(e) = discovery::republish_with_pin(
@@ -3568,12 +3659,73 @@ mod tests {
             &metrics,
             &inflight,
             &pending_pairs,
+            &Arc::new(Mutex::new(HashMap::new())),
+            None,
         )
         .await;
 
         assert!(
             matches!(event_rx.try_recv(), Ok(Event::PeerLost)),
             "Msg::Bye must emit Event::PeerLost"
+        );
+    }
+
+    /// An inbound `Msg::Revoke` must remove the sending peer from the
+    /// trust store (so we don't auto-reconnect into its TOFU window)
+    /// and emit `Event::PeerLost`.
+    #[tokio::test]
+    async fn revoke_frame_removes_trust_and_emits_peer_lost() {
+        use super::{dispatch_inbound_frame, Event, Reassembly};
+        use crate::handshake::tofu_trusted_peer;
+        use crate::metrics::MetricsTracker;
+        use crate::transport::Transport;
+        use fluxsync_proto::{Frame, Msg, PROTOCOL_VERSION};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind loopback transport");
+        let transport = Arc::new(transport);
+        let peer_id = [7u8; 32];
+        *transport.last_peer_id.lock().await = Some(peer_id);
+
+        let (event_tx, mut event_rx) = mpsc::channel(1024);
+        let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let inflight = Arc::new(Mutex::new(HashMap::new()));
+        let metrics = Arc::new(Mutex::new(MetricsTracker::new()));
+        let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
+        let trusted: crate::handshake::TrustedSet = Arc::new(Mutex::new(HashMap::new()));
+        trusted
+            .lock()
+            .await
+            .insert(peer_id, tofu_trusted_peer(peer_id));
+
+        dispatch_inbound_frame(
+            Frame {
+                version: PROTOCOL_VERSION,
+                msg: Msg::Revoke,
+            },
+            &event_tx,
+            &transport,
+            &reassembly,
+            &metrics,
+            &inflight,
+            &pending_pairs,
+            &trusted,
+            None,
+        )
+        .await;
+
+        assert!(
+            !trusted.lock().await.contains_key(&peer_id),
+            "Msg::Revoke must remove the sender from the trust store"
+        );
+        assert!(
+            matches!(event_rx.try_recv(), Ok(Event::PeerLost)),
+            "Msg::Revoke must emit Event::PeerLost"
         );
     }
 }

@@ -1,7 +1,8 @@
 use crate::error::ProtoError;
 use crate::types::{Chunk, ClipboardItem, Frame, Msg, Nak};
 use crate::{
-    MAX_CHUNKS, MAX_CHUNK_DATA, MAX_HELLO_NAME, MAX_NAK_MISSING, MAX_PAYLOAD, PROTOCOL_VERSION,
+    MAX_CHUNKS, MAX_CHUNK_DATA, MAX_HELLO_NAME, MAX_HELLO_PLATFORM, MAX_NAK_MISSING, MAX_PAYLOAD,
+    PROTOCOL_VERSION,
 };
 
 /// Encode a [`Frame`] to CBOR bytes.
@@ -59,6 +60,9 @@ fn validate(frame: &Frame) -> Result<(), ProtoError> {
         Msg::BatteryStatus(b) if b.level > 100 => Err(ProtoError::BatteryLevel(b.level)),
         Msg::Hello(h) if h.name.len() > MAX_HELLO_NAME => {
             Err(ProtoError::HelloNameTooLong(h.name.len()))
+        }
+        Msg::Hello(h) if h.platform.len() > MAX_HELLO_PLATFORM => {
+            Err(ProtoError::HelloPlatformTooLong(h.platform.len()))
         }
         _ => Ok(()),
     }
@@ -148,6 +152,26 @@ mod tests {
         }));
         let bytes = encode(&f).unwrap();
         assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn rejects_oversized_hello_name() {
+        let f = frame(Msg::Hello(crate::Hello {
+            name: "x".repeat(MAX_HELLO_NAME + 1),
+            platform: "linux".into(),
+        }));
+        let bytes = encode(&f).unwrap_err();
+        assert!(matches!(bytes, ProtoError::HelloNameTooLong(_)));
+    }
+
+    #[test]
+    fn rejects_oversized_hello_platform() {
+        let f = frame(Msg::Hello(crate::Hello {
+            name: "A".into(),
+            platform: "x".repeat(MAX_HELLO_PLATFORM + 1),
+        }));
+        let bytes = encode(&f).unwrap_err();
+        assert!(matches!(bytes, ProtoError::HelloPlatformTooLong(_)));
     }
 
     #[test]

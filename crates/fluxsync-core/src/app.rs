@@ -115,6 +115,9 @@ impl App {
                 self.state.peer_battery = *level;
                 self.state.peer_charging = *charging;
             }
+            Event::PeerPlatform { platform } => {
+                self.state.peer_platform.clone_from(platform);
+            }
             Event::LocalClipboardChange {
                 hash,
                 kind,
@@ -150,7 +153,7 @@ impl App {
                 sensitive,
                 lamport,
             } => {
-                // On nettoie le texte (espaces inutiles aux extrémités)
+                // Strip leading/trailing whitespace from the preview
                 let preview = preview.trim();
 
                 // On synchronise notre horloge logique (Lamport) avec celle de l'Android
@@ -188,6 +191,7 @@ impl App {
             }
             Event::UntrustedPeerSeen { .. } => {
                 self.state.peer_name.clear();
+                self.state.peer_platform.clear();
                 self.state.peer_id = [0u8; 32];
                 self.state.peer_battery = 100;
                 self.state.peer_charging = false;
@@ -197,6 +201,7 @@ impl App {
                 if !matches!(self.phase, Phase::Linked | Phase::Paused | Phase::Halted) =>
             {
                 self.state.peer_name.clear();
+                self.state.peer_platform.clear();
                 self.state.peer_id = [0u8; 32];
                 self.state.peer_battery = 100;
                 self.state.peer_charging = false;

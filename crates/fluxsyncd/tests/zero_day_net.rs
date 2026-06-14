@@ -246,7 +246,10 @@ async fn test_14_double_hello_in_session() -> Result<()> {
     transport.set_peer_addr("127.0.0.1:1234".parse()?).await;
     let frame = Frame {
         version: PROTOCOL_VERSION,
-        msg: Msg::Hello(Hello { name: "A".into() }),
+        msg: Msg::Hello(Hello {
+            name: "A".into(),
+            platform: "linux".into(),
+        }),
     };
     let ct = s1
         .encrypt(&fluxsync_proto::encode(&frame).unwrap())
