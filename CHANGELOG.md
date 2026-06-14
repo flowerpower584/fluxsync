@@ -3,6 +3,27 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [SemVer](https://semver.org/).
 
+## [v0.6.2] — 2026-06-14
+
+**v6 "premium calm" interface, plus discovery and capture fixes.**
+
+### Changed
+- Full v6 UI redesign across the macOS tray and the Android app: a flat-fill
+  design language (no tonal gradients or glossy insets), refreshed
+  components, screens and theme.
+
+### Fixed
+- mDNS discovery: pin the LAN IP + interface kind so advertisements stop
+  egressing on `awdl0` (macOS), which was breaking peer discovery.
+- Android: session-seed guard on the accessibility clipboard capture stops a
+  freshly linked peer from being sent stale clipboard contents.
+- Proto/codec, FSM, state and driver follow-ups with matching test updates.
+
+### Repo
+- Stop tracking build artifacts and scratch (nested `target/`, `node_modules/`,
+  French design mockups, local promo material).
+- CI: pin Windows runners to `windows-2025`, bump `setup-java` to v5.
+
 ## [v0.6.1] — 2026-06-04
 
 **Pairing that actually works cross-device, plus a real Linux app.**
