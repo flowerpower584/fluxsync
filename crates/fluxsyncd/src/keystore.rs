@@ -415,9 +415,9 @@ pub fn upsert_peer(peers: &mut Vec<StoredPeer>, new: StoredPeer) {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_peers, save_peers, upsert_peer, StoredPeer, IDENTITY_FILE, PEERS_FILE};
+    use super::{load_peers, save_peers, upsert_peer, StoredPeer, PEERS_FILE};
     #[cfg(unix)]
-    use super::{read_legacy_identity, write_secret_atomic};
+    use super::{read_legacy_identity, write_secret_atomic, IDENTITY_FILE};
 
     fn peer(name: &str) -> StoredPeer {
         StoredPeer {
