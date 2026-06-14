@@ -39,6 +39,8 @@ promo/
 .claude/scheduled_tasks.lock
 
 design/chats/
+# French design mockups — internal scratch, not for the public repo
+design/project/
 PROMPT-BACKEND-CLAUDE-CODE.md
 
 # Agent tooling — not part of the public repo

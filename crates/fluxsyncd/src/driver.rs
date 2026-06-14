@@ -1545,11 +1545,7 @@ async fn handle_driver_cmd(
                 }
             }
             if !was_active {
-                spawn_pin_watchdog(
-                    pin_advert.clone(),
-                    mdns_ctx.clone(),
-                    pairing_window.clone(),
-                );
+                spawn_pin_watchdog(pin_advert.clone(), mdns_ctx.clone(), pairing_window.clone());
             }
             // Showing the QR is implicit "I want to sync" — bump the
             // FSM out of Idle so when the responder fires HandshakeOk
