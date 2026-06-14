@@ -47,27 +47,54 @@ pub fn roam_allowed(now_ms: u64, last_roam_ms: u64) -> bool {
     now_ms.saturating_sub(last_roam_ms) >= ROAM_MIN_INTERVAL_MS
 }
 
-pub struct Transport {
-    pub socket: Arc<UdpSocket>,
-    pub peer_addr: Arc<Mutex<Option<SocketAddr>>>,
+/// Per-peer connection state. FluxMesh Phase 2: today a `Transport`
+/// holds exactly one `PeerConn`; step 2B-2 turns this into a
+/// `BTreeMap<PeerId, Arc<PeerConn>>`. Each field keeps its own lock so
+/// the granularity — and the FS-033 / FS-034 / nonce-generation
+/// invariants built on it — is identical to the previous flat layout.
+pub struct PeerConn {
+    pub peer_addr: Mutex<Option<SocketAddr>>,
     /// Persistent cache of the last known successful peer address.
     /// Unlike `peer_addr`, this is NOT cleared on `drop_session`.
-    pub last_peer_addr: Arc<Mutex<Option<SocketAddr>>>,
+    pub last_peer_addr: Mutex<Option<SocketAddr>>,
     /// Last seen peer ID at `last_peer_addr`. Used for proactive probing.
-    pub last_peer_id: Arc<Mutex<Option<[u8; 32]>>>,
-    pub session: Arc<Mutex<Option<Session>>>,
+    pub last_peer_id: Mutex<Option<[u8; 32]>>,
+    pub session: Mutex<Option<Session>>,
     /// Monotonic counter incremented on every session lifecycle event.
     /// Prevents nonce reuse across reconnects by letting `send_encrypted`
     /// detect a session swap that happened while it was waiting for the
     /// mutex.
-    session_generation: Arc<AtomicU64>,
-    pub(crate) roaming_history: Arc<Mutex<Vec<SocketAddr>>>,
-    pub last_rx_ms: Arc<AtomicU64>,
+    session_generation: AtomicU64,
+    roaming_history: Mutex<Vec<SocketAddr>>,
+    last_rx_ms: AtomicU64,
     /// Epoch-ms of the last accepted roam. Rate-limits peer-address
     /// re-pinning so a LAN attacker replaying authentic ciphertext
     /// cannot continuously redirect outbound traffic (FS-034).
-    last_roam_ms: Arc<AtomicU64>,
-    pub session_established_at_ms: Arc<AtomicU64>,
+    last_roam_ms: AtomicU64,
+    session_established_at_ms: AtomicU64,
+}
+
+impl PeerConn {
+    fn new() -> Self {
+        Self {
+            peer_addr: Mutex::new(None),
+            last_peer_addr: Mutex::new(None),
+            last_peer_id: Mutex::new(None),
+            session: Mutex::new(None),
+            session_generation: AtomicU64::new(0),
+            roaming_history: Mutex::new(Vec::new()),
+            last_rx_ms: AtomicU64::new(now_ms()),
+            last_roam_ms: AtomicU64::new(0),
+            session_established_at_ms: AtomicU64::new(0),
+        }
+    }
+}
+
+pub struct Transport {
+    pub socket: Arc<UdpSocket>,
+    /// The single active peer connection (one today; a per-peer map
+    /// in step 2B-2).
+    conn: Arc<PeerConn>,
     pub metrics: Arc<Mutex<crate::metrics::MetricsTracker>>,
     /// Pulsed whenever a session is installed. Lets idle pollers
     /// (the clipboard watcher) sleep instead of busy-ticking while
@@ -147,15 +174,7 @@ impl Transport {
         Ok((
             Self {
                 socket: Arc::new(socket),
-                peer_addr: Arc::new(Mutex::new(None)),
-                last_peer_addr: Arc::new(Mutex::new(None)),
-                last_peer_id: Arc::new(Mutex::new(None)),
-                session: Arc::new(Mutex::new(None)),
-                session_generation: Arc::new(AtomicU64::new(0)),
-                roaming_history: Arc::new(Mutex::new(Vec::new())),
-                last_rx_ms: Arc::new(AtomicU64::new(now_ms())),
-                last_roam_ms: Arc::new(AtomicU64::new(0)),
-                session_established_at_ms: Arc::new(AtomicU64::new(0)),
+                conn: Arc::new(PeerConn::new()),
                 metrics: Arc::new(Mutex::new(crate::metrics::MetricsTracker::new())),
                 session_notify: Arc::new(Notify::new()),
                 peers_disk_lock: Arc::new(Mutex::new(())),
@@ -165,29 +184,30 @@ impl Transport {
     }
 
     pub async fn set_peer_addr(&self, addr: SocketAddr) {
-        *self.peer_addr.lock().await = Some(addr);
-        *self.last_peer_addr.lock().await = Some(addr);
+        *self.conn.peer_addr.lock().await = Some(addr);
+        *self.conn.last_peer_addr.lock().await = Some(addr);
         self.push_history(addr).await;
     }
 
     pub async fn set_peer_info(&self, id: [u8; 32], addr: SocketAddr) {
-        *self.peer_addr.lock().await = Some(addr);
-        *self.last_peer_addr.lock().await = Some(addr);
-        *self.last_peer_id.lock().await = Some(id);
+        *self.conn.peer_addr.lock().await = Some(addr);
+        *self.conn.last_peer_addr.lock().await = Some(addr);
+        *self.conn.last_peer_id.lock().await = Some(id);
         self.push_history(addr).await;
     }
 
     pub async fn install_session(&self, id: [u8; 32], session: Session) {
-        *self.session.lock().await = Some(session);
-        *self.last_peer_id.lock().await = Some(id);
-        self.session_generation.fetch_add(1, Ordering::SeqCst);
-        self.session_established_at_ms
+        *self.conn.session.lock().await = Some(session);
+        *self.conn.last_peer_id.lock().await = Some(id);
+        self.conn.session_generation.fetch_add(1, Ordering::SeqCst);
+        self.conn
+            .session_established_at_ms
             .store(now_ms(), Ordering::SeqCst);
         self.session_notify.notify_one();
     }
 
     async fn push_history(&self, addr: SocketAddr) {
-        let mut h = self.roaming_history.lock().await;
+        let mut h = self.conn.roaming_history.lock().await;
         if !h.contains(&addr) {
             h.insert(0, addr);
             h.truncate(5);
@@ -197,24 +217,25 @@ impl Transport {
     /// CAS install: installs the session only if none is present.
     /// Returns true if the session was installed, false if a session already existed.
     pub async fn try_install_session(&self, id: [u8; 32], session: Session) -> bool {
-        let mut g = self.session.lock().await;
+        let mut g = self.conn.session.lock().await;
         if g.is_some() {
             tracing::debug!("try_install_session: session already present, rejecting install");
             return false;
         }
         *g = Some(session);
         drop(g);
-        *self.last_peer_id.lock().await = Some(id);
-        self.session_generation.fetch_add(1, Ordering::SeqCst);
-        self.session_established_at_ms
+        *self.conn.last_peer_id.lock().await = Some(id);
+        self.conn.session_generation.fetch_add(1, Ordering::SeqCst);
+        self.conn
+            .session_established_at_ms
             .store(now_ms(), Ordering::SeqCst);
         self.session_notify.notify_one();
         true
     }
 
     pub async fn drop_session(&self) {
-        *self.session.lock().await = None;
-        self.session_generation.fetch_add(1, Ordering::SeqCst);
+        *self.conn.session.lock().await = None;
+        self.conn.session_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     // ── Per-peer state accessors ──────────────────────────────────
@@ -225,41 +246,41 @@ impl Transport {
     // lock independently, introducing no new lock-ordering.
 
     pub async fn has_session(&self) -> bool {
-        self.session.lock().await.is_some()
+        self.conn.session.lock().await.is_some()
     }
 
     pub async fn current_peer_addr(&self) -> Option<SocketAddr> {
-        *self.peer_addr.lock().await
+        *self.conn.peer_addr.lock().await
     }
 
     pub async fn cached_peer_addr(&self) -> Option<SocketAddr> {
-        *self.last_peer_addr.lock().await
+        *self.conn.last_peer_addr.lock().await
     }
 
     pub async fn cached_peer_id(&self) -> Option<[u8; 32]> {
-        *self.last_peer_id.lock().await
+        *self.conn.last_peer_id.lock().await
     }
 
     pub async fn set_cached_peer_id(&self, id: [u8; 32]) {
-        *self.last_peer_id.lock().await = Some(id);
+        *self.conn.last_peer_id.lock().await = Some(id);
     }
 
     pub async fn roaming_history_snapshot(&self) -> Vec<SocketAddr> {
-        self.roaming_history.lock().await.clone()
+        self.conn.roaming_history.lock().await.clone()
     }
 
     #[must_use]
     pub fn last_rx(&self) -> u64 {
-        self.last_rx_ms.load(Ordering::Relaxed)
+        self.conn.last_rx_ms.load(Ordering::Relaxed)
     }
 
     pub fn set_last_rx(&self, ms: u64) {
-        self.last_rx_ms.store(ms, Ordering::Relaxed);
+        self.conn.last_rx_ms.store(ms, Ordering::Relaxed);
     }
 
     #[must_use]
     pub fn session_established_at(&self) -> u64 {
-        self.session_established_at_ms.load(Ordering::SeqCst)
+        self.conn.session_established_at_ms.load(Ordering::SeqCst)
     }
 
     /// Send a typed datagram to the given address, prefixing the body
@@ -279,17 +300,18 @@ impl Transport {
     /// and the lock acquisition, the send is aborted to prevent nonce
     /// reuse across session epochs.
     pub async fn send_encrypted(&self, plaintext: &[u8]) -> Result<()> {
-        let gen_before = self.session_generation.load(Ordering::SeqCst);
+        let gen_before = self.conn.session_generation.load(Ordering::SeqCst);
 
         let addr = self
+            .conn
             .peer_addr
             .lock()
             .await
             .ok_or_else(|| anyhow!("no peer addr set"))?;
         let ct = {
-            let mut g = self.session.lock().await;
+            let mut g = self.conn.session.lock().await;
             // Verify generation hasn't changed since we decided to send.
-            let gen_after = self.session_generation.load(Ordering::SeqCst);
+            let gen_after = self.conn.session_generation.load(Ordering::SeqCst);
             if gen_after != gen_before {
                 return Err(anyhow!(
                     "session generation changed ({gen_before} → {gen_after}); \
@@ -325,7 +347,7 @@ impl Transport {
                 // `session` would pin a session→metrics lock order and
                 // deadlock any future metrics→session path (FS-033).
                 let result = {
-                    let mut g = self.session.lock().await;
+                    let mut g = self.conn.session.lock().await;
                     let s = g
                         .as_mut()
                         .ok_or_else(|| anyhow!("encrypted frame but no session"))?;
@@ -344,7 +366,7 @@ impl Transport {
                 // hijack `peer_addr`. Rate-limit re-pinning so at most one roam
                 // is accepted per ROAM_MIN_INTERVAL_MS (FS-034).
                 {
-                    let mut p = self.peer_addr.lock().await;
+                    let mut p = self.conn.peer_addr.lock().await;
                     if Some(from) != *p {
                         let now = now_ms();
                         // F-CT1: CAS on `last_roam_ms` so two concurrent
@@ -352,9 +374,10 @@ impl Transport {
                         // pass the rate-limit check by reading the same
                         // stale timestamp. Acquire/AcqRel pair the load
                         // with the compare-exchange release.
-                        let last_roam = self.last_roam_ms.load(Ordering::Acquire);
+                        let last_roam = self.conn.last_roam_ms.load(Ordering::Acquire);
                         let allowed = roam_allowed(now, last_roam)
                             && self
+                                .conn
                                 .last_roam_ms
                                 .compare_exchange(
                                     last_roam,
@@ -369,9 +392,9 @@ impl Transport {
                                 "roaming: updating peer address"
                             );
                             *p = Some(from);
-                            *self.last_peer_addr.lock().await = Some(from);
+                            *self.conn.last_peer_addr.lock().await = Some(from);
                             {
-                                let mut h = self.roaming_history.lock().await;
+                                let mut h = self.conn.roaming_history.lock().await;
                                 if !h.contains(&from) {
                                     h.insert(0, from);
                                     h.truncate(5); // Keep last 5 IPs
@@ -386,7 +409,7 @@ impl Transport {
                         }
                     }
                 }
-                self.last_rx_ms.store(now_ms(), Ordering::Relaxed);
+                self.conn.last_rx_ms.store(now_ms(), Ordering::Relaxed);
                 Ok(RecvFrame::Encrypted {
                     from,
                     plaintext: pt,

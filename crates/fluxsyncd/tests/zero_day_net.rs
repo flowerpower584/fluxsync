@@ -167,7 +167,7 @@ async fn test_07_ip_roaming_legitimacy() -> Result<()> {
         .await?;
     let mut buf = [0u8; 1024];
     let _ = transport.recv(&mut buf).await?;
-    assert_eq!(*transport.peer_addr.lock().await, Some(attacker_addr));
+    assert_eq!(transport.current_peer_addr().await, Some(attacker_addr));
     Ok(())
 }
 
@@ -198,7 +198,7 @@ async fn test_11_rapid_ip_roaming_is_rate_limited() -> Result<()> {
         let mut buf = [0u8; 1024];
         let _ = transport.recv(&mut buf).await?;
 
-        let pinned = *transport.peer_addr.lock().await;
+        let pinned = transport.current_peer_addr().await;
         if i == 0 {
             // First roam is always allowed (no prior roam recorded).
             assert_eq!(pinned, Some(addr), "first roam must pin peer_addr");
