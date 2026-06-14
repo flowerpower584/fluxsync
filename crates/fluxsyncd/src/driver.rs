@@ -2194,23 +2194,17 @@ async fn transport_recv_loop(
                             );
                             continue;
                         }
-                        if transport.has_session().await {
-                            // [FIX] Session Stability: NEVER accept a re-handshake while
-                            // a session is active. The Android re-initiates handshakes
-                            // every ~15s via mDNS rediscovery, which would destroy
-                            // the Noise session and break Mac→Android clipboard sync.
-                            //
-                            // If the peer genuinely crashes/restarts, the heartbeat
-                            // timeout (in heartbeat_loop) will fire Event::PeerLost,
-                            // which drops the session via CloseSession. After that,
-                            // transport.session will be None and the next HandshakeInit
-                            // will be accepted normally.
-                            tracing::debug!(
-                                incoming=?from,
-                                "HandshakeInit ignored: session already active (peer will re-pair after heartbeat timeout)"
-                            );
-                            continue;
-                        }
+                        // FluxMesh 2C-b: no global "session active → reject"
+                        // gate any more — that blocked a SECOND device from
+                        // ever pairing. Per-peer admission is enforced in the
+                        // responder via `try_install_session`'s CAS: a
+                        // re-handshake from the SAME peer (e.g. Android's ~15s
+                        // mDNS rediscovery) finds that peer's session already
+                        // present and is dropped without replacing it (the
+                        // Noise session is never destroyed), while a DIFFERENT
+                        // peer is routed to its own connection slot. The
+                        // FS-058 per-source rate-limit above still bounds how
+                        // often a responder is spawned.
                         let id = identity.clone();
                         let tr = transport.clone();
                         let trusted = trusted.clone();
@@ -3065,10 +3059,14 @@ async fn dispatch_inbound_frame(
             }
         }
         Msg::Bye => {
-            // Peer announced a clean disconnect: tear down THAT peer's session
-            // and signal PeerLost so the FSM closes the session and re-discovers.
+            // Peer announced a clean disconnect: tear down THAT peer's session.
             transport.drop_session_for(peer_id).await;
-            let _ = event_tx.try_send(Event::PeerLost);
+            // Only the primary peer drives the single FSM's PeerLost (which
+            // clears State + the primary session). A secondary mesh peer
+            // leaving must not disturb the primary link (FluxMesh 2C-b).
+            if transport.cached_peer_id().await == Some(peer_id) {
+                let _ = event_tx.try_send(Event::PeerLost);
+            }
         }
         Msg::Revoke => {
             // Peer manually unpaired: remove it from our trust store so we
@@ -3087,7 +3085,11 @@ async fn dispatch_inbound_frame(
             }
             pending_pairs.lock().await.remove(&peer_id);
             transport.drop_session_for(peer_id).await;
-            let _ = event_tx.try_send(Event::PeerLost);
+            // Primary-only PeerLost, as for Bye — a secondary peer revoking us
+            // tears down only its own link (FluxMesh 2C-b).
+            if transport.cached_peer_id().await == Some(peer_id) {
+                let _ = event_tx.try_send(Event::PeerLost);
+            }
         }
         Msg::HandshakeInit(_) | Msg::HandshakeResp(_) => {
             // Handshake frames are driven by the handshake task, not here.
@@ -3283,8 +3285,10 @@ async fn discovery_dispatcher(
                             tracing::debug!(peer = %peer_id_hex, "ignoring advertisement from untrusted/unknown peer");
                             continue;
                         }
-                        // Skip if a session is already up to this peer.
-                        if transport.has_session().await {
+                        // Skip if a session is already up to THIS peer.
+                        // FluxMesh 2C-b: per-peer, so a daemon already linked to
+                        // one device still initiates to other discovered peers.
+                        if transport.has_session_for(peer_id).await {
                             continue;
                         }
                         // Tie-break: only the side with the lower static_pub
@@ -3736,6 +3740,10 @@ mod tests {
             .await
             .expect("bind loopback transport");
         let transport = Arc::new(transport);
+        // Make the Bye sender the primary peer so the primary-gated PeerLost
+        // fires (FluxMesh 2C-b: only the primary peer drives the single FSM).
+        let peer_id = [7u8; 32];
+        transport.set_cached_peer_id(peer_id).await;
         let (event_tx, mut event_rx) = mpsc::channel(1024);
         let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -3749,7 +3757,7 @@ mod tests {
         };
         dispatch_inbound_frame(
             frame,
-            [0u8; 32],
+            peer_id,
             &Arc::new(Mutex::new(super::SeenSet::default())),
             &event_tx,
             &transport,
