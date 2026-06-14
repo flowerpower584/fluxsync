@@ -1,4 +1,6 @@
 /target/
+# Nested Rust build dirs (e.g. apps/linux-tray/target)
+**/target/
 **/*.rs.bk
 .DS_Store
 *.swp
@@ -14,6 +16,9 @@ build/
 local.properties
 gradle_output.txt
 *.class
+node_modules/
+# Per-machine Gradle daemon JVM pin
+apps/android/gradle/gradle-daemon-jvm.properties
 
 # Release binaries — go to GitHub releases, not repo
 *.apk
@@ -24,6 +29,10 @@ apps/macos-tray/src-tauri/binaries/
 
 # Dev scratch
 crates/fluxsyncd/scratch/
+# French design proto — internal scratch, not for the public repo
+design-preview.html
+# Marketing scratch (promo video / renders) — kept local
+promo/
 
 # Agent tooling — local knowledge base / locks, never shared
 .agents/
