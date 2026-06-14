@@ -124,9 +124,6 @@ pub enum CmdOp {
     SetLaunchAtLogin {
         value: bool,
     },
-    SetPreferLan {
-        value: bool,
-    },
     /// FS-052: list peers that were auto-trusted under the TOFU window
     /// but have not yet been verbally confirmed by the user. Each entry
     /// carries the 6-word session-binding SAS so the user can match it

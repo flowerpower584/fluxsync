@@ -86,13 +86,6 @@ fn fluxsync_set_show_in_dock(app: tauri::AppHandle, value: bool) {
 }
 
 #[tauri::command]
-async fn fluxsync_set_prefer_lan(value: bool) -> Result<(), String> {
-    ipc::one_shot(json!({"id": 1, "op": "set_prefer_lan", "value": value}))
-        .await
-        .map(|_| ())
-}
-
-#[tauri::command]
 async fn fluxsync_unpair() -> Result<(), String> {
     ipc::one_shot(json!({"id": 1, "op": "unpair"}))
         .await
@@ -275,7 +268,6 @@ pub fn run() {
             fluxsync_set_launch_at_login,
             fluxsync_get_launch_at_login,
             fluxsync_set_show_in_dock,
-            fluxsync_set_prefer_lan,
             fluxsync_unpair,
             fluxsync_open_url,
         ])

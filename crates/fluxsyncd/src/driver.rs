@@ -1405,10 +1405,6 @@ async fn handle_driver_cmd(
             // [TODO] Persistence of this preference in config/peers.json
             CmdResponse::ok(req_id, None)
         }
-        CmdOp::SetPreferLan { value: _ } => {
-            // [TODO] Pass to transport layer
-            CmdResponse::ok(req_id, None)
-        }
 
         // FS-052: list peers that landed in `trusted` under the TOFU
         // window but have not yet been verbally confirmed.

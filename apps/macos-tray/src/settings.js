@@ -225,18 +225,6 @@ document.getElementById('opt-show-in-dock').addEventListener('click', async () =
   }
 });
 
-document.getElementById('opt-prefer-lan').addEventListener('click', async () => {
-  const btn = document.getElementById('opt-prefer-lan');
-  const isNowOn = !btn.classList.contains('on');
-  btn.classList.toggle('on', isNowOn);
-  try {
-    await invoke('fluxsync_set_prefer_lan', { value: isNowOn });
-  } catch (err) {
-    btn.classList.toggle('on', !isNowOn);
-    showToast(`Couldn't update preference: ${err}`);
-  }
-});
-
 document.getElementById('btn-add-device').addEventListener('click', () => {
   invoke('fluxsync_open_pair');
 });
