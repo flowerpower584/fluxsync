@@ -19,10 +19,8 @@ Versions follow [SemVer](https://semver.org/).
   freshly linked peer from being sent stale clipboard contents.
 - Proto/codec, FSM, state and driver follow-ups with matching test updates.
 
-### Repo
-- Stop tracking build artifacts and scratch (nested `target/`, `node_modules/`,
-  French design mockups, local promo material).
-- CI: pin Windows runners to `windows-2025`, bump `setup-java` to v5.
+### CI
+- Pin Windows runners to `windows-2025`; bump `setup-java` to v5.
 
 ## [v0.6.1] — 2026-06-04
 
