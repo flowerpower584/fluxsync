@@ -56,16 +56,23 @@ jobs:
           rustflags: ""
       - uses: Swatinem/rust-cache@v2
       # Verify the whole workspace (including the integration test crates)
-      # still compiles. We don't run the integration tests in CI yet —
-      # 7 known logic regressions need fixing first — but compile failures
-      # will block PRs immediately.
+      # still compiles; compile failures block PRs immediately.
       - name: dbus dev headers (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo build --workspace --tests --exclude fluxsync-mobile-ffi --exclude uniffi-bindgen
-      # Run library unit tests on every OS. Integration tests are tracked
-      # for fixup in a follow-up; once green they'll be added here.
-      - run: cargo test --workspace --lib --exclude fluxsync-mobile-ffi --exclude uniffi-bindgen
+      # Windows: library unit tests only. The integration suite drives
+      # multi-daemon sockets / mDNS whose Windows behaviour isn't
+      # validated locally yet, so we don't gate pushes on it here.
+      - name: unit tests (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --lib --exclude fluxsync-mobile-ffi --exclude uniffi-bindgen
+      # Linux/macOS: full suite incl. the integration crates. The prior
+      # logic regressions are resolved and the suite is green again, so
+      # it now guards against regressions (notably the FluxMesh work).
+      - name: full test suite (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --exclude fluxsync-mobile-ffi --exclude uniffi-bindgen
 
   deny:
     name: cargo-deny
