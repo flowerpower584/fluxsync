@@ -495,6 +495,15 @@ impl App {
         }
     }
 
+    /// Rehydrate history persisted by FluxVault. Called once at startup,
+    /// before the daemon serves any state, so the first snapshot already
+    /// carries the restored list. `items` are newest-first; the list is
+    /// capped to the in-memory soft cap.
+    pub fn restore_history(&mut self, mut items: Vec<HistoryItem>) {
+        items.truncate(HISTORY_SOFT_CAP);
+        self.state.history = items;
+    }
+
     fn phase_for_policy_ext(&self, fsm_next: Phase) -> Phase {
         use crate::state::Status;
         match status_for(&self.state) {

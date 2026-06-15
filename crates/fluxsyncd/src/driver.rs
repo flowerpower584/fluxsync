@@ -27,13 +27,14 @@ use crate::ipc::{IpcConn, IpcServer};
 use crate::logs::LogTail;
 use crate::metrics::{DisconnectReason, MetricsTracker};
 use crate::rate_limit::HandshakeRateLimiter;
-use crate::transport::{RecvFrame, Transport};
+use crate::transport::{now_ms, RecvFrame, Transport};
 use anyhow::{anyhow, Context, Result};
 use base32::Alphabet;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use crate::history_store::{self, VaultEntry};
 use fluxsync_core::{
     dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, DeviceId, Event, EventId,
-    LogEntry, LogLevel, PeerInfo, SeenSet, State, WallClock,
+    HistoryItem, LogEntry, LogLevel, PeerInfo, SeenSet, State, WallClock,
 };
 use fluxsync_crypto::gen_pair_pin;
 use fluxsync_crypto::{fingerprint, Identity};
@@ -165,8 +166,52 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         fluxsync_core::DeviceId::from(identity.peer_id()),
     );
 
+    // ── FluxVault: rehydrate persisted history ────────────────────
+    // Decrypt the on-disk history (if any) and seed it into the App
+    // *before* the first snapshot, so every consumer sees the restored
+    // list immediately. Best-effort: a load failure (wrong identity,
+    // tampered file) logs and starts empty rather than aborting boot.
+    let vault: Option<(PathBuf, zeroize::Zeroizing<[u8; 32]>, Vec<VaultEntry>)> =
+        if let Some(dir) = keystore_dir.as_ref() {
+            let key = identity.derive_at_rest_key(history_store::AT_REST_CONTEXT);
+            let entries = match history_store::load(
+                dir,
+                &key,
+                now_ms(),
+                history_store::DEFAULT_TTL_SECS,
+            ) {
+                Ok(entries) => {
+                    app.restore_history(entries.iter().map(|e| e.item.clone()).collect());
+                    tracing::info!(count = entries.len(), "rehydrated history from vault");
+                    entries
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "vault load failed; starting with empty history");
+                    Vec::new()
+                }
+            };
+            Some((dir.clone(), key, entries))
+        } else {
+            None
+        };
+
     let initial = app.snapshot().clone();
     let (state_watch_tx, state_watch_rx) = watch::channel(initial);
+
+    // Persist history off the state-watch channel: a dedicated task wakes
+    // on every state change, diffs the history list, and writes the vault
+    // only when it actually changed (skipping the frequent battery /
+    // heartbeat / peer-list EmitStates). Lives only when a keystore dir is
+    // configured; exits when the watch sender drops at shutdown.
+    if let Some((dir, key, entries)) = vault {
+        let ctx = VaultCtx {
+            dir,
+            key,
+            last: app.snapshot().history.clone(),
+            entries,
+        };
+        tokio::spawn(run_vault_persister(ctx, state_watch_tx.subscribe()));
+    }
     let (logs_bcast_tx, _) = broadcast::channel::<LogEntry>(64);
     // M-DAEMON-11: bounded so a hostile LAN flood (mDNS spam → DiscoveryEvent,
     // or forged frames → Event) can't grow the daemon's memory without bound.
@@ -2298,6 +2343,78 @@ fn preview_label(kind: Kind, payload: &[u8]) -> String {
     match kind {
         Kind::Image => format!("Image, {} KB", payload.len().div_ceil(1024)),
         _ => String::from_utf8_lossy(payload).to_string(),
+    }
+}
+
+/// State the FluxVault persister carries between writes: where + how to
+/// encrypt, plus a cache so a re-persist preserves each entry's original
+/// `created_ms` (and favorite flag) instead of re-stamping it `now`.
+struct VaultCtx {
+    dir: PathBuf,
+    key: zeroize::Zeroizing<[u8; 32]>,
+    /// The history list as last persisted — change detection.
+    last: Vec<HistoryItem>,
+    /// The entries as last persisted — source of stable `created_ms`.
+    entries: Vec<VaultEntry>,
+}
+
+impl VaultCtx {
+    /// Map the current in-memory history (newest-first) to vault entries,
+    /// carrying `created_ms`/`favorite` forward for items already persisted
+    /// and stamping freshly-seen items with `now`.
+    fn rebuild(&self, history: &[HistoryItem], now: u64) -> Vec<VaultEntry> {
+        history
+            .iter()
+            .map(|item| match self.entries.iter().find(|e| &e.item == item) {
+                Some(prev) => VaultEntry {
+                    item: item.clone(),
+                    created_ms: prev.created_ms,
+                    favorite: prev.favorite,
+                },
+                None => VaultEntry {
+                    item: item.clone(),
+                    created_ms: now,
+                    favorite: false,
+                },
+            })
+            .collect()
+    }
+}
+
+/// Persist clipboard history whenever it changes. Wakes on every state
+/// publish, skips when the history list is unchanged, and writes the
+/// encrypted vault off-thread (`spawn_blocking`) so the fsync never stalls
+/// a runtime worker. Exits when the watch sender drops at shutdown.
+async fn run_vault_persister(mut ctx: VaultCtx, mut rx: watch::Receiver<State>) {
+    while rx.changed().await.is_ok() {
+        let history = rx.borrow_and_update().history.clone();
+        if history == ctx.last {
+            continue;
+        }
+        let now = now_ms();
+        let entries = ctx.rebuild(&history, now);
+        let dir = ctx.dir.clone();
+        let key = *ctx.key;
+        let to_save = entries.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            history_store::save(
+                &dir,
+                &key,
+                &to_save,
+                now,
+                history_store::DEFAULT_TTL_SECS,
+                history_store::DEFAULT_DISK_CAP,
+            )
+        })
+        .await;
+        match saved {
+            Ok(Ok(())) => {
+                ctx.entries = entries;
+                ctx.last = history;
+            }
+            Ok(Err(e)) => tracing::warn!(error = %e, "vault persist failed"),
+            Err(e) => tracing::warn!(error = %e, "vault persist task join failed"),
+        }
     }
 }
 
