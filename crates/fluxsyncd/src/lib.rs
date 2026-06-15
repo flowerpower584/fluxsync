@@ -13,6 +13,7 @@ pub mod config;
 pub mod discovery;
 pub mod driver;
 pub mod handshake;
+pub mod history_store;
 pub mod ipc;
 pub mod keystore;
 pub mod logs;
