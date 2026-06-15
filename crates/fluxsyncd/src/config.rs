@@ -1,5 +1,5 @@
 use crate::wall::ChronoWallClock;
-use fluxsync_core::WallClock;
+use fluxsync_core::{FirewallPolicy, WallClock};
 use fluxsync_crypto::{Identity, Session};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -63,6 +63,10 @@ pub struct DaemonConfig {
     /// IPv6 ULAs, etc.) can flip this off and accept that all four
     /// `RecvFrame` variants will then be processed from any source.
     pub lan_only_handshakes: bool,
+    /// Clipboard firewall policy (chantier A). Disabled by default; loaded
+    /// from the on-disk policy at boot and mutated at runtime via
+    /// `CmdOp::SetFirewall`.
+    pub firewall: FirewallPolicy,
 }
 
 impl DaemonConfig {
@@ -89,6 +93,7 @@ impl DaemonConfig {
             test_pairs: Vec::new(),
             test_pending_pair: None,
             lan_only_handshakes: true,
+            firewall: FirewallPolicy::default(),
         }
     }
 }

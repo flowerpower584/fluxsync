@@ -48,6 +48,11 @@ pub struct State {
     pub cipher: String,
     pub metrics: Option<ConnectionMetrics>,
     pub charge_override: bool,
+    /// Clipboard firewall policy (chantier A). Mirrors `Config.firewall` so
+    /// clients can render + drive the per-content-type toggles. `#[serde(
+    /// default)]` keeps older snapshots (pre-firewall) deserializing.
+    #[serde(default)]
+    pub firewall: FirewallPolicy,
 }
 
 /// One mesh peer in the `State.peers` list (FluxMesh Phase 3). A flat
@@ -193,6 +198,7 @@ impl State {
             cipher: config.cipher.clone(),
             metrics: None,
             charge_override: config.charge_override,
+            firewall: config.firewall.clone(),
         }
     }
 
@@ -292,6 +298,7 @@ mod tests {
             "link_latency_ms",
             "cipher",
             "charge_override",
+            "firewall",
         ] {
             assert!(j.get(k).is_some(), "missing key {k} in JSON shape");
         }

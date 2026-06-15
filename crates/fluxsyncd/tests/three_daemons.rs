@@ -12,6 +12,7 @@
 
 #![cfg(unix)]
 
+use fluxsync_core::{FirewallPolicy, Rule};
 use fluxsync_crypto::{test_util::pair_for_test, Identity};
 use fluxsyncd::{
     cmd::{CmdData, CmdOp, CmdRequest},
@@ -661,5 +662,181 @@ async fn three_node_center_push_reaches_both_leaves() {
     assert!(
         !PANIC_TRIGGERED.load(Ordering::SeqCst),
         "a panic was captured by the test panic hook"
+    );
+}
+
+/// Read `State.firewall.enabled` from the daemon at `ipc`.
+async fn firewall_enabled(ipc: &PathBuf) -> bool {
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 7,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
+    match resp.data {
+        Some(CmdData::State(s)) => s.firewall.enabled,
+        _ => false,
+    }
+}
+
+/// FluxFirewall slice 3: a `SetFirewall` IPC command with `text = Never` on the
+/// sender must stop locally-copied text from reaching the peer, the policy must
+/// surface in `State`, and flipping the rule back to `Always` must restore the
+/// flow — all driven headlessly over IPC, no devices.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn firewall_deny_outbound_blocks_peer_and_is_reversible() {
+    let _ = tracing_subscriber::fmt::try_init();
+    install_panic_hook();
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let (pid_a, pid_b) = (id_a.peer_id(), id_b.peer_id());
+    let (sess_a_b, sess_b_a) = pair_for_test(&id_a, &id_b).expect("pair a-b");
+
+    let (port_a, port_b) = (pick_free_udp_port().await, pick_free_udp_port().await);
+    let addr_a: SocketAddr = format!("127.0.0.1:{port_a}").parse().unwrap();
+    let addr_b: SocketAddr = format!("127.0.0.1:{port_b}").parse().unwrap();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ipc_a = dir.path().join("a.sock");
+    let ipc_b = dir.path().join("b.sock");
+
+    let mut cfg_a = base_cfg(id_a, port_a, ipc_a.clone(), "node-a");
+    cfg_a.test_pair = Some(TestPair {
+        session: sess_a_b,
+        peer_addr: addr_b,
+        peer_name: "node-b".into(),
+        peer_id: pid_b,
+    });
+    let mut cfg_b = base_cfg(id_b, port_b, ipc_b.clone(), "node-b");
+    cfg_b.test_pair = Some(TestPair {
+        session: sess_b_a,
+        peer_addr: addr_a,
+        peer_name: "node-a".into(),
+        peer_id: pid_a,
+    });
+
+    let sd_a = CancellationToken::new();
+    let sd_b = CancellationToken::new();
+    let (ca, cb) = (sd_a.clone(), sd_b.clone());
+    let h_a = tokio::spawn(async move { run(cfg_a, ca).await });
+    let h_b = tokio::spawn(async move { run(cfg_b, cb).await });
+
+    let up = wait_until(Duration::from_secs(2), || async {
+        peer_name(&ipc_a).await.as_deref() == Some("node-b")
+            && peer_name(&ipc_b).await.as_deref() == Some("node-a")
+    })
+    .await;
+    assert!(up, "A/B did not link within 2s");
+
+    // ── 1. firewall OFF (default): a normal push reaches B ──
+    let allowed = "fw-allowed-control";
+    let p = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Push {
+                text: allowed.into(),
+            },
+        },
+    )
+    .await;
+    assert!(p.ok, "control push failed: {p:?}");
+    assert!(
+        wait_until(Duration::from_secs(2), || async {
+            history_count(&ipc_b, allowed).await >= 1
+        })
+        .await,
+        "control push never reached B"
+    );
+
+    // ── 2. enable firewall on A with text = Never; it must show up in State ──
+    let policy = FirewallPolicy {
+        enabled: true,
+        text: Rule::Deny,
+        url: Rule::Allow,
+        code: Rule::Allow,
+        image: Rule::Allow,
+        sensitive: Rule::Ask,
+    };
+    let set = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 2,
+            op: CmdOp::SetFirewall { policy },
+        },
+    )
+    .await;
+    assert!(set.ok, "set-firewall failed: {set:?}");
+    assert!(
+        firewall_enabled(&ipc_a).await,
+        "A did not project the enabled firewall into State"
+    );
+
+    // ── 3. a Never-text push must NOT reach B ──
+    let blocked = "fw-blocked-text";
+    let p2 = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 3,
+            op: CmdOp::Push {
+                text: blocked.into(),
+            },
+        },
+    )
+    .await;
+    assert!(p2.ok, "blocked push rejected locally: {p2:?}");
+    // Give it a generous window on loopback; it must stay absent on B.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        history_count(&ipc_b, blocked).await,
+        0,
+        "Never-text leaked to the peer"
+    );
+
+    // ── 4. reversible: flip text back to Always and it flows again ──
+    let policy2 = FirewallPolicy {
+        enabled: true,
+        text: Rule::Allow,
+        ..FirewallPolicy::default()
+    };
+    let set2 = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 4,
+            op: CmdOp::SetFirewall { policy: policy2 },
+        },
+    )
+    .await;
+    assert!(set2.ok, "second set-firewall failed: {set2:?}");
+    let allowed2 = "fw-allowed-again";
+    let p3 = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 5,
+            op: CmdOp::Push {
+                text: allowed2.into(),
+            },
+        },
+    )
+    .await;
+    assert!(p3.ok, "re-allowed push failed: {p3:?}");
+    assert!(
+        wait_until(Duration::from_secs(2), || async {
+            history_count(&ipc_b, allowed2).await >= 1
+        })
+        .await,
+        "push after re-allow never reached B"
+    );
+
+    sd_a.cancel();
+    sd_b.cancel();
+    let _ = timeout(Duration::from_secs(2), h_a).await;
+    let _ = timeout(Duration::from_secs(2), h_b).await;
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a daemon panicked during the firewall test"
     );
 }

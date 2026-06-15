@@ -132,9 +132,11 @@ impl App {
     }
 
     /// Replace the clipboard firewall policy at runtime (driven by an IPC
-    /// command). Takes effect on the next clipboard event.
+    /// command). Takes effect on the next clipboard event. Mirrored into
+    /// `state.firewall` so the next snapshot shows it to clients.
     pub fn set_firewall(&mut self, policy: FirewallPolicy) {
-        self.config.firewall = policy;
+        self.config.firewall = policy.clone();
+        self.state.firewall = policy;
     }
 
     /// Current firewall policy (for the state projection / IPC readback).

@@ -149,6 +149,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         test_pairs,
         test_pending_pair,
         lan_only_handshakes,
+        firewall,
     } = cfg;
 
     // ── App + channels ────────────────────────────────────────────
@@ -159,7 +160,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
             version: String::from(env!("CARGO_PKG_VERSION")),
             build_id: String::from(env!("FLUXSYNCD_BUILD_ID")),
             cipher: String::from("chacha20-poly1305"),
-            firewall: fluxsync_core::FirewallPolicy::default(),
+            firewall,
         },
         // This daemon's stable mesh identity: the BLAKE3 id of its Noise
         // static key, the same bytes peers see as `peer_id`. Stamped as
@@ -1131,6 +1132,27 @@ async fn handle_driver_cmd(
             let actions = app.handle(Event::SetFavorite { hash, favorite }, &**wall);
             dispatch(
                 actions,
+                app,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+                inflight,
+                peer_meta,
+            )
+            .await;
+            CmdResponse::ok(req_id, None)
+        }
+        CmdOp::SetFirewall { policy } => {
+            tracing::info!(enabled = policy.enabled, "IPC: set-firewall");
+            app.set_firewall(policy);
+            // Push the updated policy to every state subscriber.
+            dispatch(
+                vec![Action::EmitState],
                 app,
                 transport,
                 trusted,

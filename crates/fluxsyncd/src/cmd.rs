@@ -1,7 +1,7 @@
 //! IPC command + response wire shapes (NDJSON over UNIX socket /
 //! Named Pipe). One JSON object per line. See `docs/PROTOCOL.md` §5.
 
-use fluxsync_core::{HistoryItem, LogEntry, State};
+use fluxsync_core::{FirewallPolicy, HistoryItem, LogEntry, State};
 use serde::{Deserialize, Serialize};
 
 /// Default entry count for a `tail` request that omits `n`. Mirrors the
@@ -72,6 +72,12 @@ pub enum CmdOp {
     SetFavorite {
         hash: String,
         favorite: bool,
+    },
+    /// Clipboard firewall (chantier A): replace the whole policy. The client
+    /// sends the full `FirewallPolicy` object; the daemon swaps it in and
+    /// re-emits state so every subscriber sees the new rules.
+    SetFirewall {
+        policy: FirewallPolicy,
     },
     Revoke {
         peer_id: String,
