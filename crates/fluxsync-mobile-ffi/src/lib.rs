@@ -552,6 +552,43 @@ impl FluxsyncHandle {
             .map(|_| ())
             .map_err(|e| FluxError::Ipc(e.to_string()))
     }
+
+    /// FluxFirewall: replace the whole clipboard firewall policy. `policy_json`
+    /// is the serialized `FirewallPolicy` object (`enabled` + the per-kind
+    /// rules); the daemon swaps it in and re-emits state so the Android
+    /// toggles reflect the new rules immediately. Parsing here keeps a
+    /// malformed object from reaching the daemon as an opaque IPC error.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn set_firewall(&self, policy_json: String) -> Result<(), FluxError> {
+        let policy: serde_json::Value = serde_json::from_str(&policy_json)
+            .map_err(|e| FluxError::Invalid(format!("firewall policy json: {e}")))?;
+        if !policy.is_object() {
+            return Err(FluxError::Invalid(
+                "firewall policy must be a JSON object".into(),
+            ));
+        }
+        self.runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({"id": 1, "op": "set_firewall", "policy": policy}),
+            ))
+            .map(|_| ())
+            .map_err(|e| FluxError::Ipc(e.to_string()))
+    }
+
+    /// FluxFirewall: approve (`allow = true`) or reject an item parked under an
+    /// Ask rule, keyed by its hex content hash from `State.pending`. Approval
+    /// sends/writes the held item; rejection drops it silently.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn resolve_pending(&self, hash: String, allow: bool) -> Result<(), FluxError> {
+        self.runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({"id": 1, "op": "resolve_pending", "hash": hash, "allow": allow}),
+            ))
+            .map(|_| ())
+            .map_err(|e| FluxError::Ipc(e.to_string()))
+    }
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────

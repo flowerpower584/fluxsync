@@ -35,6 +35,7 @@ object Routes {
     const val HOME = "home"
     const val DEVICES = "devices"
     const val LOGS = "logs"
+    const val FIREWALL = "firewall"
     const val SETTINGS = "settings"
 }
 

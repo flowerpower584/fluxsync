@@ -658,11 +658,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_text(
     ): Short
+    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_resolve_pending(
+    ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_revoke(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_battery_threshold(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_charge_override(
+    ): Short
+    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_firewall(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_self_battery(
     ): Short
@@ -720,11 +724,15 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_text(`ptr`: Long,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_resolve_pending(`ptr`: Long,`hash`: RustBuffer.ByValue,`allow`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_revoke(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_battery_threshold(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_charge_override(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_firewall(`ptr`: Long,`policyJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_self_battery(`ptr`: Long,`level`: Byte,`charging`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -886,6 +894,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_text() != 51988.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_resolve_pending() != 59432.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_revoke() != 532.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -893,6 +904,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_charge_override() != 22905.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_firewall() != 12791.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_self_battery() != 25465.toShort()) {
@@ -1412,6 +1426,13 @@ public interface FluxsyncHandleInterface {
     fun `pushText`(`text`: kotlin.String)
     
     /**
+     * FluxFirewall: approve (`allow = true`) or reject an item parked under an
+     * Ask rule, keyed by its hex content hash from `State.pending`. Approval
+     * sends/writes the held item; rejection drops it silently.
+     */
+    fun `resolvePending`(`hash`: kotlin.String, `allow`: kotlin.Boolean)
+    
+    /**
      * FluxMesh: revoke one specific peer by hex peer-id (drops its
      * session + removes it from the trust store), leaving every other
      * paired device linked. Drives the per-secondary "Unpair" button in
@@ -1429,6 +1450,15 @@ public interface FluxsyncHandleInterface {
      * "Resume while charging" override.
      */
     fun `setChargeOverride`(`value`: kotlin.Boolean)
+    
+    /**
+     * FluxFirewall: replace the whole clipboard firewall policy. `policy_json`
+     * is the serialized `FirewallPolicy` object (`enabled` + the per-kind
+     * rules); the daemon swaps it in and re-emits state so the Android
+     * toggles reflect the new rules immediately. Parsing here keeps a
+     * malformed object from reaching the daemon as an opaque IPC error.
+     */
+    fun `setFirewall`(`policyJson`: kotlin.String)
     
     /**
      * Push host-OS battery telemetry into the daemon. Called from the
@@ -1759,6 +1789,24 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
 
     
     /**
+     * FluxFirewall: approve (`allow = true`) or reject an item parked under an
+     * Ask rule, keyed by its hex content hash from `State.pending`. Approval
+     * sends/writes the held item; rejection drops it silently.
+     */
+    @Throws(FluxException::class)override fun `resolvePending`(`hash`: kotlin.String, `allow`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_resolve_pending(
+        it,
+        FfiConverterString.lower(`hash`),FfiConverterBoolean.lower(`allow`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * FluxMesh: revoke one specific peer by hex peer-id (drops its
      * session + removes it from the trust store), leaving every other
      * paired device linked. Drives the per-secondary "Unpair" button in
@@ -1804,6 +1852,26 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
     UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_charge_override(
         it,
         FfiConverterBoolean.lower(`value`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * FluxFirewall: replace the whole clipboard firewall policy. `policy_json`
+     * is the serialized `FirewallPolicy` object (`enabled` + the per-kind
+     * rules); the daemon swaps it in and re-emits state so the Android
+     * toggles reflect the new rules immediately. Parsing here keeps a
+     * malformed object from reaching the daemon as an opaque IPC error.
+     */
+    @Throws(FluxException::class)override fun `setFirewall`(`policyJson`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_firewall(
+        it,
+        FfiConverterString.lower(`policyJson`),_status)
 }
     }
     

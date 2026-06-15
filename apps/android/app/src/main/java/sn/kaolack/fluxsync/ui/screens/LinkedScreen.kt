@@ -49,6 +49,7 @@ fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
                     Routes.HOME -> "FluxSync"
                     Routes.DEVICES -> "Devices"
                     Routes.LOGS -> "Activity"
+                    Routes.FIREWALL -> "Firewall"
                     Routes.SETTINGS -> "Settings"
                     else -> "FluxSync"
                 },
@@ -56,6 +57,7 @@ fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
                     Routes.HOME -> "v${sn.kaolack.fluxsync.BuildConfig.VERSION_NAME} · android"
                     Routes.DEVICES -> "paired peers"
                     Routes.LOGS -> "live stream"
+                    Routes.FIREWALL -> "policies & decisions"
                     Routes.SETTINGS -> "preferences"
                     else -> "v${sn.kaolack.fluxsync.BuildConfig.VERSION_NAME} · android"
                 },
@@ -81,6 +83,7 @@ fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
             composable(Routes.HOME) { HomeScreen(vm) }
             composable(Routes.DEVICES) { DevicesScreen(vm, onAddDevice = onNavigateToPairing) }
             composable(Routes.LOGS) { LogsScreen(vm) }
+            composable(Routes.FIREWALL) { FirewallScreen(vm) }
             composable(Routes.SETTINGS) { SettingsScreen(vm) }
         }
     }
@@ -124,6 +127,7 @@ private fun BottomNav(currentRoute: String, onNavigate: (String) -> Unit) {
             TabItem(Routes.HOME, "Home", "home"),
             TabItem(Routes.DEVICES, "Devices", "devices"),
             TabItem(Routes.LOGS, "Logs", "logs"),
+            TabItem(Routes.FIREWALL, "Firewall", "firewall"),
             TabItem(Routes.SETTINGS, "Settings", "settings")
         )
 

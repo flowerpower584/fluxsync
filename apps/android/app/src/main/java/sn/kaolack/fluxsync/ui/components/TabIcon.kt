@@ -55,6 +55,17 @@ fun TabIcon(id: String, color: Color, modifier: Modifier = Modifier) {
                     color = color,
                     style = Stroke(width = sw, cap = StrokeCap.Round),
                 )
+                "firewall" -> drawPath(
+                    // Shield with an inner check — the firewall guarding the
+                    // clipboard. viewBox 0 0 18 18 to match the other tabs.
+                    PathParser().parsePathString(
+                        "M9 2.5L14.5 4.8V9.2C14.5 12.4 12.1 14.6 9 15.5" +
+                            "C5.9 14.6 3.5 12.4 3.5 9.2V4.8L9 2.5z" +
+                            "M6.6 8.9l1.8 1.8 3-3.4",
+                    ).toPath(),
+                    color = color,
+                    style = Stroke(width = sw, join = StrokeJoin.Round, cap = StrokeCap.Round),
+                )
                 "settings" -> {
                     drawCircle(
                         color = color,

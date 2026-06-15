@@ -46,6 +46,8 @@ data class DaemonState(
     val trustedPeerName: String?,
     val metrics: ConnectionMetricsView?,
     val peers: List<MeshPeer>,
+    val firewall: FirewallPolicyView,
+    val pending: List<PendingItemView>,
     val raw: JSONObject,
 ) {
     companion object {
@@ -75,6 +77,8 @@ data class DaemonState(
                 trustedPeerName = o.optString("trusted_peer_name", null),
                 metrics = ConnectionMetricsView.parse(o.optJSONObject("metrics")),
                 peers = parsePeers(o.optJSONArray("peers")),
+                firewall = FirewallPolicyView.parse(o.optJSONObject("firewall")),
+                pending = parsePending(o.optJSONArray("pending")),
                 raw = o,
             )
         } catch (e: Exception) {
@@ -116,6 +120,23 @@ data class DaemonState(
                 sb.append("%02x".format(arr.optInt(i) and 0xff))
             }
             return sb.toString()
+        }
+
+        /** FluxFirewall: items held under an Ask rule, awaiting approve/deny. */
+        private fun parsePending(arr: JSONArray?): List<PendingItemView> {
+            if (arr == null) return emptyList()
+            val out = mutableListOf<PendingItemView>()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                out += PendingItemView(
+                    hash = o.optString("hash", ""),
+                    kind = o.optString("kind", "text"),
+                    preview = o.optString("preview", ""),
+                    sensitive = o.optBoolean("sensitive", false),
+                    direction = o.optString("direction", "inbound"),
+                )
+            }
+            return out
         }
 
         private fun parseHistory(arr: JSONArray?): List<HistoryItem> {
@@ -163,6 +184,72 @@ data class MeshPeer(
     val battery: Int,
     val charging: Boolean,
     val primary: Boolean,
+)
+
+/**
+ * FluxFirewall: mirrors `fluxsync_core::policy::FirewallPolicy`. Each rule is
+ * the lowercase serde value of `Rule` ("allow" | "ask" | "deny"); `enabled` is
+ * the master switch (off = everything passes). [toJson] feeds the FFI
+ * `set_firewall` command; [withRule] returns a copy with one rule swapped.
+ */
+data class FirewallPolicyView(
+    val enabled: Boolean,
+    val text: String,
+    val url: String,
+    val code: String,
+    val image: String,
+    val sensitive: String,
+) {
+    fun toJson(): String = JSONObject()
+        .put("enabled", enabled)
+        .put("text", text)
+        .put("url", url)
+        .put("code", code)
+        .put("image", image)
+        .put("sensitive", sensitive)
+        .toString()
+
+    fun ruleFor(field: String): String = when (field) {
+        "text" -> text
+        "url" -> url
+        "code" -> code
+        "image" -> image
+        "sensitive" -> sensitive
+        else -> "allow"
+    }
+
+    fun withRule(field: String, rule: String): FirewallPolicyView = when (field) {
+        "text" -> copy(text = rule)
+        "url" -> copy(url = rule)
+        "code" -> copy(code = rule)
+        "image" -> copy(image = rule)
+        "sensitive" -> copy(sensitive = rule)
+        else -> this
+    }
+
+    companion object {
+        fun parse(o: JSONObject?): FirewallPolicyView = FirewallPolicyView(
+            enabled = o?.optBoolean("enabled", false) ?: false,
+            text = o?.optString("text", "allow") ?: "allow",
+            url = o?.optString("url", "allow") ?: "allow",
+            code = o?.optString("code", "allow") ?: "allow",
+            image = o?.optString("image", "allow") ?: "allow",
+            sensitive = o?.optString("sensitive", "ask") ?: "ask",
+        )
+    }
+}
+
+/**
+ * FluxFirewall: one item parked under an Ask rule (`fluxsync_core::PendingItem`).
+ * `direction` is "inbound" (awaiting clipboard write) or "outbound" (awaiting
+ * broadcast); resolve by `hash` via the FFI `resolve_pending` command.
+ */
+data class PendingItemView(
+    val hash: String,
+    val kind: String,
+    val preview: String,
+    val sensitive: Boolean,
+    val direction: String,
 )
 
 data class HistoryItem(

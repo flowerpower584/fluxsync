@@ -147,6 +147,14 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
     fun pairConfirm(peerId: String, accept: Boolean) =
         ffi(if (accept) "Confirm pairing" else "Reject pairing") { it.pairConfirm(peerId, accept) }
 
+    /** FluxFirewall: push the whole policy (master switch + per-kind rules). */
+    fun setFirewall(policy: FirewallPolicyView) =
+        ffi("Set firewall") { it.setFirewall(policy.toJson()) }
+
+    /** FluxFirewall: approve or reject an item parked under an Ask rule. */
+    fun resolvePending(hash: String, allow: Boolean) =
+        ffi(if (allow) "Approve item" else "Reject item") { it.resolvePending(hash, allow) }
+
     fun checkAccessibility() {
         val app = getApplication<Application>()
         _isAccessibilityEnabled.value = isAccessibilityServiceEnabled(app, FluxsyncAccessibilityService::class.java)
