@@ -109,6 +109,25 @@ async fn peer_name(ipc: &PathBuf) -> Option<String> {
     }
 }
 
+/// FluxMesh Phase 3: `(peers.len(), primary_count)` from the daemon's State.
+async fn mesh_peers(ipc: &PathBuf) -> (usize, usize) {
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 5,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
+    match resp.data {
+        Some(CmdData::State(s)) => (
+            s.peers.len(),
+            s.peers.iter().filter(|p| p.primary).count(),
+        ),
+        _ => (0, 0),
+    }
+}
+
 fn base_cfg(identity: Identity, port: u16, ipc: PathBuf, name: &str) -> DaemonConfig {
     let mut cfg = DaemonConfig::new(identity, port, ipc);
     cfg.udp_bind = "127.0.0.1".into();
@@ -317,6 +336,18 @@ async fn three_node_center_push_reaches_both_leaves() {
     })
     .await;
     assert!(up, "all three daemons did not reach Linked within 2s");
+
+    // ── FluxMesh Phase 3: B (centre) lists BOTH leaves; each leaf lists B ──
+    let listed = wait_until(Duration::from_secs(2), || async {
+        mesh_peers(&ipc_b).await.0 == 2
+    })
+    .await;
+    assert!(listed, "B did not surface both mesh peers in State.peers");
+    let (b_count, b_primary) = mesh_peers(&ipc_b).await;
+    assert_eq!(b_count, 2, "B should list both leaves");
+    assert_eq!(b_primary, 1, "exactly one of B's peers is the primary");
+    assert_eq!(mesh_peers(&ipc_a).await, (1, 1), "A lists only B (primary)");
+    assert_eq!(mesh_peers(&ipc_c).await, (1, 1), "C lists only B (primary)");
 
     let text = "from the centre";
     let push = ipc_send_recv(

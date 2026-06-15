@@ -238,6 +238,11 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
         // Peer platform learned from Hello — push it to the UI, no phase change.
         (phase, E::PeerPlatform { .. }) => (phase, vec![A::EmitState]),
 
+        // FluxMesh Phase 3: a non-primary mesh peer changed — re-emit State so
+        // the daemon rebuilds the `peers` list. No phase change, single-peer
+        // State untouched.
+        (phase, E::MeshPeersChanged) => (phase, vec![A::EmitState]),
+
         // Reconnect events.
         (P::Linked, E::Reconnect) => (P::Linked, vec![A::BurstReplay]),
         (P::Discovering, E::Reconnect) => (P::Discovering, vec![A::StartDiscovery]),

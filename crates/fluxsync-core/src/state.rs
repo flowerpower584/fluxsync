@@ -28,6 +28,13 @@ pub struct State {
     pub peer_platform: String,
     pub peer_battery: u8,
     pub peer_charging: bool,
+    /// FluxMesh Phase 3: every peer with a live mesh session, including the
+    /// primary. The legacy `peer_*` fields above remain the primary's
+    /// projection so single-peer clients keep working; clients that render a
+    /// device list read this instead. Empty until at least one peer links;
+    /// the daemon rebuilds it at every `EmitState` from the live session set
+    /// (so a dead session never lingers as a ghost entry).
+    pub peers: Vec<PeerInfo>,
     pub history: Vec<HistoryItem>,
     pub status: Status,
     pub version: String,
@@ -40,6 +47,25 @@ pub struct State {
     pub cipher: String,
     pub metrics: Option<ConnectionMetrics>,
     pub charge_override: bool,
+}
+
+/// One mesh peer in the `State.peers` list (FluxMesh Phase 3). A flat
+/// projection of what the UI needs to draw a device row — identity, name,
+/// OS icon, battery — for each peer that currently holds a live session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PeerInfo {
+    pub peer_id: [u8; 32],
+    pub name: String,
+    /// OS family (`macos`/`windows`/`linux`/`android`/`ios`), from `Hello`.
+    /// Empty until the peer's Hello arrives.
+    pub platform: String,
+    pub battery: u8,
+    pub charging: bool,
+    /// True for the peer the legacy single-peer `State.peer_*` fields project
+    /// (the FSM-driven primary link). Exactly one entry is primary when any
+    /// peer is linked.
+    pub primary: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +174,7 @@ impl State {
             peer_platform: String::new(),
             peer_battery: 100, // Default to 100 so it doesn't trigger Critical threshold before the first update
             peer_charging: false,
+            peers: Vec::new(),
             history: Vec::new(),
             status: Status::Inactive,
             version: config.version.clone(),
@@ -247,6 +274,7 @@ mod tests {
             "trusted_peer_name",
             "peer_battery",
             "peer_charging",
+            "peers",
             "history",
             "status",
             "version",

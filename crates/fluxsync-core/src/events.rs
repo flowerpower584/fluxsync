@@ -62,6 +62,12 @@ pub enum Event {
         lamport: u64,
     },
     Reconnect,
+    /// FluxMesh Phase 3: a non-primary mesh peer joined, left, or updated its
+    /// Hello/Battery. Carries no payload — it only asks the FSM to re-emit
+    /// State so the daemon can rebuild the `peers` list from the live session
+    /// set. Never mutates the single-peer State fields (those stay the
+    /// primary's projection).
+    MeshPeersChanged,
 }
 
 /// Side-effect commands the daemon must execute. The FSM never performs

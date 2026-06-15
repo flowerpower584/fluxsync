@@ -33,7 +33,7 @@ use base32::Alphabet;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use fluxsync_core::{
     dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, DeviceId, Event, EventId,
-    LogEntry, LogLevel, SeenSet, State, WallClock,
+    LogEntry, LogLevel, PeerInfo, SeenSet, State, WallClock,
 };
 use fluxsync_crypto::gen_pair_pin;
 use fluxsync_crypto::{fingerprint, Identity};
@@ -41,6 +41,7 @@ use fluxsync_proto::{
     ClipboardItem, Frame, Kind, Msg, MAX_CHUNK_DATA, MAX_PAYLOAD, PROTOCOL_VERSION,
 };
 use hex;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -254,6 +255,10 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // the recv loop to forward each item exactly once and never loop.
     let mesh_seen: MeshSeen = Arc::new(Mutex::new(SeenSet::default()));
 
+    // FluxMesh Phase 3: per-peer UI metadata feeding the State `peers` list.
+    // Written by the recv loop (every peer's Hello/Battery), read at EmitState.
+    let peer_meta: PeerMetaMap = Arc::new(Mutex::new(BTreeMap::new()));
+
     // ── Test path: install session + jump to Linked ────────────────
     if let Some(tp) = test_pair {
         let TestPair {
@@ -373,6 +378,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let inflight = inflight.clone();
         let pending_pairs_for_recv = pending_pairs.clone();
         let mesh_seen_for_recv = mesh_seen.clone();
+        let peer_meta_for_recv = peer_meta.clone();
         tasks.spawn(async move {
             transport_recv_loop(
                 transport,
@@ -387,6 +393,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 inflight,
                 pending_pairs_for_recv,
                 mesh_seen_for_recv,
+                peer_meta_for_recv,
                 lan_only_handshakes,
             )
             .await
@@ -584,7 +591,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 if !actions.is_empty() {
                     tracing::debug!(?event, ?actions, phase=?app.snapshot().phase, "FSM transition");
                 }
-                dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight).await;
+                dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta).await;
             }
             Some(driver_cmd) = cmd_rx.recv() => {
                 match driver_cmd {
@@ -603,7 +610,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &*wall_clock,
                         );
                         let actions = gate_outbound(actions, &transport, &pending_pairs).await;
-                        dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight).await;
+                        dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta).await;
                     }
                     run_cmd @ DriverCmd::Run { .. } => {
                         handle_driver_cmd(
@@ -625,6 +632,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             udp_port,
                             &metrics,
                             &inflight,
+                            &peer_meta,
                             &pending_pairs,
                             &pin_advert,
                             &disc_cache,
@@ -708,6 +716,7 @@ async fn dispatch(
     last_written_hashes: &Arc<Mutex<VecDeque<[u8; 32]>>>,
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
+    peer_meta: &PeerMetaMap,
 ) {
     for action in actions {
         tracing::debug!(?action, "dispatching action");
@@ -715,7 +724,12 @@ async fn dispatch(
             Action::EmitState => {
                 let m = metrics.lock().await.snapshot();
                 app.set_metrics(Some(m));
-                let _ = state_watch_tx.send(app.snapshot().clone());
+                // FluxMesh Phase 3: enrich the single-peer snapshot with the
+                // live mesh peer list before publishing.
+                let mut snap = app.snapshot().clone();
+                let primary = transport.cached_peer_id().await;
+                snap.peers = build_peers(transport, peer_meta, primary).await;
+                let _ = state_watch_tx.send(snap);
             }
             Action::EmitLog(entry) => {
                 tracing::info!(level = ?entry.level, msg = %entry.msg, "log");
@@ -1042,6 +1056,7 @@ async fn ensure_online(
     last_written_hashes: &Arc<Mutex<VecDeque<[u8; 32]>>>,
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
+    peer_meta: &PeerMetaMap,
 ) {
     if app.snapshot().on {
         return;
@@ -1059,6 +1074,7 @@ async fn ensure_online(
         last_written_hashes,
         metrics,
         inflight,
+        peer_meta,
     )
     .await;
 }
@@ -1087,6 +1103,7 @@ async fn handle_driver_cmd(
     udp_port: u16,
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
+    peer_meta: &PeerMetaMap,
     pending_pairs: &PendingSet,
     pin_advert: &PinAdvertisement,
     disc_cache: &DiscoveryCache,
@@ -1100,10 +1117,12 @@ async fn handle_driver_cmd(
         CmdOp::Status => {
             let m = metrics.lock().await.snapshot();
             app.set_metrics(Some(m));
-            CmdResponse::ok(
-                req_id,
-                Some(CmdData::State(Box::new(app.snapshot().clone()))),
-            )
+            // FluxMesh Phase 3: enrich with the live mesh peer list, same as
+            // the watch-published snapshot (a direct Status poll bypasses it).
+            let mut snap = app.snapshot().clone();
+            let primary = transport.cached_peer_id().await;
+            snap.peers = build_peers(transport, peer_meta, primary).await;
+            CmdResponse::ok(req_id, Some(CmdData::State(Box::new(snap))))
         }
         CmdOp::Reconnect {} => {
             tracing::info!("IPC: manual reconnect requested");
@@ -1145,6 +1164,7 @@ async fn handle_driver_cmd(
                     last_written_hashes,
                     metrics,
                     inflight,
+                    peer_meta,
                 )
                 .await;
             }
@@ -1183,6 +1203,7 @@ async fn handle_driver_cmd(
                             last_written_hashes,
                             metrics,
                             inflight,
+                            peer_meta,
                         )
                         .await;
                         CmdResponse::ok(req_id, None)
@@ -1253,6 +1274,7 @@ async fn handle_driver_cmd(
                     last_written_hashes,
                     metrics,
                     inflight,
+                    peer_meta,
                 )
                 .await;
                 CmdResponse::ok(req_id, None)
@@ -1283,6 +1305,7 @@ async fn handle_driver_cmd(
                 last_written_hashes,
                 metrics,
                 inflight,
+                peer_meta,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1343,6 +1366,7 @@ async fn handle_driver_cmd(
                 last_written_hashes,
                 metrics,
                 inflight,
+                peer_meta,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1366,6 +1390,7 @@ async fn handle_driver_cmd(
                 last_written_hashes,
                 metrics,
                 inflight,
+                peer_meta,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1384,6 +1409,7 @@ async fn handle_driver_cmd(
                 last_written_hashes,
                 metrics,
                 inflight,
+                peer_meta,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1444,6 +1470,7 @@ async fn handle_driver_cmd(
                     last_written_hashes,
                     metrics,
                     inflight,
+                    peer_meta,
                 )
                 .await;
             }
@@ -1534,6 +1561,7 @@ async fn handle_driver_cmd(
                     last_written_hashes,
                     metrics,
                     inflight,
+                    peer_meta,
                 )
                 .await;
             }
@@ -1608,6 +1636,7 @@ async fn handle_driver_cmd(
                 last_written_hashes,
                 metrics,
                 inflight,
+                peer_meta,
             )
             .await;
             // PR2: surface the PIN + epoch-ms expiry to the UI so the
@@ -1731,6 +1760,7 @@ async fn handle_driver_cmd(
                 last_written_hashes,
                 metrics,
                 inflight,
+                peer_meta,
             )
             .await;
             // URI always carries an address hint; if it parses, kick off
@@ -1845,6 +1875,7 @@ async fn handle_driver_cmd(
                 last_written_hashes,
                 metrics,
                 inflight,
+                peer_meta,
             )
             .await;
 
@@ -1968,6 +1999,7 @@ async fn handle_driver_cmd(
                 last_written_hashes,
                 metrics,
                 inflight,
+                peer_meta,
             )
             .await;
             start_initiator(
@@ -2029,6 +2061,7 @@ async fn transport_recv_loop(
     inflight: InflightMap,
     pending_pairs: PendingSet,
     mesh_seen: MeshSeen,
+    peer_meta: PeerMetaMap,
     lan_only_handshakes: bool,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
@@ -2269,7 +2302,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, keystore_dir.as_ref()).await,
+                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &peer_meta, keystore_dir.as_ref()).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -2842,6 +2875,7 @@ async fn dispatch_inbound_frame(
     inflight: &InflightMap,
     pending_pairs: &PendingSet,
     trusted: &TrustedSet,
+    peer_meta: &PeerMetaMap,
     keystore_dir: Option<&std::path::PathBuf>,
 ) {
     // FS-052 strict gate (VULN-002 fix): if the active session's peer
@@ -3003,6 +3037,17 @@ async fn dispatch_inbound_frame(
             }
         }
         Msg::BatteryStatus(b) => {
+            // FluxMesh Phase 3: record every peer's battery in the mesh meta
+            // map (drives the State `peers` list), republishing on change.
+            {
+                let mut meta = peer_meta.lock().await;
+                let e = meta.entry(peer_id).or_insert_with(PeerMeta::new);
+                if e.battery != b.level || e.charging != b.charging {
+                    e.battery = b.level;
+                    e.charging = b.charging;
+                    let _ = event_tx.try_send(Event::MeshPeersChanged);
+                }
+            }
             // FluxMesh 2C-b: only the primary peer's battery drives the
             // single-peer State + the battery policy. A secondary mesh peer's
             // level must not overwrite the projected peer_battery or pause the
@@ -3091,6 +3136,10 @@ async fn dispatch_inbound_frame(
         Msg::Bye => {
             // Peer announced a clean disconnect: tear down THAT peer's session.
             transport.drop_session_for(peer_id).await;
+            // FluxMesh Phase 3: drop it from the mesh `peers` list too.
+            if peer_meta.lock().await.remove(&peer_id).is_some() {
+                let _ = event_tx.try_send(Event::MeshPeersChanged);
+            }
             // Only the primary peer drives the single FSM's PeerLost (which
             // clears State + the primary session). A secondary mesh peer
             // leaving must not disturb the primary link (FluxMesh 2C-b).
@@ -3115,6 +3164,10 @@ async fn dispatch_inbound_frame(
             }
             pending_pairs.lock().await.remove(&peer_id);
             transport.drop_session_for(peer_id).await;
+            // FluxMesh Phase 3: drop it from the mesh `peers` list too.
+            if peer_meta.lock().await.remove(&peer_id).is_some() {
+                let _ = event_tx.try_send(Event::MeshPeersChanged);
+            }
             // Primary-only PeerLost, as for Bye — a secondary peer revoking us
             // tears down only its own link (FluxMesh 2C-b).
             if transport.cached_peer_id().await == Some(peer_id) {
@@ -3125,6 +3178,24 @@ async fn dispatch_inbound_frame(
             // Handshake frames are driven by the handshake task, not here.
         }
         Msg::Hello(h) => {
+            // FluxMesh Phase 3: record every peer's name/platform in the mesh
+            // meta map (drives the State `peers` list), republishing on change.
+            {
+                let mut meta = peer_meta.lock().await;
+                let e = meta.entry(peer_id).or_insert_with(PeerMeta::new);
+                let mut changed = false;
+                if e.name != h.name {
+                    e.name.clone_from(&h.name);
+                    changed = true;
+                }
+                if !h.platform.is_empty() && e.platform != h.platform {
+                    e.platform.clone_from(&h.platform);
+                    changed = true;
+                }
+                if changed {
+                    let _ = event_tx.try_send(Event::MeshPeersChanged);
+                }
+            }
             // peer_id is whoever's session decrypted this Hello — always the
             // real id, no all-zero sentinel that would bypass the FSM
             // peer-mismatch check. FluxMesh 2C-b: only the primary peer's
@@ -3183,6 +3254,60 @@ type InflightMap = Arc<Mutex<HashMap<[u8; 32], Inflight>>>;
 /// once and never loops. Independent of the per-`App` content-hash
 /// `DedupRing` (which guards the OS-clipboard *apply*).
 type MeshSeen = Arc<Mutex<SeenSet>>;
+
+/// FluxMesh Phase 3: per-peer UI metadata (name/platform/battery) captured
+/// from EVERY linked peer's Hello/Battery — including the secondaries the
+/// single-peer State projection ignores. The `State.peers` list is rebuilt at
+/// each `EmitState` by joining this with the live session set
+/// (`linked_peer_ids`), so an entry here that lost its session never shows.
+#[derive(Debug, Clone)]
+struct PeerMeta {
+    name: String,
+    platform: String,
+    battery: u8,
+    charging: bool,
+}
+
+impl PeerMeta {
+    /// Battery defaults to 100 (not 0) so a peer seen via Hello before its
+    /// first `BatteryStatus` doesn't render as Critical.
+    fn new() -> Self {
+        Self {
+            name: String::new(),
+            platform: String::new(),
+            battery: 100,
+            charging: false,
+        }
+    }
+}
+
+type PeerMetaMap = Arc<Mutex<BTreeMap<[u8; 32], PeerMeta>>>;
+
+/// Build the `State.peers` list from the live session set joined with the
+/// captured per-peer metadata. Only peers with a live session appear, so a
+/// torn-down link never lingers as a ghost. `primary` flags the peer the
+/// single-peer `State.peer_*` fields project.
+async fn build_peers(
+    transport: &Transport,
+    peer_meta: &PeerMetaMap,
+    primary: Option<[u8; 32]>,
+) -> Vec<PeerInfo> {
+    let ids = transport.linked_peer_ids().await;
+    let meta = peer_meta.lock().await;
+    ids.into_iter()
+        .map(|id| {
+            let m = meta.get(&id);
+            PeerInfo {
+                peer_id: id,
+                name: m.map(|m| m.name.clone()).unwrap_or_default(),
+                platform: m.map(|m| m.platform.clone()).unwrap_or_default(),
+                battery: m.map_or(100, |m| m.battery),
+                charging: m.is_some_and(|m| m.charging),
+                primary: Some(id) == primary,
+            }
+        })
+        .collect()
+}
 
 /// Wait this long for an ack before re-sending an inflight item.
 const RETRANSMIT_INTERVAL: Duration = Duration::from_secs(2);
@@ -3801,6 +3926,7 @@ mod tests {
             &inflight,
             &pending_pairs,
             &Arc::new(Mutex::new(HashMap::new())),
+            &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
         )
         .await;
@@ -3858,6 +3984,7 @@ mod tests {
             &inflight,
             &pending_pairs,
             &trusted,
+            &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
         )
         .await;
