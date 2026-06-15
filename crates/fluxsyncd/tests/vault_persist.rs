@@ -8,6 +8,7 @@
 
 #![cfg(unix)]
 
+use fluxsync_core::{FirewallPolicy, Rule};
 use fluxsync_crypto::Identity;
 use fluxsyncd::{
     cmd::{CmdData, CmdOp, CmdRequest, CmdResponse},
@@ -148,6 +149,83 @@ async fn history_survives_restart() {
     assert!(
         wait_until(Duration::from_secs(5), || async { history_has(&ipc, "hello-vault", 3).await }).await,
         "history was not restored from the vault after restart"
+    );
+
+    sd2.cancel();
+    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+}
+
+/// Read `(enabled, text_rule)` of the firewall from the daemon's State.
+async fn firewall_of(ipc: &Path, id: u64) -> Option<(bool, Rule)> {
+    let r = ipc_send_recv(ipc, CmdRequest { id, op: CmdOp::Status }).await;
+    match r.data {
+        Some(CmdData::State(s)) => Some((s.firewall.enabled, s.firewall.text)),
+        _ => None,
+    }
+}
+
+/// FluxFirewall slice 5: a `SetFirewall` must be written to `firewall.json` and
+/// rehydrated on the next boot, so the policy is not silently lost on restart.
+#[tokio::test]
+async fn firewall_policy_survives_restart() {
+    let id = Identity::generate();
+    let port = pick_free_udp_port().await;
+    let dir = tempdir().unwrap();
+    let keystore = dir.path().join("ks");
+    std::fs::create_dir(&keystore).unwrap();
+    let ipc = keystore.join("d.sock");
+
+    // ── v1: enable the firewall with text = Never ──
+    let sd1 = CancellationToken::new();
+    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "fw-d"), sd1.clone()));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+
+    let policy = FirewallPolicy {
+        enabled: true,
+        text: Rule::Deny,
+        ..FirewallPolicy::default()
+    };
+    let r = ipc_send_recv(
+        &ipc,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::SetFirewall { policy },
+        },
+    )
+    .await;
+    assert!(r.ok, "set-firewall failed: {r:?}");
+
+    let fw_file = keystore.join("firewall.json");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let f = fw_file.clone();
+            async move { f.exists() }
+        })
+        .await,
+        "firewall.json was never written"
+    );
+    assert_eq!(
+        firewall_of(&ipc, 2).await,
+        Some((true, Rule::Deny)),
+        "policy not reflected in v1 State"
+    );
+
+    sd1.cancel();
+    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+
+    // ── v2: same keystore → policy is rehydrated from disk ──
+    let port2 = pick_free_udp_port().await;
+    let sd2 = CancellationToken::new();
+    let h2 = tokio::spawn(run(cfg_for(&id, port2, &keystore, &ipc, "fw-d-v2"), sd2.clone()));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let ipc = ipc.clone();
+            async move { firewall_of(&ipc, 3).await == Some((true, Rule::Deny)) }
+        })
+        .await,
+        "firewall policy was not restored after restart"
     );
 
     sd2.cancel();

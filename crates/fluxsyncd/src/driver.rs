@@ -152,6 +152,14 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         firewall,
     } = cfg;
 
+    // Chantier A: the on-disk firewall policy is authoritative when a keystore
+    // is present, so a SetFirewall survives restarts. With no keystore (tests),
+    // keep whatever the caller injected.
+    let firewall = match keystore_dir.as_ref() {
+        Some(dir) => crate::keystore::load_firewall(dir),
+        None => firewall,
+    };
+
     // ── App + channels ────────────────────────────────────────────
     let mut app = App::new_with_device(
         CoreConfig {
@@ -1150,6 +1158,13 @@ async fn handle_driver_cmd(
         CmdOp::SetFirewall { policy } => {
             tracing::info!(enabled = policy.enabled, "IPC: set-firewall");
             app.set_firewall(policy);
+            // Persist so the policy survives a daemon restart (best-effort: a
+            // write failure logs but never fails the command).
+            if let Some(dir) = keystore_dir {
+                if let Err(e) = crate::keystore::save_firewall(dir, app.firewall()) {
+                    tracing::warn!(error = %e, "failed to persist firewall policy");
+                }
+            }
             // Push the updated policy to every state subscriber.
             dispatch(
                 vec![Action::EmitState],

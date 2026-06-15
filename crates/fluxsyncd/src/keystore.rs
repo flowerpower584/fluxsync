@@ -25,6 +25,7 @@
 //! file on Android uses the same atomic write.
 
 use anyhow::{anyhow, Context, Result};
+use fluxsync_core::FirewallPolicy;
 use fluxsync_crypto::Identity;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -32,6 +33,7 @@ use std::path::Path;
 
 const IDENTITY_FILE: &str = "identity.bin";
 const PEERS_FILE: &str = "peers.json";
+const FIREWALL_FILE: &str = "firewall.json";
 
 /// Service name used for the keychain entry. Keep stable: changing it
 /// after the first release would orphan every existing user's identity.
@@ -413,11 +415,64 @@ pub fn upsert_peer(peers: &mut Vec<StoredPeer>, new: StoredPeer) {
     peers.push(new);
 }
 
+/// Load the persisted clipboard firewall policy (chantier A). Returns the
+/// disabled default when the file is missing, empty, or unparseable — a
+/// corrupt policy must never wedge boot, and "off" is the safe fallback.
+#[must_use]
+pub fn load_firewall(dir: &Path) -> FirewallPolicy {
+    let path = dir.join(FIREWALL_FILE);
+    let Ok(s) = fs::read_to_string(&path) else {
+        return FirewallPolicy::default();
+    };
+    serde_json::from_str(&s).unwrap_or_default()
+}
+
+/// Persist the clipboard firewall policy. Atomic via `*.tmp` + fsync +
+/// rename, same durability guarantee as `save_peers`. Not a secret (rules,
+/// not keys), but written 0o600 for consistency with the other state files.
+pub fn save_firewall(dir: &Path, policy: &FirewallPolicy) -> Result<()> {
+    use std::io::Write;
+
+    ensure_dir(dir)?;
+    let path = dir.join(FIREWALL_FILE);
+    let s = serde_json::to_string_pretty(policy)?;
+    let tmp = path.with_extension("json.tmp");
+    {
+        #[cfg(unix)]
+        let opts = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = fs::OpenOptions::new();
+            o.create(true).write(true).truncate(true).mode(0o600);
+            o
+        };
+        #[cfg(not(unix))]
+        let opts = {
+            let mut o = fs::OpenOptions::new();
+            o.create(true).write(true).truncate(true);
+            o
+        };
+        let mut f = opts
+            .open(&tmp)
+            .with_context(|| format!("create {}", tmp.display()))?;
+        f.write_all(s.as_bytes())
+            .with_context(|| format!("write {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
+    }
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{load_peers, save_peers, upsert_peer, StoredPeer, PEERS_FILE};
+    use super::{
+        load_firewall, load_peers, save_firewall, save_peers, upsert_peer, StoredPeer,
+        FIREWALL_FILE, PEERS_FILE,
+    };
     #[cfg(unix)]
     use super::{read_legacy_identity, write_secret_atomic, IDENTITY_FILE};
+    use fluxsync_core::{FirewallPolicy, Rule};
 
     fn peer(name: &str) -> StoredPeer {
         StoredPeer {
@@ -446,6 +501,36 @@ mod tests {
 
         let tmp = dir.path().join(PEERS_FILE).with_extension("json.tmp");
         assert!(!tmp.exists(), "the .tmp file must not survive the rename");
+    }
+
+    /// Chantier A: the firewall policy round-trips through disk and leaves no
+    /// stale `*.tmp`; a missing file yields the disabled default.
+    #[test]
+    fn firewall_save_load_round_trips() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        // Missing file → disabled default.
+        assert_eq!(load_firewall(dir.path()), FirewallPolicy::default());
+
+        let policy = FirewallPolicy {
+            enabled: true,
+            text: Rule::Deny,
+            image: Rule::Ask,
+            ..FirewallPolicy::default()
+        };
+        save_firewall(dir.path(), &policy).expect("save_firewall must succeed");
+        assert_eq!(load_firewall(dir.path()), policy);
+
+        let tmp = dir.path().join(FIREWALL_FILE).with_extension("json.tmp");
+        assert!(!tmp.exists(), "the .tmp file must not survive the rename");
+    }
+
+    /// A corrupt firewall.json must fall back to the safe default, never panic.
+    #[test]
+    fn firewall_corrupt_file_falls_back_to_default() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join(FIREWALL_FILE), b"{ not json").unwrap();
+        assert_eq!(load_firewall(dir.path()), FirewallPolicy::default());
     }
 
     /// FS-029: `upsert_peer` must dedup by `peer_id_hex` (last-write-wins)
