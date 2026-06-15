@@ -1400,13 +1400,29 @@ async fn handle_driver_cmd(
                     );
                 }
             }
-            // If the revoked peer is the active session, drop *its*
-            // session. `Event::PeerLost` walks Linked → Discovering
-            // via `Action::CloseSession`, which (unlike `DropPeer`)
-            // touches only the live session, not the trust store.
+            // FluxMesh robustness slice 4: per-peer unpair must work for a
+            // SECONDARY too. Signal the target so it drops us from its own
+            // trust + tears down, then drop our side. `drop_session_for` keys
+            // by peer, so a revoked secondary no longer stays linked and
+            // syncing — the old code only tore down the primary, leaving a
+            // revoked secondary live. Finally delist it from the mesh.
+            if transport.has_session_for(arr).await {
+                if let Ok(b) = fluxsync_proto::encode(&Frame {
+                    version: PROTOCOL_VERSION,
+                    msg: Msg::Revoke,
+                }) {
+                    let _ = transport.send_encrypted_to(arr, &b).await;
+                }
+            }
+            transport.drop_session_for(arr).await;
+            if peer_meta.lock().await.remove(&arr).is_some() {
+                let _ = event_tx.try_send(Event::MeshPeersChanged);
+            }
+            // If the revoked peer was the primary, rebind State: fail over to a
+            // live secondary if one exists, else walk Linked → Discovering
+            // (CloseSession touches only the session, not the trust store).
             let active = app.snapshot().peer_id;
-            if active == arr {
-                transport.drop_session().await;
+            if active == arr && !try_primary_failover(transport, event_tx, peer_meta).await {
                 let actions = app.handle(Event::PeerLost, &**wall);
                 dispatch(
                     actions,

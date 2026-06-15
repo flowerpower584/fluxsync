@@ -423,6 +423,127 @@ async fn primary_failover_promotes_secondary_when_primary_leaves() {
     );
 }
 
+/// FluxMesh robustness slice 4: B revokes its SECONDARY peer C (per-peer
+/// unpair). C's session must tear down on both sides while B's PRIMARY link to
+/// A is left completely untouched — the old Revoke only dropped a session when
+/// the target was the primary, so a revoked secondary kept syncing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn revoke_secondary_drops_only_that_peer() {
+    let _ = tracing_subscriber::fmt::try_init();
+    install_panic_hook();
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let id_c = Identity::generate();
+    let (pid_a, _pid_b, pid_c) = (id_a.peer_id(), id_b.peer_id(), id_c.peer_id());
+    let (sess_a_b, sess_b_a) = pair_for_test(&id_a, &id_b).expect("pair a-b");
+    let (sess_b_c, sess_c_b) = pair_for_test(&id_b, &id_c).expect("pair b-c");
+
+    let (port_a, port_b, port_c) = (
+        pick_free_udp_port().await,
+        pick_free_udp_port().await,
+        pick_free_udp_port().await,
+    );
+    let addr_a: SocketAddr = format!("127.0.0.1:{port_a}").parse().unwrap();
+    let addr_b: SocketAddr = format!("127.0.0.1:{port_b}").parse().unwrap();
+    let addr_c: SocketAddr = format!("127.0.0.1:{port_c}").parse().unwrap();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ipc_a = dir.path().join("a.sock");
+    let ipc_b = dir.path().join("b.sock");
+    let ipc_c = dir.path().join("c.sock");
+
+    let mut cfg_a = base_cfg(id_a, port_a, ipc_a.clone(), "node-a");
+    cfg_a.test_pair = Some(TestPair {
+        session: sess_a_b,
+        peer_addr: addr_b,
+        peer_name: "node-b".into(),
+        peer_id: id_b.peer_id(),
+    });
+    let mut cfg_c = base_cfg(id_c, port_c, ipc_c.clone(), "node-c");
+    cfg_c.test_pair = Some(TestPair {
+        session: sess_c_b,
+        peer_addr: addr_b,
+        peer_name: "node-b".into(),
+        peer_id: id_b.peer_id(),
+    });
+    let mut cfg_b = base_cfg(id_b, port_b, ipc_b.clone(), "node-b");
+    cfg_b.test_pair = Some(TestPair {
+        session: sess_b_a,
+        peer_addr: addr_a,
+        peer_name: "node-a".into(),
+        peer_id: pid_a,
+    });
+    cfg_b.test_pairs = vec![TestPair {
+        session: sess_b_c,
+        peer_addr: addr_c,
+        peer_name: "node-c".into(),
+        peer_id: pid_c,
+    }];
+
+    let sd_a = CancellationToken::new();
+    let sd_b = CancellationToken::new();
+    let sd_c = CancellationToken::new();
+    let (ca, cb, cc) = (sd_a.clone(), sd_b.clone(), sd_c.clone());
+    let h_a = tokio::spawn(async move { run(cfg_a, ca).await });
+    let h_b = tokio::spawn(async move { run(cfg_b, cb).await });
+    let h_c = tokio::spawn(async move { run(cfg_c, cc).await });
+
+    let up = wait_until(Duration::from_secs(2), || async {
+        peer_name(&ipc_b).await.as_deref() == Some("node-a")
+            && mesh_peers(&ipc_b).await.0 == 2
+            && mesh_peers(&ipc_c).await.0 == 1
+    })
+    .await;
+    assert!(up, "B did not reach A-primary / 2-peer steady state");
+
+    // B revokes ONLY its secondary C.
+    let pid_c_hex: String = pid_c.iter().map(|b| format!("{b:02x}")).collect();
+    let revoke = ipc_send_recv(
+        &ipc_b,
+        CmdRequest {
+            id: 88,
+            op: CmdOp::Revoke { peer_id: pid_c_hex },
+        },
+    )
+    .await;
+    assert!(revoke.ok, "revoke of secondary failed: {revoke:?}");
+
+    // B drops C from the mesh but keeps A as the (still primary) link.
+    let dropped = wait_until(Duration::from_secs(3), || async {
+        mesh_peers(&ipc_b).await == (1, 1) && peer_name(&ipc_b).await.as_deref() == Some("node-a")
+    })
+    .await;
+    assert!(
+        dropped,
+        "B did not drop only C (peers={:?}, primary={:?})",
+        mesh_peers(&ipc_b).await,
+        peer_name(&ipc_b).await
+    );
+
+    // C received the Revoke and tore its side down (no live peers left).
+    let c_down = wait_until(Duration::from_secs(3), || async {
+        mesh_peers(&ipc_c).await == (0, 0)
+    })
+    .await;
+    assert!(c_down, "C did not tear down its session after being revoked");
+
+    sd_a.cancel();
+    sd_b.cancel();
+    sd_c.cancel();
+    for (h, who) in [(h_a, "A"), (h_b, "B"), (h_c, "C")] {
+        timeout(Duration::from_millis(500), h)
+            .await
+            .unwrap_or_else(|_| panic!("daemon {who} did not shut down in 500ms"))
+            .unwrap_or_else(|_| panic!("daemon {who} task panicked"))
+            .unwrap_or_else(|_| panic!("daemon {who} run() returned Err"));
+    }
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a panic was captured by the test panic hook"
+    );
+}
+
 /// Star push: B (centre) pushes; both leaves A and C receive it directly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn three_node_center_push_reaches_both_leaves() {
