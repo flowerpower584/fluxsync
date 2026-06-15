@@ -126,12 +126,14 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
                     charging = d.charging,
                     threshold = s.threshold,
                     // Only the primary link carries metrics + the global
-                    // Disable/Unpair actions (the daemon has no per-peer
-                    // unpair yet — secondary peers are info-only).
+                    // Disable/Unpair actions. Secondaries get a per-peer
+                    // unpair that revokes just that peer (daemon `revoke`).
                     metrics = if (d.primary) s.metrics else null,
                     primary = d.primary,
+                    peerId = d.peerId,
                     onDisable = { scope.launch { vm.toggle(false) } },
-                    onUnpair = { scope.launch { vm.unpair() } }
+                    onUnpair = { scope.launch { vm.unpair() } },
+                    onRevoke = { scope.launch { vm.revoke(d.peerId) } }
                 )
             }
         }
@@ -186,8 +188,10 @@ private fun DeviceItem(
     threshold: Int,
     metrics: sn.kaolack.fluxsync.vm.ConnectionMetricsView?,
     primary: Boolean,
+    peerId: String,
     onDisable: () -> Unit,
     onUnpair: () -> Unit,
+    onRevoke: () -> Unit,
 ) {
     val shape = RoundedCornerShape(FsRadius.Item)
     Column(
@@ -255,6 +259,24 @@ private fun DeviceItem(
                 ) {
                     Text("Unpair", color = FsCrit, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
                 }
+            }
+        } else if (peerId.isNotEmpty()) {
+            // Secondary mesh peer: a single per-peer unpair that revokes
+            // just this device (the daemon `revoke` op), leaving the
+            // primary and any other peers linked.
+            Spacer(Modifier.height(12.dp))
+            androidx.compose.material3.HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
+            Spacer(Modifier.height(12.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
+                    .clickable { onRevoke() }
+                    .padding(vertical = 7.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Unpair", color = FsCrit, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
             }
         }
     }

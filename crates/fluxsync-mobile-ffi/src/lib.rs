@@ -474,6 +474,21 @@ impl FluxsyncHandle {
             .map_err(|e| FluxError::Ipc(e.to_string()))
     }
 
+    /// FluxMesh: revoke one specific peer by hex peer-id (drops its
+    /// session + removes it from the trust store), leaving every other
+    /// paired device linked. Drives the per-secondary "Unpair" button in
+    /// the mesh peer list. `unpair` (above) tears down only the active
+    /// primary; this is the surgical single-peer version.
+    pub fn revoke(&self, peer_id: String) -> Result<(), FluxError> {
+        self.runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({"id": 1, "op": "revoke", "peer_id": peer_id}),
+            ))
+            .map(|_| ())
+            .map_err(|e| FluxError::Ipc(e.to_string()))
+    }
+
     /// Manual pair fallback. Pass `addr = ""` to skip the immediate
     /// handshake (mDNS will pick the peer up later); pass `IP:PORT` to
     /// kick the handshake right away.

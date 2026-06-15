@@ -658,6 +658,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_text(
     ): Short
+    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_revoke(
+    ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_battery_threshold(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_charge_override(
@@ -717,6 +719,8 @@ internal object UniffiLib {
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_item(`ptr`: Long,`kind`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_text(`ptr`: Long,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_revoke(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_battery_threshold(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -880,6 +884,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_text() != 51988.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_revoke() != 532.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_battery_threshold() != 65243.toShort()) {
@@ -1405,6 +1412,15 @@ public interface FluxsyncHandleInterface {
     fun `pushText`(`text`: kotlin.String)
     
     /**
+     * FluxMesh: revoke one specific peer by hex peer-id (drops its
+     * session + removes it from the trust store), leaving every other
+     * paired device linked. Drives the per-secondary "Unpair" button in
+     * the mesh peer list. `unpair` (above) tears down only the active
+     * primary; this is the surgical single-peer version.
+     */
+    fun `revoke`(`peerId`: kotlin.String)
+    
+    /**
      * Pause-below-X% battery threshold (5..=50).
      */
     fun `setBatteryThreshold`(`value`: kotlin.UByte)
@@ -1736,6 +1752,26 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
     UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_text(
         it,
         FfiConverterString.lower(`text`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * FluxMesh: revoke one specific peer by hex peer-id (drops its
+     * session + removes it from the trust store), leaving every other
+     * paired device linked. Drives the per-secondary "Unpair" button in
+     * the mesh peer list. `unpair` (above) tears down only the active
+     * primary; this is the surgical single-peer version.
+     */
+    @Throws(FluxException::class)override fun `revoke`(`peerId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_revoke(
+        it,
+        FfiConverterString.lower(`peerId`),_status)
 }
     }
     

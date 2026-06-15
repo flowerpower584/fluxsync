@@ -210,6 +210,20 @@ button:focus-visible { outline: 2px solid var(--fs-ok); outline-offset: 2px; }
 .unpair-btn.armed { background: var(--fs-crit-soft); color: var(--fs-crit); border-color: var(--fs-crit); }
 .unpair-btn:disabled { opacity: .6; cursor: default; }
 
+/* Per-secondary unpair in the mesh peer list — compact inline variant of
+   .unpair-btn (no full-width, sits next to the battery readout). */
+.mesh-unpair {
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--fs-border);
+  border-radius: 7px;
+  color: var(--fs-subtle);
+  font-family: var(--fs-ui); font-size: 10px; font-weight: 600;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.mesh-unpair:hover { color: var(--fs-crit); border-color: rgba(224,99,94,.4); background: var(--fs-crit-soft); }
+
 /* ── Historique ────────────────────────────────────────────────── */
 .history-section { padding: 0 8px 4px; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .section-header { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px 7px; }

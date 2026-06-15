@@ -105,6 +105,10 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
 
     fun unpair() = ffi("Unpair") { it.unpair() }
 
+    /** FluxMesh: revoke one specific peer by hex peer-id, leaving every
+     *  other paired device linked. Drives the per-secondary unpair button. */
+    fun revoke(peerId: String) = ffi("Unpair") { it.revoke(peerId) }
+
     suspend fun pairShow(): String? = withContext(Dispatchers.IO) {
         try {
             var retry = 0

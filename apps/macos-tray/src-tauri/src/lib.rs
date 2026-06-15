@@ -92,6 +92,18 @@ async fn fluxsync_unpair() -> Result<(), String> {
         .map(|_| ())
 }
 
+/// FluxMesh: revoke one specific peer by hex peer-id (drops its session +
+/// removes it from the trust store), leaving every other paired device
+/// linked. Drives the daemon `revoke` op behind the per-secondary unpair
+/// button in the mesh peer list. `unpair` (above) still tears down the
+/// active primary; this is the surgical single-peer version.
+#[tauri::command]
+async fn fluxsync_revoke_peer(peer_id: String) -> Result<(), String> {
+    ipc::one_shot(json!({"id": 1, "op": "revoke", "peer_id": peer_id}))
+        .await
+        .map(|_| ())
+}
+
 #[tauri::command]
 fn fluxsync_open_url(url: String) {
     // Defense-in-depth (H-TRAY-01): only ever hand http(s) URLs to the OS
@@ -269,6 +281,7 @@ pub fn run() {
             fluxsync_get_launch_at_login,
             fluxsync_set_show_in_dock,
             fluxsync_unpair,
+            fluxsync_revoke_peer,
             fluxsync_open_url,
         ])
         .setup(|app| {

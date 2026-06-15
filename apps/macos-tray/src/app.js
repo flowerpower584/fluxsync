@@ -199,7 +199,7 @@ function renderMesh(s) {
 
   for (const p of peers) {
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;justify-content:space-between;font-size:12px;';
+    row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;';
 
     const left = document.createElement('span');
     const name = (p.name && p.name.trim()) ? p.name : '(unknown)';
@@ -207,12 +207,47 @@ function renderMesh(s) {
     left.textContent = `${p.primary ? '★ ' : ''}${name}${label ? ' · ' + label : ''}`;
 
     const right = document.createElement('span');
-    right.style.color = 'var(--fs-muted)';
-    right.textContent = `${p.battery ?? 100}%${p.charging ? '⚡' : ''}`;
+    right.style.cssText = 'display:flex;align-items:center;gap:8px;color:var(--fs-muted);';
+
+    const batt = document.createElement('span');
+    batt.textContent = `${p.battery ?? 100}%${p.charging ? '⚡' : ''}`;
+    right.appendChild(batt);
+
+    // Secondaries get a per-peer unpair button (the primary uses the main
+    // card's Unpair). The daemon `revoke` op drops just this peer, leaving
+    // every other paired device linked.
+    if (!p.primary) {
+      const hex = peerIdHex(p.peer_id);
+      if (hex) {
+        const btn = document.createElement('button');
+        btn.className = 'mesh-unpair';
+        btn.textContent = 'Unpair';
+        btn.addEventListener('click', () => unpairPeer(hex, name));
+        right.appendChild(btn);
+      }
+    }
 
     row.appendChild(left);
     row.appendChild(right);
     box.appendChild(row);
+  }
+}
+
+// peer_id rides the State DTO as a 32-byte array (serde `[u8;32]`); the
+// daemon `revoke` op wants the full hex string. Returns '' if malformed.
+function peerIdHex(id) {
+  if (!Array.isArray(id) || id.length !== 32) return '';
+  return id.map((b) => (b & 0xff).toString(16).padStart(2, '0')).join('');
+}
+
+async function unpairPeer(peerHex, name) {
+  if (!confirm(`Unpair ${name || 'this device'}? It will be disconnected and removed.`)) return;
+  try {
+    await invoke('fluxsync_revoke_peer', { peerId: peerHex });
+    showToast('Device unpaired.');
+    await refreshState();
+  } catch (err) {
+    showToast(`Unpair failed: ${err}`);
   }
 }
 
