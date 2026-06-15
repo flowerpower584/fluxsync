@@ -67,6 +67,12 @@ pub enum CmdOp {
     SetChargeOverride {
         value: bool,
     },
+    /// FluxVault: pin/unpin a history item (by hex content hash) as a
+    /// favorite, exempting it from the vault's TTL + disk cap.
+    SetFavorite {
+        hash: String,
+        favorite: bool,
+    },
     Revoke {
         peer_id: String,
     },

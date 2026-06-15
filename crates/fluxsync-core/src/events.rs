@@ -80,6 +80,14 @@ pub enum Event {
         name: String,
         platform: String,
     },
+    /// FluxVault: pin/unpin a history item (by its hex content hash) as a
+    /// favorite. Favorites are exempt from the vault's TTL and disk cap, so a
+    /// pinned item is never aged or capped out. Mutates only the matching
+    /// `HistoryItem.favorite` flag(s) and re-emits State.
+    SetFavorite {
+        hash: String,
+        favorite: bool,
+    },
 }
 
 /// Side-effect commands the daemon must execute. The FSM never performs

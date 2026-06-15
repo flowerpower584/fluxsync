@@ -1125,6 +1125,26 @@ async fn handle_driver_cmd(
             let _ = event_tx.try_send(Event::PeerLost);
             CmdResponse::ok(req_id, Some(CmdData::Pong))
         }
+        CmdOp::SetFavorite { hash, favorite } => {
+            tracing::info!(%hash, favorite, "IPC: set-favorite");
+            let actions = app.handle(Event::SetFavorite { hash, favorite }, &**wall);
+            dispatch(
+                actions,
+                app,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+                inflight,
+                peer_meta,
+            )
+            .await;
+            CmdResponse::ok(req_id, None)
+        }
         CmdOp::Push { text } => {
             use fluxsync_core::Clock;
             tracing::info!(len = text.len(), "IPC: push requested from local");
@@ -2360,24 +2380,33 @@ struct VaultCtx {
 
 impl VaultCtx {
     /// Map the current in-memory history (newest-first) to vault entries,
-    /// carrying `created_ms`/`favorite` forward for items already persisted
-    /// and stamping freshly-seen items with `now`.
+    /// carrying each entry's original `created_ms` forward (matched on the
+    /// stable hash+lamport key, so toggling `favorite` doesn't reset its TTL)
+    /// and stamping freshly-seen items with `now`. Favorited entries that
+    /// scrolled out of the in-memory window are re-appended so they survive in
+    /// the vault (favorites are exempt from the cap + TTL).
     fn rebuild(&self, history: &[HistoryItem], now: u64) -> Vec<VaultEntry> {
-        history
+        let stable = |a: &HistoryItem, b: &HistoryItem| a.hash == b.hash && a.lamport == b.lamport;
+        let mut out: Vec<VaultEntry> = history
             .iter()
-            .map(|item| match self.entries.iter().find(|e| &e.item == item) {
-                Some(prev) => VaultEntry {
+            .map(|item| {
+                let created_ms = self
+                    .entries
+                    .iter()
+                    .find(|e| stable(&e.item, item))
+                    .map_or(now, |prev| prev.created_ms);
+                VaultEntry {
                     item: item.clone(),
-                    created_ms: prev.created_ms,
-                    favorite: prev.favorite,
-                },
-                None => VaultEntry {
-                    item: item.clone(),
-                    created_ms: now,
-                    favorite: false,
-                },
+                    created_ms,
+                }
             })
-            .collect()
+            .collect();
+        for e in &self.entries {
+            if e.item.favorite && !history.iter().any(|h| stable(h, &e.item)) {
+                out.push(e.clone());
+            }
+        }
+        out
     }
 }
 

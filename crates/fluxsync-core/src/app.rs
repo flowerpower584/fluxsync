@@ -306,6 +306,7 @@ impl App {
                         sensitive: *sensitive,
                         lamport: *lamport,
                         hash: hex32(hash),
+                        favorite: false,
                     });
                 }
             }
@@ -346,6 +347,7 @@ impl App {
                         sensitive: *sensitive,
                         lamport: *lamport,
                         hash: hex32(hash),
+                        favorite: false,
                     });
                 }
             }
@@ -402,6 +404,11 @@ impl App {
             }
             Event::SetTrustedPeer { name } => {
                 self.state.trusted_peer_name = Some(name.clone());
+            }
+            Event::SetFavorite { hash, favorite } => {
+                for h in self.state.history.iter_mut().filter(|h| &h.hash == hash) {
+                    h.favorite = *favorite;
+                }
             }
             _ => {}
         }
@@ -461,6 +468,7 @@ impl App {
                 | Event::UntrustedPeerSeen { .. }
                 | Event::GhostTimeout
                 | Event::SetTrustedPeer { .. }
+                | Event::SetFavorite { .. }
                 | Event::FrameReceivedClipboard { .. }
                 | Event::LocalClipboardChange { .. }
         ) && !actions.contains(&Action::EmitState)

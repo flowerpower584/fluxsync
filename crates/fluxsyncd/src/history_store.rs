@@ -46,15 +46,15 @@ pub const DEFAULT_DISK_CAP: usize = 500;
 /// best-effort, never load-fatal).
 const VAULT_VERSION: u32 = 1;
 
-/// One persisted history row: the UI `HistoryItem` plus the metadata the
-/// vault needs that the wire DTO does not carry — an absolute timestamp for
-/// TTL (`HistoryItem.time` is only `"HH:MM"`) and the favorite flag.
+/// One persisted history row: the UI `HistoryItem` plus the one piece of
+/// metadata the wire DTO doesn't carry — an absolute timestamp for TTL
+/// (`HistoryItem.time` is only `"HH:MM"`). The favorite flag lives on the
+/// `HistoryItem` itself so it round-trips to the clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultEntry {
     pub item: HistoryItem,
     /// Wall-clock milliseconds since the epoch at insertion.
     pub created_ms: u64,
-    pub favorite: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -74,7 +74,7 @@ pub fn prune(entries: Vec<VaultEntry>, now_ms: u64, ttl_secs: u64, cap: usize) -
     let mut kept = Vec::with_capacity(entries.len());
     let mut non_fav = 0usize;
     for e in entries {
-        if e.favorite {
+        if e.item.favorite {
             kept.push(e);
             continue;
         }
@@ -216,9 +216,9 @@ mod tests {
                 sensitive: false,
                 lamport: created_ms,
                 hash: "00".repeat(32),
+                favorite,
             },
             created_ms,
-            favorite,
         }
     }
 

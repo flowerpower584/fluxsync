@@ -608,6 +608,7 @@ fn state_history_item_serializes_snake_case() {
         sensitive: false,
         lamport: 0,
         hash: String::new(),
+        favorite: false,
     };
     let j = serde_json::to_value(&item).unwrap();
     assert!(j.get("kind").is_some());

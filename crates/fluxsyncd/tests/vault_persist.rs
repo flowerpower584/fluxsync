@@ -76,6 +76,19 @@ async fn history_has(ipc: &Path, preview: &str, id: u64) -> bool {
     matches!(r.data, Some(CmdData::State(s)) if s.history.iter().any(|h| h.preview == preview))
 }
 
+/// `(hash, favorite)` of the history item with this preview, if present.
+async fn item_of(ipc: &Path, preview: &str, id: u64) -> Option<(String, bool)> {
+    let r = ipc_send_recv(ipc, CmdRequest { id, op: CmdOp::Status }).await;
+    if let Some(CmdData::State(s)) = r.data {
+        s.history
+            .iter()
+            .find(|h| h.preview == preview)
+            .map(|h| (h.hash.clone(), h.favorite))
+    } else {
+        None
+    }
+}
+
 #[tokio::test]
 async fn history_survives_restart() {
     let id = Identity::generate();
@@ -135,6 +148,90 @@ async fn history_survives_restart() {
     assert!(
         wait_until(Duration::from_secs(5), || async { history_has(&ipc, "hello-vault", 3).await }).await,
         "history was not restored from the vault after restart"
+    );
+
+    sd2.cancel();
+    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+}
+
+#[tokio::test]
+async fn favorite_flag_survives_restart() {
+    let id = Identity::generate();
+    let port = pick_free_udp_port().await;
+    let dir = tempdir().unwrap();
+    let keystore = dir.path().join("ks");
+    std::fs::create_dir(&keystore).unwrap();
+    let ipc = keystore.join("d.sock");
+
+    let sd1 = CancellationToken::new();
+    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "fav-d"), sd1.clone()));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+
+    ipc_send_recv(&ipc, CmdRequest { id: 0, op: CmdOp::Toggle { on: true } }).await;
+    ipc_send_recv(
+        &ipc,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Push {
+                text: "pin-me".into(),
+            },
+        },
+    )
+    .await;
+
+    // Wait for the item to land, then read its hash and pin it.
+    assert!(
+        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "pin-me", 2).await }).await,
+        "item never reached history"
+    );
+    let (hash, _) = item_of(&ipc, "pin-me", 3).await.expect("item present");
+
+    let r = ipc_send_recv(
+        &ipc,
+        CmdRequest {
+            id: 3,
+            op: CmdOp::SetFavorite {
+                hash,
+                favorite: true,
+            },
+        },
+    )
+    .await;
+    assert!(r.ok, "set-favorite failed: {r:?}");
+
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let ipc = ipc.clone();
+            async move { matches!(item_of(&ipc, "pin-me", 4).await, Some((_, true))) }
+        })
+        .await,
+        "favorite flag never set in-memory"
+    );
+    let hist_file = keystore.join("history.enc");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let f = hist_file.clone();
+            async move { f.exists() }
+        })
+        .await
+    );
+
+    sd1.cancel();
+    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+
+    // Restart → the favorite flag must come back set.
+    let port2 = pick_free_udp_port().await;
+    let sd2 = CancellationToken::new();
+    let h2 = tokio::spawn(run(cfg_for(&id, port2, &keystore, &ipc, "fav-d-v2"), sd2.clone()));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let ipc = ipc.clone();
+            async move { matches!(item_of(&ipc, "pin-me", 5).await, Some((_, true))) }
+        })
+        .await,
+        "favorite flag was not restored after restart"
     );
 
     sd2.cancel();

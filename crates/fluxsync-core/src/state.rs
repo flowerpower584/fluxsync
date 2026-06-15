@@ -113,6 +113,11 @@ pub struct HistoryItem {
     /// image's raw bytes on demand (`fetch_item`) — the daemon never puts
     /// binary payloads in the state JSON, only this hash + a label.
     pub hash: String,
+    /// FluxVault: pinned by the user. Favorites survive the vault's TTL and
+    /// disk cap. `#[serde(default)]` so older state/vault JSON (pre-favorites)
+    /// and clients that don't send the field still deserialize to `false`.
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
