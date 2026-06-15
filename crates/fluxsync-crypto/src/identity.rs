@@ -80,6 +80,18 @@ impl Identity {
     pub(crate) fn raw_secret(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.secret.to_bytes())
     }
+
+    /// Derive a 32-byte symmetric key bound to this identity for encrypting
+    /// data at rest (FluxVault history). Uses BLAKE3's KDF mode with a caller
+    /// `context` string for domain separation, so distinct stores derive
+    /// distinct keys from the same identity and a leaked at-rest key never
+    /// reveals the X25519 secret (one-way). The raw secret copy is wiped on
+    /// drop; the returned key is `Zeroizing` so callers can't forget either.
+    #[must_use]
+    pub fn derive_at_rest_key(&self, context: &str) -> Zeroizing<[u8; 32]> {
+        let secret = Zeroizing::new(self.secret.to_bytes());
+        Zeroizing::new(blake3::derive_key(context, secret.as_ref()))
+    }
 }
 
 /// Known small-order Curve25519 public keys.

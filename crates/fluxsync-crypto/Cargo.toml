@@ -36,6 +36,10 @@ thiserror = { workspace = true }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # SE-03: constant-time equality for degenerate-key check in `Identity::from_secret_bytes`.
 subtle = { version = "2.5", default-features = false }
+# FluxVault: at-rest AEAD for the persisted clipboard history. XChaCha20-Poly1305
+# (192-bit nonce) so a fresh random nonce per file rewrite has negligible
+# collision risk without a counter. Pure Rust — safe for the Android cross-build.
+chacha20poly1305 = "0.10"
 
 # blake3 split per target: android cross-build avoids the C/NEON build
 # script, which would require an Android NDK toolchain just to typecheck.
@@ -47,5 +51,4 @@ blake3 = { version = "1.5", default-features = false, features = ["std", "pure"]
 blake3 = "1.5"
 
 [dev-dependencies]
-chacha20poly1305 = "0.10"
 hex-literal = "0.4"

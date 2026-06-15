@@ -13,6 +13,7 @@
 //!
 //! See `docs/SECURITY.md` for the threat model this crate defends against.
 
+pub mod at_rest;
 pub mod error;
 mod fingerprint;
 mod handshake;
