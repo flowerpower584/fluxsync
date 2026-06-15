@@ -436,6 +436,22 @@ impl Transport {
         out
     }
 
+    /// FluxMesh robustness: every *secondary* peer (in `extra`) that has a
+    /// live session, paired with its last-rx epoch-ms. The heartbeat loop
+    /// pings and ghost-times-out each one independently of the primary —
+    /// `last_rx`/`set_last_rx` only ever touch the primary `conn`, so a
+    /// vanished secondary would otherwise leave a stale `extra` session
+    /// forever.
+    pub async fn secondary_liveness(&self) -> Vec<([u8; 32], u64)> {
+        let mut out = Vec::new();
+        for (id, c) in self.extra.lock().await.iter() {
+            if c.session.lock().await.is_some() {
+                out.push((*id, c.last_rx_ms.load(Ordering::Relaxed)));
+            }
+        }
+        out
+    }
+
     /// Receive one datagram and dispatch by type byte.
     pub async fn recv(&self, buf: &mut [u8]) -> Result<RecvFrame> {
         let (n, from) = self.socket.recv_from(buf).await?;
@@ -595,5 +611,40 @@ mod tests {
             .await
             .expect("install_session must wake an idle clipboard watcher")
             .unwrap();
+    }
+
+    /// FluxMesh robustness slice 1: a second peer lands in `extra` and is the
+    /// ONLY peer `secondary_liveness` reports (the primary is monitored via
+    /// `last_rx`). Dropping that peer's session clears it from both views,
+    /// which is exactly what lets the heartbeat loop ghost-time-out a silent
+    /// secondary without disturbing the primary.
+    #[tokio::test]
+    async fn secondary_liveness_tracks_extra_peers() {
+        use super::Transport;
+        use fluxsync_crypto::{test_util::pair_for_test, Identity};
+        use std::sync::Arc;
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.unwrap();
+        let transport = Arc::new(transport);
+
+        let me = Identity::generate();
+        let (sess1, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (sess2, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (id1, id2) = ([1u8; 32], [2u8; 32]);
+
+        // First install takes the primary slot; the second peer, arriving with
+        // the primary still live, is routed to `extra`.
+        transport.install_session(id1, sess1).await;
+        transport.install_session(id2, sess2).await;
+
+        assert_eq!(transport.linked_peer_ids().await, vec![id1, id2]);
+        let secondaries = transport.secondary_liveness().await;
+        assert_eq!(secondaries.len(), 1);
+        assert_eq!(secondaries[0].0, id2);
+
+        // Ghost-timeout path: drop only the secondary.
+        transport.drop_session_for(id2).await;
+        assert_eq!(transport.linked_peer_ids().await, vec![id1]);
+        assert!(transport.secondary_liveness().await.is_empty());
     }
 }

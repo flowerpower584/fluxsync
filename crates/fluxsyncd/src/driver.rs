@@ -2586,32 +2586,41 @@ async fn heartbeat_loop(
 ) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     let mut missed_pings = 0;
+    // FluxMesh robustness slice 1: per-secondary-peer missed-ping counters.
+    // The primary's `missed_pings` lives above; each `extra` peer ghost-times
+    // out on its own schedule so one silent secondary cannot stall another.
+    let mut secondary_missed: std::collections::HashMap<[u8; 32], u32> =
+        std::collections::HashMap::new();
+
+    let ping_bytes = || {
+        let frame = fluxsync_proto::Frame {
+            version: fluxsync_proto::PROTOCOL_VERSION,
+            msg: fluxsync_proto::Msg::Heartbeat(fluxsync_proto::Heartbeat {
+                lamport: 0,
+                rtt_hint: None,
+            }),
+        };
+        fluxsync_proto::encode(&frame).ok()
+    };
 
     loop {
         tokio::select! {
             biased;
             () = shutdown.cancelled() => return Ok(()),
             _ = interval.tick() => {
+                let now = crate::transport::now_ms();
                 let session_active = transport.has_session().await;
 
                 if session_active {
-                    // 1. Send Heartbeat (Ping)
-                    let frame = fluxsync_proto::Frame {
-                        version: fluxsync_proto::PROTOCOL_VERSION,
-                        msg: fluxsync_proto::Msg::Heartbeat(fluxsync_proto::Heartbeat {
-                            lamport: 0,
-                            rtt_hint: None,
-                        }),
-                    };
-                    if let Ok(bytes) = fluxsync_proto::encode(&frame) {
+                    // 1. Send Heartbeat (Ping) to the primary peer.
+                    if let Some(bytes) = ping_bytes() {
                         tracing::debug!("Heartbeat: sending ping to peer");
                         metrics.lock().await.on_heartbeat_sent();
                         let _ = transport.send_encrypted(&bytes).await;
                     }
 
-                    // 2. Check for receive timeout (10 seconds)
+                    // 2. Check the primary's receive timeout.
                     let last_rx = transport.last_rx();
-                    let now = crate::transport::now_ms();
 
                     if now.saturating_sub(last_rx) > 5_000 {
                         missed_pings += 1;
@@ -2633,6 +2642,36 @@ async fn heartbeat_loop(
                          // We don't initiate here because we lack the peer's static_pub,
                          // but we can log that we are waiting for that specific IP.
                          // In a future PR, we could cache the static_pub too.
+                    }
+                }
+
+                // FluxMesh robustness slice 1: secondary peers run their own
+                // heartbeat + ghost-timeout, independent of the primary (which
+                // may even be down). A silent secondary drops ONLY its own
+                // session — it must NOT drive the single FSM's `PeerLost`; it
+                // just refreshes the mesh peer list via `MeshPeersChanged`.
+                let secondaries = transport.secondary_liveness().await;
+                let live: std::collections::HashSet<[u8; 32]> =
+                    secondaries.iter().map(|(id, _)| *id).collect();
+                secondary_missed.retain(|id, _| live.contains(id));
+                for (peer_id, last_rx) in secondaries {
+                    if let Some(bytes) = ping_bytes() {
+                        let _ = transport.send_encrypted_to(peer_id, &bytes).await;
+                    }
+                    if now.saturating_sub(last_rx) > 5_000 {
+                        let missed = secondary_missed.entry(peer_id).or_insert(0);
+                        *missed += 1;
+                        if *missed >= 6 {
+                            tracing::warn!(
+                                peer = %hex::encode(peer_id),
+                                "Secondary peer timed out (30s). Dropping its session."
+                            );
+                            transport.drop_session_for(peer_id).await;
+                            secondary_missed.remove(&peer_id);
+                            let _ = event_tx.try_send(Event::MeshPeersChanged);
+                        }
+                    } else {
+                        secondary_missed.remove(&peer_id);
                     }
                 }
             }
