@@ -1,4 +1,5 @@
 use crate::error::CoreError;
+use crate::policy::FirewallPolicy;
 use fluxsync_proto::Kind;
 use serde::{Deserialize, Serialize};
 
@@ -148,6 +149,9 @@ pub struct Config {
     pub version: String,
     pub build_id: String,
     pub cipher: String,
+    /// Clipboard firewall (chantier A). Disabled by default, so a daemon
+    /// built without firewall config syncs everything exactly as before.
+    pub firewall: FirewallPolicy,
 }
 
 impl Default for Config {
@@ -158,6 +162,7 @@ impl Default for Config {
             version: String::from(env!("CARGO_PKG_VERSION")),
             build_id: String::from("unknown"),
             cipher: String::from("chacha20-poly1305"),
+            firewall: FirewallPolicy::default(),
         }
     }
 }

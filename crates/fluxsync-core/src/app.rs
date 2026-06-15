@@ -13,7 +13,7 @@ use crate::dedup::{ContentHash, DedupRing, SeenSet};
 use crate::events::{Action, Event, LogEntry};
 use crate::fsm::{transition, Phase};
 use crate::id::{DeviceId, EventId};
-use crate::policy::status_for;
+use crate::policy::{status_for, Decision, Direction, FirewallPolicy};
 use crate::state::{Config, HistoryItem, State};
 use fluxsync_proto::Kind;
 use std::collections::BTreeMap;
@@ -129,6 +129,43 @@ impl App {
     pub fn set_charge_override(&mut self, value: bool) {
         self.config.charge_override = value;
         self.state.charge_override = value;
+    }
+
+    /// Replace the clipboard firewall policy at runtime (driven by an IPC
+    /// command). Takes effect on the next clipboard event.
+    pub fn set_firewall(&mut self, policy: FirewallPolicy) {
+        self.config.firewall = policy;
+    }
+
+    /// Current firewall policy (for the state projection / IPC readback).
+    #[must_use]
+    pub fn firewall(&self) -> &FirewallPolicy {
+        &self.config.firewall
+    }
+
+    /// Clipboard firewall gate (chantier A). Strips the sync action when the
+    /// policy says Never/Ask for this item's content type + direction. `Ask`
+    /// is fail-closed here — the action is dropped, not yet held; the
+    /// pending-confirm queue that turns Ask into a real prompt lands in a
+    /// later slice. The inbound `AckItem` is deliberately KEPT so a blocked
+    /// peer stops retransmitting (same contract as the dedup-suppress path).
+    fn apply_firewall(&self, event: &Event, actions: &mut Vec<Action>) {
+        let (kind, sensitive, dir) = match event {
+            Event::LocalClipboardChange {
+                kind, sensitive, ..
+            } => (*kind, *sensitive, Direction::Outbound),
+            Event::FrameReceivedClipboard {
+                kind, sensitive, ..
+            } => (*kind, *sensitive, Direction::Inbound),
+            _ => return,
+        };
+        if self.config.firewall.decide(kind, sensitive, dir) == Decision::Pass {
+            return;
+        }
+        match dir {
+            Direction::Outbound => actions.retain(|a| !matches!(a, Action::SendItem { .. })),
+            Direction::Inbound => actions.retain(|a| !matches!(a, Action::WriteClipboard { .. })),
+        }
     }
 
     // ── FluxMesh coordinator API (Phase 1 foundation) ───────────────────
@@ -424,6 +461,12 @@ impl App {
 
         // ── Run the pure transition ─────────────────────────────────────
         let (next, mut actions) = transition(self.phase, &event);
+
+        // ── Clipboard firewall gate (chantier A) ────────────────────────
+        // Drop the apply/broadcast action when the policy blocks this item.
+        // No-op while the firewall is disabled (the default) → behaviour
+        // identical to pre-firewall.
+        self.apply_firewall(&event, &mut actions);
 
         // Battery-policy phase override (post-transition)
         // [FIX] Force Halted/Paused even in Discovering/Handshaking if battery is bad.
@@ -1175,6 +1218,142 @@ mod tests {
                 msg: "hello".into()
             })
         );
+    }
+
+    // ── Clipboard firewall gate (chantier A, slice 2) ───────────────────
+    use crate::policy::{FirewallPolicy, Rule};
+
+    /// Drive a fresh app to Linked with both batteries healthy.
+    fn linked() -> App {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Galaxy".into(),
+            },
+            &wall(),
+        );
+        app.handle(Event::HandshakeOk, &wall());
+        app.handle(
+            Event::BatteryChangedPeer {
+                level: 80,
+                charging: false,
+            },
+            &wall(),
+        );
+        app
+    }
+
+    fn local_text(hash: u8) -> Event {
+        Event::LocalClipboardChange {
+            hash: [hash; 32],
+            kind: Kind::Text,
+            payload: b"hello".to_vec(),
+            preview: "hello".into(),
+            sensitive: false,
+            lamport: 1,
+        }
+    }
+
+    /// Enabled firewall with a given text rule; all other kinds Allow,
+    /// sensitive at the default Ask.
+    fn fw_text(text: Rule) -> FirewallPolicy {
+        FirewallPolicy {
+            enabled: true,
+            text,
+            ..FirewallPolicy::default()
+        }
+    }
+
+    #[test]
+    fn firewall_disabled_passes_outbound_send() {
+        let mut app = linked();
+        // Default policy is disabled — SendItem survives, as before.
+        let acts = app.handle(local_text(1), &wall());
+        assert!(acts.iter().any(|a| matches!(a, Action::SendItem { .. })));
+    }
+
+    #[test]
+    fn firewall_deny_outbound_strips_send_item() {
+        let mut app = linked();
+        app.set_firewall(fw_text(Rule::Deny));
+        let acts = app.handle(local_text(2), &wall());
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::SendItem { .. })),
+            "Never-text must block the broadcast: {acts:?}"
+        );
+    }
+
+    #[test]
+    fn firewall_ask_outbound_is_failclosed_for_now() {
+        // Until the pending-confirm queue exists, Ask drops the send (fail-closed).
+        let mut app = linked();
+        app.set_firewall(fw_text(Rule::Ask));
+        let acts = app.handle(local_text(3), &wall());
+        assert!(!acts.iter().any(|a| matches!(a, Action::SendItem { .. })));
+    }
+
+    #[test]
+    fn firewall_sensitive_ask_blocks_secret_even_when_kind_allows() {
+        let mut app = linked();
+        app.set_firewall(fw_text(Rule::Allow)); // text Allow, sensitive Ask (default)
+        let acts = app.handle(
+            Event::LocalClipboardChange {
+                hash: [4; 32],
+                kind: Kind::Text,
+                payload: concat!("sk_live_", "xxxxxxxxxxxxxxxxxxxxxxxx").as_bytes().to_vec(),
+                preview: concat!("sk_live_", "xxxxxxxxxxxxxxxxxxxxxxxx").into(),
+                sensitive: true,
+                lamport: 1,
+            },
+            &wall(),
+        );
+        assert!(!acts.iter().any(|a| matches!(a, Action::SendItem { .. })));
+    }
+
+    #[test]
+    fn firewall_deny_inbound_strips_write_but_keeps_ack() {
+        let mut app = linked();
+        app.set_firewall(fw_text(Rule::Deny));
+        let acts = app.handle(
+            Event::FrameReceivedClipboard {
+                hash: [5; 32],
+                kind: Kind::Text,
+                payload: b"from peer".to_vec(),
+                preview: "from peer".into(),
+                sensitive: false,
+                lamport: 9,
+            },
+            &wall(),
+        );
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::WriteClipboard { .. })),
+            "Never-text must not write the OS clipboard"
+        );
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Action::AckItem { hash } if hash == &[5u8; 32])),
+            "ack must still fire so the peer stops retransmitting: {acts:?}"
+        );
+    }
+
+    #[test]
+    fn firewall_allow_inbound_still_writes() {
+        let mut app = linked();
+        app.set_firewall(fw_text(Rule::Allow));
+        let acts = app.handle(
+            Event::FrameReceivedClipboard {
+                hash: [6; 32],
+                kind: Kind::Text,
+                payload: b"from peer".to_vec(),
+                preview: "from peer".into(),
+                sensitive: false,
+                lamport: 9,
+            },
+            &wall(),
+        );
+        assert!(acts.iter().any(|a| matches!(a, Action::WriteClipboard { .. })));
     }
 
     // ── FluxMesh coordinator (Phase 1) ──────────────────────────────────

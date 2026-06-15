@@ -382,8 +382,10 @@ mod firewall_tests {
 
     #[test]
     fn enabled_with_allow_rules_still_passes() {
-        let mut p = FirewallPolicy::default();
-        p.enabled = true; // rules all Allow, sensitive Ask
+        let p = FirewallPolicy {
+            enabled: true, // rules all Allow, sensitive Ask
+            ..FirewallPolicy::default()
+        };
         for k in KINDS {
             assert_eq!(p.decide(k, false, Direction::Inbound), Decision::Pass);
         }
