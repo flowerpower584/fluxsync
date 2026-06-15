@@ -45,6 +45,7 @@ data class DaemonState(
     val cipher: String,
     val trustedPeerName: String?,
     val metrics: ConnectionMetricsView?,
+    val peers: List<MeshPeer>,
     val raw: JSONObject,
 ) {
     companion object {
@@ -73,6 +74,7 @@ data class DaemonState(
                 cipher = o.optString("cipher", ""),
                 trustedPeerName = o.optString("trusted_peer_name", null),
                 metrics = ConnectionMetricsView.parse(o.optJSONObject("metrics")),
+                peers = parsePeers(o.optJSONArray("peers")),
                 raw = o,
             )
         } catch (e: Exception) {
@@ -87,6 +89,34 @@ data class DaemonState(
          */
         internal fun parseFailureMessage(e: Throwable, json: String): String =
             "DaemonState.parse failed: ${e.message} (raw head: ${json.take(120)})"
+
+        /** FluxMesh Phase 3: parse the `peers` array (every linked peer). */
+        private fun parsePeers(arr: JSONArray?): List<MeshPeer> {
+            if (arr == null) return emptyList()
+            val out = mutableListOf<MeshPeer>()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                out += MeshPeer(
+                    peerId = peerIdHex(o.optJSONArray("peer_id")),
+                    name = o.optString("name", ""),
+                    platform = o.optString("platform", ""),
+                    battery = o.optInt("battery", 100),
+                    charging = o.optBoolean("charging", false),
+                    primary = o.optBoolean("primary", false),
+                )
+            }
+            return out
+        }
+
+        /** Hex of the 32-byte `peer_id` array, for a stable list key. */
+        private fun peerIdHex(arr: JSONArray?): String {
+            if (arr == null) return ""
+            val sb = StringBuilder(arr.length() * 2)
+            for (i in 0 until arr.length()) {
+                sb.append("%02x".format(arr.optInt(i) and 0xff))
+            }
+            return sb.toString()
+        }
 
         private fun parseHistory(arr: JSONArray?): List<HistoryItem> {
             if (arr == null) return emptyList()
@@ -121,6 +151,19 @@ fun platformLabel(platform: String): String? = when (platform.lowercase()) {
     "ios" -> "iOS"
     else -> null
 }
+
+/**
+ * FluxMesh Phase 3: one peer in the daemon's `peers` list. `primary` marks
+ * the peer the legacy single-peer `peer_*` fields project.
+ */
+data class MeshPeer(
+    val peerId: String,
+    val name: String,
+    val platform: String,
+    val battery: Int,
+    val charging: Boolean,
+    val primary: Boolean,
+)
 
 data class HistoryItem(
     val hash: String,

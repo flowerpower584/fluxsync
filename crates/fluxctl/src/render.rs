@@ -133,6 +133,44 @@ pub fn render_status(v: &Value) {
     };
     println!("  {}      {peer_line}", "peer".dimmed());
 
+    // FluxMesh Phase 3: when more than one peer is linked, list the full mesh
+    // (the `peer` line above stays the primary). Star marks the primary.
+    if let Some(peers) = data.get("peers").and_then(Value::as_array) {
+        if peers.len() > 1 {
+            println!("  {}      {} devices", "mesh".dimmed(), peers.len());
+            for p in peers {
+                let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+                let plat = p.get("platform").and_then(Value::as_str).unwrap_or("");
+                let batt = p.get("battery").and_then(Value::as_u64).unwrap_or(100);
+                let charging = p.get("charging").and_then(Value::as_bool).unwrap_or(false);
+                let primary = p.get("primary").and_then(Value::as_bool).unwrap_or(false);
+                let bolt = if charging {
+                    "⚡".yellow().to_string()
+                } else {
+                    String::new()
+                };
+                let star = if primary {
+                    "★".yellow().to_string()
+                } else {
+                    " ".to_string()
+                };
+                let label = if name.is_empty() { "(unknown)" } else { name };
+                let plat_s = if plat.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{plat}]")
+                };
+                println!(
+                    "    {star} {}{}  {}{}",
+                    label.cyan(),
+                    plat_s.dimmed(),
+                    format!("{batt}%").green(),
+                    bolt
+                );
+            }
+        }
+    }
+
     let hist_color = if history_count == 0 {
         "0 items".bright_black().to_string()
     } else {

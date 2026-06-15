@@ -31,12 +31,16 @@ import sn.kaolack.fluxsync.vm.DaemonState
 import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
 /**
- * Number of paired peers the daemon currently reports. The daemon
- * tracks at most one peer, so this is 0 or 1 — never counts "this
- * device", which is not a peer that can be linked or unlinked.
+ * Number of paired peers the daemon currently reports. FluxMesh Phase 3:
+ * the daemon now reports a full mesh `peers` list, so this can exceed 1;
+ * it falls back to the legacy single-peer projection for an older daemon.
+ * Never counts "this device", which is not a linkable peer.
  */
-internal fun pairedPeerCount(state: DaemonState): Int =
-    if (state.peerName.isNotEmpty()) 1 else 0
+internal fun pairedPeerCount(state: DaemonState): Int = when {
+    state.peers.isNotEmpty() -> state.peers.size
+    state.peerName.isNotEmpty() -> 1
+    else -> 0
+}
 
 /**
  * Screen 02: Devices
@@ -52,8 +56,23 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
         return
     }
 
-    // Currently the daemon only reports 1 peer. We'll wrap it in a list to match spec.
-    val devices = if (s.peerName.isNotEmpty()) listOf(s) else emptyList()
+    // FluxMesh Phase 3: render the full mesh `peers` list. Fall back to the
+    // legacy single-peer projection when talking to an older daemon that
+    // doesn't send `peers`.
+    val devices: List<sn.kaolack.fluxsync.vm.MeshPeer> = when {
+        s.peers.isNotEmpty() -> s.peers
+        s.peerName.isNotEmpty() -> listOf(
+            sn.kaolack.fluxsync.vm.MeshPeer(
+                peerId = "",
+                name = s.peerName,
+                platform = s.peerPlatform,
+                battery = s.peerBattery,
+                charging = s.peerCharging,
+                primary = true,
+            )
+        )
+        else -> emptyList()
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -99,14 +118,18 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
                 }
             }
         } else {
-            items(devices) { d ->
+            items(devices, key = { it.peerId.ifEmpty { it.name } }) { d ->
                 DeviceItem(
-                    name = d.peerName,
-                    platform = d.peerPlatform,
-                    batt = d.peerBattery,
-                    charging = d.peerCharging,
+                    name = d.name.ifEmpty { "(unknown)" },
+                    platform = d.platform,
+                    batt = d.battery,
+                    charging = d.charging,
                     threshold = s.threshold,
-                    metrics = d.metrics,
+                    // Only the primary link carries metrics + the global
+                    // Disable/Unpair actions (the daemon has no per-peer
+                    // unpair yet — secondary peers are info-only).
+                    metrics = if (d.primary) s.metrics else null,
+                    primary = d.primary,
                     onDisable = { scope.launch { vm.toggle(false) } },
                     onUnpair = { scope.launch { vm.unpair() } }
                 )
@@ -162,6 +185,7 @@ private fun DeviceItem(
     charging: Boolean,
     threshold: Int,
     metrics: sn.kaolack.fluxsync.vm.ConnectionMetricsView?,
+    primary: Boolean,
     onDisable: () -> Unit,
     onUnpair: () -> Unit,
 ) {
@@ -202,31 +226,35 @@ private fun DeviceItem(
                 fontSize = 10.sp,
             )
         }
-        Spacer(Modifier.height(12.dp))
-        androidx.compose.material3.HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
-        Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(
-                Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(8.dp))
-                    .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
-                    .clickable { onDisable() }
-                    .padding(vertical = 7.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Disable", color = FsDarkFg, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
-            }
-            Box(
-                Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(8.dp))
-                    .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
-                    .clickable { onUnpair() }
-                    .padding(vertical = 7.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Unpair", color = FsCrit, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
+        // Global Disable/Unpair act on the primary link only — hide them on
+        // secondary mesh peers (no per-peer unpair in the daemon yet).
+        if (primary) {
+            Spacer(Modifier.height(12.dp))
+            androidx.compose.material3.HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
+                        .clickable { onDisable() }
+                        .padding(vertical = 7.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Disable", color = FsDarkFg, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
+                }
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
+                        .clickable { onUnpair() }
+                        .padding(vertical = 7.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Unpair", color = FsCrit, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
+                }
             }
         }
     }

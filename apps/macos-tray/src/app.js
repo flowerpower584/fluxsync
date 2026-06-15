@@ -55,6 +55,7 @@ function applyState(s) {
   if (isPaired) {
     renderHero(s);
     renderPeer(s);
+    renderMesh(s);
     renderSelf(s);
     renderRecent(s.history || []);
     maybePulse(s);
@@ -165,6 +166,54 @@ function renderPeerDevice(platform) {
   if (iconEl) iconEl.innerHTML = isMobile ? PEER_ICON_PHONE : PEER_ICON_COMPUTER;
   const metaEl = document.getElementById('peer-meta');
   if (metaEl) metaEl.textContent = label;
+}
+
+const PLATFORM_LABELS = { macos: 'macOS', windows: 'Windows', linux: 'Linux', android: 'Android', ios: 'iOS' };
+
+// FluxMesh Phase 3: list secondary peers below the primary card when more
+// than one device is linked (the primary stays in the main peer card).
+// Built with textContent (never innerHTML) so a peer-controlled name can't
+// inject markup. The container is created lazily, so index.html needs no
+// change and the card is unchanged for the single-peer case.
+function renderMesh(s) {
+  const peers = (s && Array.isArray(s.peers)) ? s.peers : [];
+  const body = document.getElementById('dashboard-body');
+  let box = document.getElementById('mesh-peers');
+  if (peers.length <= 1) {
+    if (box) box.style.display = 'none';
+    return;
+  }
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'mesh-peers';
+    box.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--fs-line,rgba(255,255,255,0.08));';
+    body.appendChild(box);
+  }
+  box.style.display = 'flex';
+  box.replaceChildren();
+
+  const head = document.createElement('div');
+  head.style.cssText = 'font-size:10px;letter-spacing:0.08em;color:var(--fs-muted);text-transform:uppercase;';
+  head.textContent = `Mesh · ${peers.length} devices`;
+  box.appendChild(head);
+
+  for (const p of peers) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;justify-content:space-between;font-size:12px;';
+
+    const left = document.createElement('span');
+    const name = (p.name && p.name.trim()) ? p.name : '(unknown)';
+    const label = PLATFORM_LABELS[(p.platform || '').toLowerCase()] || (p.platform || '');
+    left.textContent = `${p.primary ? '★ ' : ''}${name}${label ? ' · ' + label : ''}`;
+
+    const right = document.createElement('span');
+    right.style.color = 'var(--fs-muted)';
+    right.textContent = `${p.battery ?? 100}%${p.charging ? '⚡' : ''}`;
+
+    row.appendChild(left);
+    row.appendChild(right);
+    box.appendChild(row);
+  }
 }
 
 // Inline RTT pill next to the E2E badge. Hidden until daemon reports a

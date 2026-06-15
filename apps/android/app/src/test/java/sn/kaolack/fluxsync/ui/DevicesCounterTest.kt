@@ -20,4 +20,12 @@ class DevicesCounterTest {
     fun onePeerWhenPeerNamePresent() {
         assertEquals(1, pairedPeerCount(state("Dethie-Mac")))
     }
+
+    @Test
+    fun countsFullMeshWhenPeersPresent() {
+        val s = DaemonState.parse(
+            """{"peer_name":"A","peers":[{"name":"A","primary":true},{"name":"B","primary":false}]}"""
+        ) ?: error("parse returned null")
+        assertEquals(2, pairedPeerCount(s))
+    }
 }
