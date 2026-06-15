@@ -71,6 +71,73 @@ enum Cmd {
         #[command(subcommand)]
         sub: TrustSub,
     },
+    /// Clipboard firewall: per-content-type Always/Ask/Never policy.
+    Firewall {
+        #[command(subcommand)]
+        sub: FirewallSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum FirewallSub {
+    /// Show the current policy and any items awaiting approval.
+    Show,
+    /// Turn the firewall on (rules take effect).
+    Enable,
+    /// Turn the firewall off (everything syncs, as before).
+    Disable,
+    /// Set one rule, e.g. `fluxctl firewall set sensitive never`.
+    Set {
+        /// Which content type (or `sensitive` for detected secrets).
+        field: FwField,
+        /// always = sync silently, ask = hold for approval, never = drop.
+        rule: FwRule,
+    },
+    /// List items the Ask rule is currently holding.
+    Pending,
+    /// Approve a held item by its hex hash (from `firewall pending`).
+    Allow { hash: String },
+    /// Reject a held item by its hex hash.
+    Deny { hash: String },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum FwField {
+    Text,
+    Url,
+    Code,
+    Image,
+    Sensitive,
+}
+
+impl FwField {
+    fn key(self) -> &'static str {
+        match self {
+            FwField::Text => "text",
+            FwField::Url => "url",
+            FwField::Code => "code",
+            FwField::Image => "image",
+            FwField::Sensitive => "sensitive",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum FwRule {
+    Always,
+    Ask,
+    Never,
+}
+
+impl FwRule {
+    /// Wire value of the rule (matches `core::policy::Rule`'s serde).
+    fn wire(self) -> &'static str {
+        match self {
+            FwRule::Always => "allow",
+            FwRule::Ask => "ask",
+            FwRule::Never => "deny",
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -139,6 +206,8 @@ async fn main() -> Result<()> {
         PairQr,
         PairPending,
         TrustList,
+        Firewall,
+        FirewallPending,
         Ack(&'static str),
     }
 
@@ -211,6 +280,59 @@ async fn main() -> Result<()> {
                 one_shot(&ipc_path, json!({"id": 1, "op": "trust_list"})).await?,
                 Kind::TrustList,
             ),
+        },
+        Cmd::Firewall { sub } => match sub {
+            FirewallSub::Show => (
+                one_shot(&ipc_path, json!({"id": 1, "op": "status"})).await?,
+                Kind::Firewall,
+            ),
+            FirewallSub::Pending => (
+                one_shot(&ipc_path, json!({"id": 1, "op": "status"})).await?,
+                Kind::FirewallPending,
+            ),
+            FirewallSub::Allow { hash } => (
+                one_shot(
+                    &ipc_path,
+                    json!({"id": 1, "op": "resolve_pending", "hash": hash, "allow": true}),
+                )
+                .await?,
+                Kind::Ack("approved"),
+            ),
+            FirewallSub::Deny { hash } => (
+                one_shot(
+                    &ipc_path,
+                    json!({"id": 1, "op": "resolve_pending", "hash": hash, "allow": false}),
+                )
+                .await?,
+                Kind::Ack("rejected"),
+            ),
+            FirewallSub::Enable => {
+                let mut fw = fetch_firewall(&ipc_path).await?;
+                fw["enabled"] = json!(true);
+                (
+                    one_shot(&ipc_path, json!({"id": 1, "op": "set_firewall", "policy": fw}))
+                        .await?,
+                    Kind::Ack("firewall enabled"),
+                )
+            }
+            FirewallSub::Disable => {
+                let mut fw = fetch_firewall(&ipc_path).await?;
+                fw["enabled"] = json!(false);
+                (
+                    one_shot(&ipc_path, json!({"id": 1, "op": "set_firewall", "policy": fw}))
+                        .await?,
+                    Kind::Ack("firewall disabled"),
+                )
+            }
+            FirewallSub::Set { field, rule } => {
+                let mut fw = fetch_firewall(&ipc_path).await?;
+                fw[field.key()] = json!(rule.wire());
+                (
+                    one_shot(&ipc_path, json!({"id": 1, "op": "set_firewall", "policy": fw}))
+                        .await?,
+                    Kind::Ack("rule updated"),
+                )
+            }
         },
         Cmd::Pair { sub } => match sub {
             PairSub::Show => (
@@ -291,9 +413,103 @@ async fn main() -> Result<()> {
         Kind::PairQr => render_pair_qr(&value)?,
         Kind::PairPending => render_pair_pending(&value),
         Kind::TrustList => render_trust_list(&value),
+        Kind::Firewall => render_firewall(&value),
+        Kind::FirewallPending => render_firewall_pending(&value),
         Kind::Ack(action) => render::render_ack(&value, action),
     }
     Ok(())
+}
+
+/// Fetch the current firewall policy object from the daemon's State, so a
+/// single-rule change (enable/disable/set) is a read-modify-write that leaves
+/// the other rules untouched. Falls back to the disabled default shape if the
+/// daemon predates the firewall.
+async fn fetch_firewall(ipc: &Path) -> Result<Value> {
+    let resp = one_shot(ipc, json!({"id": 1, "op": "status"})).await?;
+    let fw = resp
+        .get("data")
+        .and_then(|d| d.get("firewall"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    if fw.is_object() {
+        Ok(fw)
+    } else {
+        Ok(json!({
+            "enabled": false,
+            "text": "allow",
+            "url": "allow",
+            "code": "allow",
+            "image": "allow",
+            "sensitive": "ask",
+        }))
+    }
+}
+
+/// Map a wire rule (`allow`/`ask`/`deny`) to the UI word.
+fn rule_word(wire: &str) -> &str {
+    match wire {
+        "ask" => "Ask",
+        "deny" => "Never",
+        _ => "Always",
+    }
+}
+
+/// Render `firewall show`: the on/off state + each content-type rule.
+fn render_firewall(resp: &Value) {
+    if resp.get("ok").and_then(Value::as_bool) != Some(true) {
+        let err = resp.get("err").and_then(Value::as_str).unwrap_or("unknown");
+        eprintln!("error: {err}");
+        return;
+    }
+    let fw = resp.get("data").and_then(|d| d.get("firewall"));
+    let Some(fw) = fw else {
+        println!("Firewall: unavailable (daemon predates the firewall).");
+        return;
+    };
+    let enabled = fw.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    println!("Firewall: {}", if enabled { "ON" } else { "off" });
+    for field in ["text", "url", "code", "image", "sensitive"] {
+        let wire = fw.get(field).and_then(Value::as_str).unwrap_or("allow");
+        println!("  {field:<10} {}", rule_word(wire));
+    }
+    let pending = resp
+        .get("data")
+        .and_then(|d| d.get("pending"))
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if pending > 0 {
+        println!("\n{pending} item(s) awaiting approval — `fluxctl firewall pending`.");
+    }
+}
+
+/// Render `firewall pending`: items the Ask rule is holding.
+fn render_firewall_pending(resp: &Value) {
+    if resp.get("ok").and_then(Value::as_bool) != Some(true) {
+        let err = resp.get("err").and_then(Value::as_str).unwrap_or("unknown");
+        eprintln!("error: {err}");
+        return;
+    }
+    let items = resp
+        .get("data")
+        .and_then(|d| d.get("pending"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if items.is_empty() {
+        println!("Nothing awaiting approval.");
+        return;
+    }
+    println!("Awaiting approval ({n}):", n = items.len());
+    for it in &items {
+        let dir = it.get("direction").and_then(Value::as_str).unwrap_or("?");
+        let arrow = if dir == "outbound" { "→ out" } else { "← in " };
+        let kind = it.get("kind").and_then(Value::as_str).unwrap_or("?");
+        let preview = it.get("preview").and_then(Value::as_str).unwrap_or("");
+        let hash = it.get("hash").and_then(Value::as_str).unwrap_or("");
+        let short = hash.get(..12).unwrap_or(hash);
+        println!("  {arrow}  {kind:<5} {short}  {preview}");
+    }
+    println!("\nApprove: `fluxctl firewall allow <hash>`   Reject: `fluxctl firewall deny <hash>`");
 }
 
 /// H2: render the trust-store listing. One entry per persisted peer,
