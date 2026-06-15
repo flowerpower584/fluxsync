@@ -104,6 +104,34 @@ async fn fluxsync_revoke_peer(peer_id: String) -> Result<(), String> {
         .map(|_| ())
 }
 
+/// FluxFirewall: replace the whole clipboard firewall policy. `policy` is the
+/// JS-built object (`enabled` + per-kind allow/ask/deny rules); the daemon
+/// swaps it in and re-emits state so the toggles reflect immediately.
+#[tauri::command]
+async fn fluxsync_set_firewall(policy: serde_json::Value) -> Result<(), String> {
+    ipc::one_shot(json!({"id": 1, "op": "set_firewall", "policy": policy}))
+        .await
+        .map(|_| ())
+}
+
+/// FluxFirewall: approve (`allow = true`) or reject an item parked under an
+/// Ask rule, keyed by its hex content hash from `State.pending`.
+#[tauri::command]
+async fn fluxsync_resolve_pending(hash: String, allow: bool) -> Result<(), String> {
+    ipc::one_shot(json!({"id": 1, "op": "resolve_pending", "hash": hash, "allow": allow}))
+        .await
+        .map(|_| ())
+}
+
+/// FluxVault: pin/unpin a history item by hex content hash. Pinned items
+/// survive the vault TTL + disk cap.
+#[tauri::command]
+async fn fluxsync_set_favorite(hash: String, favorite: bool) -> Result<(), String> {
+    ipc::one_shot(json!({"id": 1, "op": "set_favorite", "hash": hash, "favorite": favorite}))
+        .await
+        .map(|_| ())
+}
+
 #[tauri::command]
 fn fluxsync_open_url(url: String) {
     // Defense-in-depth (H-TRAY-01): only ever hand http(s) URLs to the OS
@@ -282,6 +310,9 @@ pub fn run() {
             fluxsync_set_show_in_dock,
             fluxsync_unpair,
             fluxsync_revoke_peer,
+            fluxsync_set_firewall,
+            fluxsync_resolve_pending,
+            fluxsync_set_favorite,
             fluxsync_open_url,
         ])
         .setup(|app| {

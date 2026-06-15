@@ -50,6 +50,8 @@ function applyState(s) {
   document.getElementById('tray-container').style.display = 'flex';
   document.getElementById('dashboard-body').style.display = isPaired ? 'flex' : 'none';
   document.querySelector('.history-section').style.display = isPaired ? 'block' : 'none';
+  const fwSection = document.getElementById('firewall-section');
+  if (fwSection) fwSection.style.display = isPaired ? 'block' : 'none';
   document.getElementById('pairing-entry').style.display = isPaired ? 'none' : 'flex';
 
   if (isPaired) {
@@ -58,6 +60,7 @@ function applyState(s) {
     renderMesh(s);
     renderSelf(s);
     renderRecent(s.history || []);
+    renderFirewall(s);
     maybePulse(s);
   } else {
     setHero('off', 'NO DEVICE PAIRED');
@@ -413,6 +416,19 @@ function renderRecent(history) {
     src.textContent = remote ? 'peer' : 'local';
     item.append(src);
 
+    // FluxVault: pin/unpin star. Pinned items survive the vault TTL + cap.
+    // It lives inside the history button, so stop the click from also
+    // triggering the row's copy handler.
+    const fav = document.createElement('span');
+    fav.className = 'fav' + (h.favorite ? ' on' : '');
+    fav.textContent = h.favorite ? '★' : '☆';
+    fav.title = h.favorite ? 'Unpin' : 'Pin — keep past history limit';
+    fav.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleFavorite(h.hash, !h.favorite);
+    });
+    item.append(fav);
+
     // Text rows carry their full payload in `preview` (only the CSS clips it),
     // so clicking copies it straight back. Image previews are just a "N KB"
     // label — the bytes aren't in the snapshot — so those rows aren't copyable.
@@ -435,6 +451,161 @@ function renderRecent(history) {
 
     list.append(item);
   });
+}
+
+// ── FluxVault favorites ────────────────────────────────────────────────
+async function toggleFavorite(hash, favorite) {
+  if (!hash) return;
+  try {
+    await invoke('fluxsync_set_favorite', { hash, favorite });
+    await refreshState();
+  } catch (err) {
+    showToast(`${favorite ? 'Pin' : 'Unpin'} failed: ${err}`);
+  }
+}
+
+// ── FluxFirewall ───────────────────────────────────────────────────────
+// Per-content-type Allow/Ask/Deny policy + the Ask "pending decisions"
+// queue. Reads `State.firewall` + `State.pending`, drives `set_firewall`
+// and `resolve_pending`. Built fresh into #firewall-body each snapshot.
+const FW_RULES = ['allow', 'ask', 'deny'];
+const FW_KINDS = [
+  ['text', 'Text', 'Plain text snippets'],
+  ['url', 'Links', 'URLs on the clipboard'],
+  ['code', 'Code', 'Code-shaped content'],
+  ['image', 'Images', 'PNG image payloads'],
+  ['sensitive', 'Secrets', 'Detected keys & tokens'],
+];
+
+function defaultFirewall() {
+  return { enabled: false, text: 'allow', url: 'allow', code: 'allow', image: 'allow', sensitive: 'ask' };
+}
+
+async function pushFirewall(policy) {
+  try {
+    await invoke('fluxsync_set_firewall', { policy });
+    await refreshState();
+  } catch (err) {
+    showToast(`Firewall update failed: ${err}`);
+  }
+}
+
+async function resolvePending(hash, allow) {
+  try {
+    await invoke('fluxsync_resolve_pending', { hash, allow });
+    await refreshState();
+  } catch (err) {
+    showToast(`${allow ? 'Approve' : 'Reject'} failed: ${err}`);
+  }
+}
+
+function renderFirewall(s) {
+  const body = document.getElementById('firewall-body');
+  if (!body) return;
+  const fw = Object.assign(defaultFirewall(), s.firewall || {});
+  const pending = s.pending || [];
+  body.innerHTML = '';
+
+  // Pending decisions first — they're time-sensitive.
+  if (pending.length) {
+    const head = document.createElement('div');
+    head.className = 'fw-subhead';
+    head.textContent = 'Pending decisions';
+    body.append(head);
+    pending.forEach(p => body.append(buildPendingCard(p)));
+  }
+
+  // Master switch.
+  const master = document.createElement('div');
+  master.className = 'fw-master';
+  const mLabel = document.createElement('div');
+  mLabel.className = 'fw-master-text';
+  const mTitle = document.createElement('span');
+  mTitle.className = 'fw-master-title';
+  mTitle.textContent = 'Clipboard firewall';
+  const mHint = document.createElement('span');
+  mHint.className = 'fw-master-hint';
+  mHint.textContent = fw.enabled ? 'Rules below are enforced' : 'Off — every item passes';
+  mLabel.append(mTitle, mHint);
+  const mToggle = document.createElement('button');
+  mToggle.className = 'fw-switch' + (fw.enabled ? ' on' : '');
+  mToggle.setAttribute('aria-label', 'Toggle firewall');
+  mToggle.addEventListener('click', () => {
+    pushFirewall(Object.assign({}, fw, { enabled: !fw.enabled }));
+  });
+  master.append(mLabel, mToggle);
+  body.append(master);
+
+  // Per-kind rule rows.
+  const rules = document.createElement('div');
+  rules.className = 'fw-rules' + (fw.enabled ? '' : ' disabled');
+  FW_KINDS.forEach(([field, label, hint]) => {
+    rules.append(buildRuleRow(fw, field, label, hint));
+  });
+  body.append(rules);
+}
+
+function buildPendingCard(p) {
+  const card = document.createElement('div');
+  card.className = 'fw-pending';
+  const meta = document.createElement('div');
+  meta.className = 'fw-pending-meta';
+  const tag = document.createElement('span');
+  tag.className = 'fw-pending-tag';
+  const dir = p.direction === 'outbound' ? 'OUTGOING' : 'INCOMING';
+  tag.textContent = dir + ' · ' + String(p.kind || 'text').toUpperCase();
+  meta.append(tag);
+  if (p.sensitive) {
+    const sec = document.createElement('span');
+    sec.className = 'fw-pending-secret';
+    sec.textContent = 'SECRET';
+    meta.append(sec);
+  }
+  const prev = document.createElement('div');
+  prev.className = 'fw-pending-preview';
+  prev.textContent = p.sensitive ? '••••••••••••' : (p.preview || '(no preview)');
+  const actions = document.createElement('div');
+  actions.className = 'fw-pending-actions';
+  const reject = document.createElement('button');
+  reject.className = 'fw-btn reject';
+  reject.textContent = 'Reject';
+  reject.addEventListener('click', () => resolvePending(p.hash, false));
+  const approve = document.createElement('button');
+  approve.className = 'fw-btn approve';
+  approve.textContent = 'Approve';
+  approve.addEventListener('click', () => resolvePending(p.hash, true));
+  actions.append(reject, approve);
+  card.append(meta, prev, actions);
+  return card;
+}
+
+function buildRuleRow(fw, field, label, hint) {
+  const row = document.createElement('div');
+  row.className = 'fw-rule';
+  const text = document.createElement('div');
+  text.className = 'fw-rule-text';
+  const t = document.createElement('span');
+  t.className = 'fw-rule-label';
+  t.textContent = label;
+  const h = document.createElement('span');
+  h.className = 'fw-rule-hint';
+  h.textContent = hint;
+  text.append(t, h);
+  const seg = document.createElement('div');
+  seg.className = 'fw-seg';
+  const current = fw[field] || 'allow';
+  FW_RULES.forEach(rule => {
+    const b = document.createElement('button');
+    b.className = 'fw-seg-btn ' + rule + (current === rule ? ' active' : '');
+    b.textContent = rule.toUpperCase();
+    b.addEventListener('click', () => {
+      if (!fw.enabled || current === rule) return;
+      pushFirewall(Object.assign({}, fw, { [field]: rule }));
+    });
+    seg.append(b);
+  });
+  row.append(text, seg);
+  return row;
 }
 
 // ── Wire up controls ─────────────────────────────────────────────

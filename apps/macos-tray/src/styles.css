@@ -360,3 +360,80 @@ button:focus-visible { outline: 2px solid var(--fs-ok); outline-offset: 2px; }
 .entry-btn.secondary { background: var(--fs-card); color: var(--fs-fg); }
 .entry-btn .cap { font-size: 9.5px; opacity: .8; margin-bottom: 4px; font-weight: 700; letter-spacing: .05em; }
 .entry-btn .label { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+
+/* ── FluxVault favorites: per-row pin star ─────────────────────────── */
+.history-item .fav {
+  flex-shrink: 0; cursor: pointer; font-size: 13px; line-height: 1;
+  color: var(--fs-subtle); padding: 2px 4px; border-radius: 5px;
+  transition: color .12s, background .12s;
+}
+.history-item .fav:hover { color: var(--fs-warn); background: var(--fs-hover); }
+.history-item .fav.on { color: var(--fs-warn); }
+
+/* ── FluxFirewall ──────────────────────────────────────────────────── */
+.firewall-body { display: flex; flex-direction: column; gap: 8px; padding: 0 4px 6px; }
+.fw-subhead {
+  font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  color: var(--fs-warn); text-transform: uppercase; padding: 2px 4px;
+}
+.fw-master {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 11px 12px; border: 1px solid var(--fs-border); border-radius: 10px; background: var(--fs-card);
+}
+.fw-master-text { display: flex; flex-direction: column; gap: 2px; }
+.fw-master-title { font-size: 12.5px; font-weight: 600; color: var(--fs-fg); font-family: var(--fs-ui); }
+.fw-master-hint { font-size: 11px; color: var(--fs-muted); }
+.fw-switch {
+  position: relative; width: 38px; height: 22px; border-radius: 11px; flex-shrink: 0;
+  border: 1px solid var(--fs-border); background: var(--fs-surface-alt); cursor: pointer;
+  padding: 0; transition: background .15s, border-color .15s;
+}
+.fw-switch::after {
+  content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+  border-radius: 50%; background: var(--fs-muted); transition: transform .15s, background .15s;
+}
+.fw-switch.on { background: var(--fs-ok-soft); border-color: var(--fs-ok); }
+.fw-switch.on::after { transform: translateX(16px); background: var(--fs-ok); }
+
+.fw-rules {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--fs-border); border-radius: 10px; background: var(--fs-card);
+  transition: opacity .15s;
+}
+.fw-rules.disabled { opacity: .4; }
+.fw-rule { display: flex; flex-direction: column; gap: 8px; padding: 11px 12px; }
+.fw-rule + .fw-rule { border-top: 1px solid var(--fs-border); }
+.fw-rule-text { display: flex; flex-direction: column; gap: 1px; }
+.fw-rule-label { font-size: 12px; font-weight: 600; color: var(--fs-fg); }
+.fw-rule-hint { font-size: 10.5px; color: var(--fs-muted); }
+.fw-seg { display: flex; border: 1px solid var(--fs-border); border-radius: 8px; overflow: hidden; }
+.fw-seg-btn {
+  flex: 1; appearance: none; border: 0; background: transparent; padding: 7px 0;
+  font-family: var(--fs-mono); font-size: 10px; font-weight: 600; letter-spacing: .03em;
+  color: var(--fs-subtle); cursor: pointer; transition: background .12s, color .12s;
+}
+.fw-seg-btn + .fw-seg-btn { border-left: 1px solid var(--fs-border); }
+.fw-seg-btn.active.allow { color: var(--fs-ok); background: var(--fs-ok-soft); }
+.fw-seg-btn.active.ask { color: var(--fs-warn); background: var(--fs-warn-soft); }
+.fw-seg-btn.active.deny { color: var(--fs-crit); background: var(--fs-crit-soft); }
+.fw-rules:not(.disabled) .fw-seg-btn:not(.active):hover { color: var(--fs-fg); background: var(--fs-hover); }
+
+.fw-pending {
+  display: flex; flex-direction: column; gap: 8px; padding: 11px 12px;
+  border: 1px solid var(--fs-warn-soft); border-radius: 10px; background: var(--fs-card);
+}
+.fw-pending-meta { display: flex; align-items: center; justify-content: space-between; }
+.fw-pending-tag { font-size: 9px; font-weight: 700; letter-spacing: .04em; color: var(--fs-warn); font-family: var(--fs-mono); }
+.fw-pending-secret { font-size: 9px; font-weight: 700; color: var(--fs-crit); font-family: var(--fs-mono); }
+.fw-pending-preview {
+  font-size: 12px; color: var(--fs-fg); overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+}
+.fw-pending-actions { display: flex; gap: 8px; }
+.fw-btn {
+  flex: 1; appearance: none; border: 1px solid; border-radius: 8px; padding: 8px 0;
+  font-family: var(--fs-mono); font-size: 11px; font-weight: 600; cursor: pointer; transition: filter .12s;
+}
+.fw-btn.reject { color: var(--fs-crit); border-color: rgba(224,99,94,.4); background: var(--fs-crit-soft); }
+.fw-btn.approve { color: var(--fs-ok); border-color: rgba(76,194,114,.4); background: var(--fs-ok-soft); }
+.fw-btn:hover { filter: brightness(1.12); }
