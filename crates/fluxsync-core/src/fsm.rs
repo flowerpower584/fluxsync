@@ -243,6 +243,12 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
         // State untouched.
         (phase, E::MeshPeersChanged) => (phase, vec![A::EmitState]),
 
+        // FluxMesh robustness: primary failover keeps the current phase
+        // (Linked when the daemon emits it) and just re-projects State onto the
+        // freshly-promoted peer. The identity rebind happens pre-transition in
+        // `App::handle`; the FSM only needs to publish.
+        (phase, E::PrimaryFailover { .. }) => (phase, vec![A::EmitState]),
+
         // Reconnect events.
         (P::Linked, E::Reconnect) => (P::Linked, vec![A::BurstReplay]),
         (P::Discovering, E::Reconnect) => (P::Discovering, vec![A::StartDiscovery]),

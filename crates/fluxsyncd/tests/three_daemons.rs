@@ -266,6 +266,125 @@ async fn three_node_line_relays_one_item_exactly_once() {
     );
 }
 
+/// FluxMesh robustness slice 2: B's PRIMARY (A) leaves while a secondary (C) is
+/// still live. B must fail over to C — keep the link "connected" with C as the
+/// new primary — instead of dropping to Discovering. The discriminator is B's
+/// singular `peer_name`: it flips A → C (the old code left it stale on A or
+/// cleared it on GhostTimeout, never C).
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn primary_failover_promotes_secondary_when_primary_leaves() {
+    let _ = tracing_subscriber::fmt::try_init();
+    install_panic_hook();
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let id_c = Identity::generate();
+    let (pid_a, _pid_b, pid_c) = (id_a.peer_id(), id_b.peer_id(), id_c.peer_id());
+    let (sess_a_b, sess_b_a) = pair_for_test(&id_a, &id_b).expect("pair a-b");
+    let (sess_b_c, sess_c_b) = pair_for_test(&id_b, &id_c).expect("pair b-c");
+
+    let (port_a, port_b, port_c) = (
+        pick_free_udp_port().await,
+        pick_free_udp_port().await,
+        pick_free_udp_port().await,
+    );
+    let addr_a: SocketAddr = format!("127.0.0.1:{port_a}").parse().unwrap();
+    let addr_b: SocketAddr = format!("127.0.0.1:{port_b}").parse().unwrap();
+    let addr_c: SocketAddr = format!("127.0.0.1:{port_c}").parse().unwrap();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ipc_a = dir.path().join("a.sock");
+    let ipc_b = dir.path().join("b.sock");
+    let ipc_c = dir.path().join("c.sock");
+
+    let mut cfg_a = base_cfg(id_a, port_a, ipc_a.clone(), "node-a");
+    cfg_a.test_pair = Some(TestPair {
+        session: sess_a_b,
+        peer_addr: addr_b,
+        peer_name: "node-b".into(),
+        peer_id: id_b.peer_id(),
+    });
+    let mut cfg_c = base_cfg(id_c, port_c, ipc_c.clone(), "node-c");
+    cfg_c.test_pair = Some(TestPair {
+        session: sess_c_b,
+        peer_addr: addr_b,
+        peer_name: "node-b".into(),
+        peer_id: id_b.peer_id(),
+    });
+    // B — primary A, secondary C.
+    let mut cfg_b = base_cfg(id_b, port_b, ipc_b.clone(), "node-b");
+    cfg_b.test_pair = Some(TestPair {
+        session: sess_b_a,
+        peer_addr: addr_a,
+        peer_name: "node-a".into(),
+        peer_id: pid_a,
+    });
+    cfg_b.test_pairs = vec![TestPair {
+        session: sess_b_c,
+        peer_addr: addr_c,
+        peer_name: "node-c".into(),
+        peer_id: pid_c,
+    }];
+
+    let sd_a = CancellationToken::new();
+    let sd_b = CancellationToken::new();
+    let sd_c = CancellationToken::new();
+    let (ca, cb, cc) = (sd_a.clone(), sd_b.clone(), sd_c.clone());
+    let h_a = tokio::spawn(async move { run(cfg_a, ca).await });
+    let h_b = tokio::spawn(async move { run(cfg_b, cb).await });
+    let h_c = tokio::spawn(async move { run(cfg_c, cc).await });
+
+    // B starts with A as primary and lists both peers.
+    let up = wait_until(Duration::from_secs(2), || async {
+        peer_name(&ipc_b).await.as_deref() == Some("node-a") && mesh_peers(&ipc_b).await.0 == 2
+    })
+    .await;
+    assert!(up, "B did not reach its A-primary / 2-peer steady state");
+
+    // A unpairs → sends Bye to B (its only peer). B's primary just left.
+    let unpair = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 77,
+            op: CmdOp::Unpair {},
+        },
+    )
+    .await;
+    assert!(unpair.ok, "unpair on A failed: {unpair:?}");
+
+    // B fails over to the live secondary C: primary projection flips to node-c,
+    // and the mesh list collapses to just C (still the primary).
+    let failed_over = wait_until(Duration::from_secs(3), || async {
+        peer_name(&ipc_b).await.as_deref() == Some("node-c")
+    })
+    .await;
+    assert!(
+        failed_over,
+        "B did not fail over to secondary C (peer_name = {:?})",
+        peer_name(&ipc_b).await
+    );
+    assert_eq!(
+        mesh_peers(&ipc_b).await,
+        (1, 1),
+        "after failover B should list only C as the single primary"
+    );
+
+    sd_a.cancel();
+    sd_b.cancel();
+    sd_c.cancel();
+    for (h, who) in [(h_a, "A"), (h_b, "B"), (h_c, "C")] {
+        timeout(Duration::from_millis(500), h)
+            .await
+            .unwrap_or_else(|_| panic!("daemon {who} did not shut down in 500ms"))
+            .unwrap_or_else(|_| panic!("daemon {who} task panicked"))
+            .unwrap_or_else(|_| panic!("daemon {who} run() returned Err"));
+    }
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a panic was captured by the test panic hook"
+    );
+}
+
 /// Star push: B (centre) pushes; both leaves A and C receive it directly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn three_node_center_push_reaches_both_leaves() {

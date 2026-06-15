@@ -68,6 +68,18 @@ pub enum Event {
     /// set. Never mutates the single-peer State fields (those stay the
     /// primary's projection).
     MeshPeersChanged,
+    /// FluxMesh robustness: the primary peer's link died while a secondary
+    /// mesh session is still live. The daemon has already promoted that
+    /// secondary into the primary transport slot; this rebinds the
+    /// single-peer State to the promoted peer so the link stays connected
+    /// instead of dropping to Discovering. Unlike `PeerSeen`, it is accepted
+    /// while Linked — the promoted peer is already authenticated and trusted,
+    /// so it deliberately bypasses the anti-hijack `is_peer_mismatch` guard.
+    PrimaryFailover {
+        peer_id: [u8; 32],
+        name: String,
+        platform: String,
+    },
 }
 
 /// Side-effect commands the daemon must execute. The FSM never performs

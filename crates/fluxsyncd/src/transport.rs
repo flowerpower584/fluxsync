@@ -452,6 +452,53 @@ impl Transport {
         out
     }
 
+    /// FluxMesh robustness slice 2 (primary failover): move any one live
+    /// secondary peer into the primary `conn` slot and return its id. Called
+    /// when the primary link dies while a secondary session is still up, so
+    /// the single-peer State can rebind to the survivor instead of dropping to
+    /// "disconnected". The `Session` (with its nonce + replay state) is moved
+    /// intact; `recv` already routes by `last_peer_id`, so continuity holds.
+    pub async fn promote_secondary(&self) -> Option<[u8; 32]> {
+        // Pick + detach the first secondary that still has a live session.
+        let (id, sec) = {
+            let mut extra = self.extra.lock().await;
+            let mut chosen = None;
+            for (id, c) in extra.iter() {
+                if c.session.lock().await.is_some() {
+                    chosen = Some(*id);
+                    break;
+                }
+            }
+            let id = chosen?;
+            match extra.remove(&id) {
+                Some(c) => (id, c),
+                None => return None,
+            }
+        };
+
+        // Move the live session out of the secondary into the primary slot.
+        let session = sec.session.lock().await.take()?;
+        *self.conn.session.lock().await = Some(session);
+        *self.conn.last_peer_id.lock().await = Some(id);
+        let addr = *sec.peer_addr.lock().await;
+        *self.conn.peer_addr.lock().await = addr;
+        if let Some(a) = addr {
+            *self.conn.last_peer_addr.lock().await = Some(a);
+        }
+        self.conn
+            .last_rx_ms
+            .store(sec.last_rx_ms.load(Ordering::Relaxed), Ordering::Relaxed);
+        // Set the session, THEN bump the generation (same order as
+        // install_session) so any send that snapshotted the pre-swap session
+        // aborts rather than reusing a nonce across the promotion.
+        self.conn.session_generation.fetch_add(1, Ordering::SeqCst);
+        self.conn
+            .session_established_at_ms
+            .store(now_ms(), Ordering::SeqCst);
+        self.session_notify.notify_one();
+        Some(id)
+    }
+
     /// Receive one datagram and dispatch by type byte.
     pub async fn recv(&self, buf: &mut [u8]) -> Result<RecvFrame> {
         let (n, from) = self.socket.recv_from(buf).await?;
@@ -646,5 +693,37 @@ mod tests {
         transport.drop_session_for(id2).await;
         assert_eq!(transport.linked_peer_ids().await, vec![id1]);
         assert!(transport.secondary_liveness().await.is_empty());
+    }
+
+    /// FluxMesh robustness slice 2: promoting a secondary moves it into the
+    /// primary `conn` slot so single-peer accessors (`cached_peer_id`,
+    /// `has_session`) follow the survivor. With no secondaries left it returns
+    /// `None`.
+    #[tokio::test]
+    async fn promote_secondary_moves_survivor_into_primary() {
+        use super::Transport;
+        use fluxsync_crypto::{test_util::pair_for_test, Identity};
+        use std::sync::Arc;
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.unwrap();
+        let transport = Arc::new(transport);
+
+        let me = Identity::generate();
+        let (sess1, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (sess2, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (id1, id2) = ([1u8; 32], [2u8; 32]);
+        transport.install_session(id1, sess1).await;
+        transport.install_session(id2, sess2).await;
+        assert_eq!(transport.cached_peer_id().await, Some(id1));
+
+        // Primary lost → promote the secondary.
+        assert_eq!(transport.promote_secondary().await, Some(id2));
+        assert_eq!(transport.cached_peer_id().await, Some(id2));
+        assert!(transport.has_session().await);
+        assert_eq!(transport.linked_peer_ids().await, vec![id2]);
+        assert!(transport.secondary_liveness().await.is_empty());
+
+        // No secondaries remain.
+        assert_eq!(transport.promote_secondary().await, None);
     }
 }

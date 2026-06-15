@@ -422,8 +422,9 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let event_tx = event_tx.clone();
         let shutdown = shutdown.clone();
         let metrics = metrics.clone();
+        let peer_meta = peer_meta.clone();
         tasks.spawn(async move {
-            if let Err(e) = heartbeat_loop(transport, event_tx, shutdown, metrics).await {
+            if let Err(e) = heartbeat_loop(transport, event_tx, shutdown, metrics, peer_meta).await {
                 tracing::warn!(error = %e, "heartbeat loop exited");
             }
             Ok(())
@@ -2578,11 +2579,42 @@ async fn clipboard_watcher_loop(
 // Heartbeat & Timeout loop
 // ─────────────────────────────────────────────────────────────────
 
+/// FluxMesh robustness slice 2: the primary peer's link just died. If a
+/// secondary mesh session is still live, promote it into the primary slot and
+/// rebind State onto it (via `Event::PrimaryFailover`) so the link stays
+/// connected instead of dropping to Discovering. Returns true when it failed
+/// over — the caller then SKIPS `Event::PeerLost`.
+async fn try_primary_failover(
+    transport: &Arc<Transport>,
+    event_tx: &mpsc::Sender<Event>,
+    peer_meta: &PeerMetaMap,
+) -> bool {
+    let Some(id) = transport.promote_secondary().await else {
+        return false;
+    };
+    let (name, platform) = match peer_meta.lock().await.get(&id) {
+        Some(m) => (m.name.clone(), m.platform.clone()),
+        None => (String::new(), String::new()),
+    };
+    tracing::warn!(
+        peer = %hex::encode(id),
+        "primary link lost; failing over to live secondary peer"
+    );
+    let _ = event_tx.try_send(Event::PrimaryFailover {
+        peer_id: id,
+        name,
+        platform,
+    });
+    let _ = event_tx.try_send(Event::MeshPeersChanged);
+    true
+}
+
 async fn heartbeat_loop(
     transport: Arc<Transport>,
     event_tx: mpsc::Sender<Event>,
     shutdown: CancellationToken,
     metrics: Arc<Mutex<MetricsTracker>>,
+    peer_meta: PeerMetaMap,
 ) -> Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     let mut missed_pings = 0;
@@ -2629,7 +2661,12 @@ async fn heartbeat_loop(
                             tracing::warn!("Peer timed out (6 missed pings/30s). Dropping link.");
                             metrics.lock().await.on_disconnect(DisconnectReason::HeartbeatTimeout);
                             transport.set_last_rx(now);
-                            let _ = event_tx.try_send(Event::PeerLost);
+                            // FluxMesh robustness slice 2: rebind to a live
+                            // secondary if one exists; only fall to Discovering
+                            // when the whole mesh is gone.
+                            if !try_primary_failover(&transport, &event_tx, &peer_meta).await {
+                                let _ = event_tx.try_send(Event::PeerLost);
+                            }
                             missed_pings = 0;
                         }
                     } else {
@@ -3182,7 +3219,11 @@ async fn dispatch_inbound_frame(
             // Only the primary peer drives the single FSM's PeerLost (which
             // clears State + the primary session). A secondary mesh peer
             // leaving must not disturb the primary link (FluxMesh 2C-b).
-            if transport.cached_peer_id().await == Some(peer_id) {
+            // Robustness slice 2: if the primary said Bye but a secondary is
+            // still live, fail over to it instead of disconnecting.
+            if transport.cached_peer_id().await == Some(peer_id)
+                && !try_primary_failover(transport, event_tx, peer_meta).await
+            {
                 let _ = event_tx.try_send(Event::PeerLost);
             }
         }
@@ -3208,8 +3249,11 @@ async fn dispatch_inbound_frame(
                 let _ = event_tx.try_send(Event::MeshPeersChanged);
             }
             // Primary-only PeerLost, as for Bye — a secondary peer revoking us
-            // tears down only its own link (FluxMesh 2C-b).
-            if transport.cached_peer_id().await == Some(peer_id) {
+            // tears down only its own link (FluxMesh 2C-b). Robustness slice 2:
+            // fail over to a live secondary before declaring the link lost.
+            if transport.cached_peer_id().await == Some(peer_id)
+                && !try_primary_failover(transport, event_tx, peer_meta).await
+            {
                 let _ = event_tx.try_send(Event::PeerLost);
             }
         }

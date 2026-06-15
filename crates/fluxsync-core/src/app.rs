@@ -353,6 +353,27 @@ impl App {
                 self.state.peer_battery = 100;
                 self.state.peer_charging = false;
             }
+            Event::PrimaryFailover {
+                peer_id,
+                name,
+                platform,
+            } => {
+                // Deliberate rebind to an already-trusted, already-session-live
+                // secondary (the daemon promoted it into the primary slot). No
+                // is_peer_mismatch guard: this is a vouched promotion, not a
+                // stranger appearing. History is KEPT — the promoted peer was an
+                // active mesh peer whose items are already legitimately present
+                // (unlike a fresh re-pair, which clears under FS-046).
+                self.state.peer_name.clone_from(name);
+                self.state.peer_platform.clone_from(platform);
+                if *peer_id != [0u8; 32] {
+                    self.last_paired_peer_id = *peer_id;
+                    self.state.peer_id = *peer_id;
+                }
+                // Promoted peer's charge is unknown until its next Battery frame.
+                self.state.peer_battery = 100;
+                self.state.peer_charging = false;
+            }
             Event::UntrustedPeerSeen { .. } => {
                 self.state.peer_name.clear();
                 self.state.peer_platform.clear();
@@ -584,6 +605,70 @@ mod tests {
         assert_eq!(app.state.status, Status::Syncing);
         assert_eq!(app.phase, Phase::Linked);
         assert_eq!(app.state.peer_name, "Galaxy S21 Ultra");
+    }
+
+    /// FluxMesh robustness slice 2: when the primary link dies but a secondary
+    /// is live, `PrimaryFailover` rebinds State onto the survivor while Linked —
+    /// which a plain `PeerSeen` cannot do (anti-hijack guard) — and keeps the
+    /// existing history (the promoted peer's items are already in it).
+    #[test]
+    fn primary_failover_rebinds_while_linked_keeping_history() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Mac".into(),
+            },
+            &wall(),
+        );
+        let _ = app.handle(Event::HandshakeOk, &wall());
+        assert_eq!(app.phase, Phase::Linked);
+        assert_eq!(app.state.peer_id, [7; 32]);
+
+        // Populate history (an item the mesh already synced).
+        app.handle(
+            Event::FrameReceivedClipboard {
+                hash: [1; 32],
+                kind: Kind::Text,
+                payload: b"hi".to_vec(),
+                preview: "hi".into(),
+                sensitive: false,
+                lamport: 1,
+            },
+            &wall(),
+        );
+        let history_len = app.state.history.len();
+        assert!(history_len > 0);
+
+        // A plain PeerSeen for a DIFFERENT peer is rejected while Linked
+        // (the anti-hijack guard) — exactly why failover needs its own event.
+        assert!(app.is_peer_mismatch([9; 32]));
+        let rejected = app.handle(
+            Event::PeerSeen {
+                peer_id: [9; 32],
+                name: "Phone".into(),
+            },
+            &wall(),
+        );
+        assert!(rejected.is_empty());
+        assert_eq!(app.state.peer_id, [7; 32]);
+
+        // Failover rebinds onto the promoted secondary, stays Linked, keeps history.
+        let acts = app.handle(
+            Event::PrimaryFailover {
+                peer_id: [9; 32],
+                name: "Phone".into(),
+                platform: "android".into(),
+            },
+            &wall(),
+        );
+        assert!(acts.contains(&Action::EmitState));
+        assert_eq!(app.phase, Phase::Linked);
+        assert_eq!(app.state.peer_id, [9; 32]);
+        assert_eq!(app.state.peer_name, "Phone");
+        assert_eq!(app.state.peer_platform, "android");
+        assert_eq!(app.state.history.len(), history_len);
     }
 
     #[test]
