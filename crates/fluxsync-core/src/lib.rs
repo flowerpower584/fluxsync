@@ -30,7 +30,7 @@ pub use error::CoreError;
 pub use events::{Action, Event, LogEntry, LogLevel};
 pub use fsm::{transition, Phase};
 pub use id::{DeviceId, EventId};
-pub use policy::status_for;
+pub use policy::{status_for, Decision, Direction, FirewallPolicy, Rule};
 pub use state::{Config, HistoryItem, HistorySource, PeerInfo, State, Status};
 
 // Re-export Kind from proto so wire and IPC representations stay in sync.
