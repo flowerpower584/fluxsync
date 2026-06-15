@@ -1168,6 +1168,30 @@ async fn handle_driver_cmd(
             .await;
             CmdResponse::ok(req_id, None)
         }
+        CmdOp::ResolvePending { hash, allow } => {
+            tracing::info!(%hash, allow, "IPC: resolve-pending");
+            let actions = app.handle(Event::ResolvePending { hash, allow }, &**wall);
+            // An approved OUTBOUND item re-emits SendItem; route it through the
+            // same SAS gate as a normal push so an unconfirmed peer can't be fed
+            // the held secret.
+            let actions = gate_outbound(actions, transport, pending_pairs).await;
+            dispatch(
+                actions,
+                app,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+                inflight,
+                peer_meta,
+            )
+            .await;
+            CmdResponse::ok(req_id, None)
+        }
         CmdOp::Push { text } => {
             use fluxsync_core::Clock;
             tracing::info!(len = text.len(), "IPC: push requested from local");

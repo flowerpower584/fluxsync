@@ -79,6 +79,13 @@ pub enum CmdOp {
     SetFirewall {
         policy: FirewallPolicy,
     },
+    /// Clipboard firewall (chantier A): approve (`allow=true`) or reject an
+    /// item the `Ask` rule parked in `State.pending`, keyed by its hex content
+    /// `hash`. Approval finally sends/writes it; rejection drops it.
+    ResolvePending {
+        hash: String,
+        allow: bool,
+    },
     Revoke {
         peer_id: String,
     },

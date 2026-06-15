@@ -14,9 +14,22 @@ use crate::events::{Action, Event, LogEntry};
 use crate::fsm::{transition, Phase};
 use crate::id::{DeviceId, EventId};
 use crate::policy::{status_for, Decision, Direction, FirewallPolicy};
-use crate::state::{Config, HistoryItem, State};
+use crate::state::{Config, HistoryItem, PendingItem, State};
 use fluxsync_proto::Kind;
 use std::collections::BTreeMap;
+
+/// The bytes + routing the daemon needs to actually emit a deferred item once
+/// the user approves it. Kept OUT of `State` (and thus off the IPC wire) — the
+/// serializable [`PendingItem`] carries only a hash + preview, mirroring how
+/// history keeps payloads local.
+#[derive(Debug, Clone)]
+struct PendingPayload {
+    direction: Direction,
+    kind: Kind,
+    payload: Vec<u8>,
+    sensitive: bool,
+    hash: [u8; 32],
+}
 
 const HISTORY_SOFT_CAP: usize = 50;
 
@@ -78,6 +91,10 @@ pub struct App {
     seen: SeenSet,
     /// Per-peer link state, keyed by device. One entry per known peer.
     links: BTreeMap<DeviceId, PeerLink>,
+    /// Firewall `Ask` parking lot: hex content hash → the bytes/routing needed
+    /// to emit the item if the user approves it. The display half lives in
+    /// `state.pending`; this half never leaves the daemon.
+    pending_payloads: BTreeMap<String, PendingPayload>,
 }
 
 impl App {
@@ -95,6 +112,7 @@ impl App {
             local_seq: 0,
             seen: SeenSet::default(),
             links: BTreeMap::new(),
+            pending_payloads: BTreeMap::new(),
         }
     }
 
@@ -145,29 +163,109 @@ impl App {
         &self.config.firewall
     }
 
-    /// Clipboard firewall gate (chantier A). Strips the sync action when the
-    /// policy says Never/Ask for this item's content type + direction. `Ask`
-    /// is fail-closed here — the action is dropped, not yet held; the
-    /// pending-confirm queue that turns Ask into a real prompt lands in a
-    /// later slice. The inbound `AckItem` is deliberately KEPT so a blocked
-    /// peer stops retransmitting (same contract as the dedup-suppress path).
-    fn apply_firewall(&self, event: &Event, actions: &mut Vec<Action>) {
-        let (kind, sensitive, dir) = match event {
+    /// Clipboard firewall gate (chantier A). Judges the item, then either lets
+    /// the sync action through (`Pass`), drops it silently (`Never`), or parks
+    /// it for the user (`Ask`) — stripping the action and queuing it in
+    /// `state.pending` + `pending_payloads`. The inbound `AckItem` is always
+    /// KEPT so a held/blocked peer stops retransmitting (same contract as the
+    /// dedup-suppress path).
+    fn apply_firewall(&mut self, event: &Event, actions: &mut Vec<Action>) {
+        let (kind, sensitive, dir, hash, payload, preview) = match event {
             Event::LocalClipboardChange {
-                kind, sensitive, ..
-            } => (*kind, *sensitive, Direction::Outbound),
+                kind,
+                sensitive,
+                hash,
+                payload,
+                preview,
+                ..
+            } => (*kind, *sensitive, Direction::Outbound, *hash, payload, preview),
             Event::FrameReceivedClipboard {
-                kind, sensitive, ..
-            } => (*kind, *sensitive, Direction::Inbound),
+                kind,
+                sensitive,
+                hash,
+                payload,
+                preview,
+                ..
+            } => (*kind, *sensitive, Direction::Inbound, *hash, payload, preview),
             _ => return,
         };
-        if self.config.firewall.decide(kind, sensitive, dir) == Decision::Pass {
-            return;
+        match self.config.firewall.decide(kind, sensitive, dir) {
+            Decision::Pass => {}
+            Decision::Block => Self::strip_sync_action(dir, actions),
+            Decision::Defer => {
+                Self::strip_sync_action(dir, actions);
+                self.park_pending(dir, kind, sensitive, hash, payload, preview);
+            }
         }
+    }
+
+    /// Drop the action that would have synced this item, by direction.
+    fn strip_sync_action(dir: Direction, actions: &mut Vec<Action>) {
         match dir {
             Direction::Outbound => actions.retain(|a| !matches!(a, Action::SendItem { .. })),
             Direction::Inbound => actions.retain(|a| !matches!(a, Action::WriteClipboard { .. })),
         }
+    }
+
+    /// Park an `Ask`-held item: record the display half in `state.pending` and
+    /// the payload half in `pending_payloads`, both keyed by hex content hash.
+    /// Re-parking the same hash is a no-op (idempotent on retransmits).
+    fn park_pending(
+        &mut self,
+        dir: Direction,
+        kind: Kind,
+        sensitive: bool,
+        hash: [u8; 32],
+        payload: &[u8],
+        preview: &str,
+    ) {
+        let key = hex32(&hash);
+        if self.pending_payloads.contains_key(&key) {
+            return;
+        }
+        self.pending_payloads.insert(
+            key.clone(),
+            PendingPayload {
+                direction: dir,
+                kind,
+                payload: payload.to_vec(),
+                sensitive,
+                hash,
+            },
+        );
+        self.state.pending.push(PendingItem {
+            hash: key,
+            kind,
+            preview: preview.trim().to_string(),
+            sensitive,
+            direction: dir,
+        });
+    }
+
+    /// Resolve a parked item by hex `hash`. Always removes it from both queues
+    /// and emits state; on `allow` it also re-emits the held sync action so the
+    /// daemon finally sends/writes it. An unknown hash is a harmless no-op.
+    fn resolve_pending(&mut self, hash: &str, allow: bool) -> Vec<Action> {
+        self.state.pending.retain(|p| p.hash != hash);
+        let Some(p) = self.pending_payloads.remove(hash) else {
+            return vec![Action::EmitState];
+        };
+        if !allow {
+            return vec![Action::EmitState];
+        }
+        let action = match p.direction {
+            Direction::Outbound => Action::SendItem {
+                hash: p.hash,
+                kind: p.kind,
+                payload: p.payload,
+                sensitive: p.sensitive,
+            },
+            Direction::Inbound => Action::WriteClipboard {
+                kind: p.kind,
+                payload: p.payload,
+            },
+        };
+        vec![action, Action::EmitState]
     }
 
     // ── FluxMesh coordinator API (Phase 1 foundation) ───────────────────
@@ -281,6 +379,13 @@ impl App {
     pub fn handle<W: WallClock + ?Sized>(&mut self, event: Event, wall: &W) -> Vec<Action> {
         // [FIX] Optimization: Removed expensive state.clone().
         // Instead, we manually track if we need to EmitState.
+
+        // ── Firewall Ask resolution (chantier A) ────────────────────────
+        // A parked item's approve/deny bypasses the FSM entirely: it touches
+        // no phase, only the pending queues, and re-emits the held action.
+        if let Event::ResolvePending { hash, allow } = &event {
+            return self.resolve_pending(hash, *allow);
+        }
 
         // ── Pre-transition state mutations ──────────────────────────────
         // (everything that is "data the FSM expects to already be in state")
@@ -1288,12 +1393,107 @@ mod tests {
     }
 
     #[test]
-    fn firewall_ask_outbound_is_failclosed_for_now() {
-        // Until the pending-confirm queue exists, Ask drops the send (fail-closed).
+    fn firewall_ask_outbound_parks_item_then_send_on_approve() {
         let mut app = linked();
         app.set_firewall(fw_text(Rule::Ask));
+        // Ask holds the send and parks the item instead of emitting SendItem.
         let acts = app.handle(local_text(3), &wall());
         assert!(!acts.iter().any(|a| matches!(a, Action::SendItem { .. })));
+        assert_eq!(app.snapshot().pending.len(), 1);
+        let key = app.snapshot().pending[0].hash.clone();
+        assert_eq!(app.snapshot().pending[0].direction, Direction::Outbound);
+
+        // Approve → the held SendItem fires and the parking lot empties.
+        let resolved = app.handle(
+            Event::ResolvePending {
+                hash: key,
+                allow: true,
+            },
+            &wall(),
+        );
+        assert!(resolved
+            .iter()
+            .any(|a| matches!(a, Action::SendItem { hash, .. } if hash == &[3u8; 32])));
+        assert!(app.snapshot().pending.is_empty());
+    }
+
+    #[test]
+    fn firewall_ask_outbound_deny_drops_item_without_send() {
+        let mut app = linked();
+        app.set_firewall(fw_text(Rule::Ask));
+        app.handle(local_text(3), &wall());
+        let key = app.snapshot().pending[0].hash.clone();
+        let resolved = app.handle(
+            Event::ResolvePending {
+                hash: key,
+                allow: false,
+            },
+            &wall(),
+        );
+        assert!(!resolved.iter().any(|a| matches!(a, Action::SendItem { .. })));
+        assert!(app.snapshot().pending.is_empty());
+    }
+
+    #[test]
+    fn firewall_ask_inbound_parks_then_writes_on_approve() {
+        let mut app = linked();
+        app.set_firewall(fw_text(Rule::Ask));
+        let acts = app.handle(
+            Event::FrameReceivedClipboard {
+                hash: [8; 32],
+                kind: Kind::Text,
+                payload: b"from peer".to_vec(),
+                preview: "from peer".into(),
+                sensitive: false,
+                lamport: 9,
+            },
+            &wall(),
+        );
+        // Held: no write, but the ack still fires so the peer stops resending.
+        assert!(!acts.iter().any(|a| matches!(a, Action::WriteClipboard { .. })));
+        assert!(acts
+            .iter()
+            .any(|a| matches!(a, Action::AckItem { hash } if hash == &[8u8; 32])));
+        assert_eq!(app.snapshot().pending.len(), 1);
+        assert_eq!(app.snapshot().pending[0].direction, Direction::Inbound);
+
+        let key = app.snapshot().pending[0].hash.clone();
+        let resolved = app.handle(
+            Event::ResolvePending {
+                hash: key,
+                allow: true,
+            },
+            &wall(),
+        );
+        assert!(resolved
+            .iter()
+            .any(|a| matches!(a, Action::WriteClipboard { .. })));
+        assert!(app.snapshot().pending.is_empty());
+    }
+
+    #[test]
+    fn resolve_unknown_hash_is_a_noop() {
+        let mut app = linked();
+        let acts = app.handle(
+            Event::ResolvePending {
+                hash: "deadbeef".into(),
+                allow: true,
+            },
+            &wall(),
+        );
+        assert!(acts.iter().all(|a| matches!(a, Action::EmitState)));
+        assert!(app.snapshot().pending.is_empty());
+    }
+
+    #[test]
+    fn firewall_ask_dedupes_reparked_same_hash() {
+        let mut app = linked();
+        app.set_firewall(fw_text(Rule::Ask));
+        app.handle(local_text(3), &wall());
+        // A retransmit of the same content must not stack a second pending row.
+        // (The dedup ring suppresses it anyway, but parking is idempotent too.)
+        app.handle(local_text(3), &wall());
+        assert_eq!(app.snapshot().pending.len(), 1);
     }
 
     #[test]

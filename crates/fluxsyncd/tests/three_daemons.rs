@@ -840,3 +840,188 @@ async fn firewall_deny_outbound_blocks_peer_and_is_reversible() {
         "a daemon panicked during the firewall test"
     );
 }
+
+/// The hex hashes currently parked in `State.pending` at `ipc`.
+async fn pending_hashes(ipc: &PathBuf) -> Vec<String> {
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 8,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
+    match resp.data {
+        Some(CmdData::State(s)) => s.pending.iter().map(|p| p.hash.clone()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// FluxFirewall slice 4: an `Ask` rule must PARK a locally-copied item (the
+/// peer does not get it, it shows up in `State.pending`), and a `resolve` with
+/// `allow=true` must finally deliver it. A second item resolved with
+/// `allow=false` must be dropped. All headless over IPC.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn firewall_ask_parks_then_resolve_delivers_or_drops() {
+    let _ = tracing_subscriber::fmt::try_init();
+    install_panic_hook();
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let (pid_a, pid_b) = (id_a.peer_id(), id_b.peer_id());
+    let (sess_a_b, sess_b_a) = pair_for_test(&id_a, &id_b).expect("pair a-b");
+
+    let (port_a, port_b) = (pick_free_udp_port().await, pick_free_udp_port().await);
+    let addr_a: SocketAddr = format!("127.0.0.1:{port_a}").parse().unwrap();
+    let addr_b: SocketAddr = format!("127.0.0.1:{port_b}").parse().unwrap();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ipc_a = dir.path().join("a.sock");
+    let ipc_b = dir.path().join("b.sock");
+
+    let mut cfg_a = base_cfg(id_a, port_a, ipc_a.clone(), "node-a");
+    cfg_a.test_pair = Some(TestPair {
+        session: sess_a_b,
+        peer_addr: addr_b,
+        peer_name: "node-b".into(),
+        peer_id: pid_b,
+    });
+    let mut cfg_b = base_cfg(id_b, port_b, ipc_b.clone(), "node-b");
+    cfg_b.test_pair = Some(TestPair {
+        session: sess_b_a,
+        peer_addr: addr_a,
+        peer_name: "node-a".into(),
+        peer_id: pid_a,
+    });
+
+    let sd_a = CancellationToken::new();
+    let sd_b = CancellationToken::new();
+    let (ca, cb) = (sd_a.clone(), sd_b.clone());
+    let h_a = tokio::spawn(async move { run(cfg_a, ca).await });
+    let h_b = tokio::spawn(async move { run(cfg_b, cb).await });
+
+    let up = wait_until(Duration::from_secs(2), || async {
+        peer_name(&ipc_a).await.as_deref() == Some("node-b")
+            && peer_name(&ipc_b).await.as_deref() == Some("node-a")
+    })
+    .await;
+    assert!(up, "A/B did not link within 2s");
+
+    // text = Ask on the sender.
+    let policy = FirewallPolicy {
+        enabled: true,
+        text: Rule::Ask,
+        ..FirewallPolicy::default()
+    };
+    let set = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::SetFirewall { policy },
+        },
+    )
+    .await;
+    assert!(set.ok, "set-firewall failed: {set:?}");
+
+    // ── 1. push "ask-deliver" → parked on A, NOT delivered to B ──
+    let deliver = "ask-deliver";
+    let p1 = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 2,
+            op: CmdOp::Push {
+                text: deliver.into(),
+            },
+        },
+    )
+    .await;
+    assert!(p1.ok);
+    let parked = wait_until(Duration::from_secs(2), || async {
+        pending_hashes(&ipc_a).await.len() == 1
+    })
+    .await;
+    assert!(parked, "item was not parked in State.pending");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        history_count(&ipc_b, deliver).await,
+        0,
+        "parked item reached the peer before approval"
+    );
+
+    // approve → it is delivered and leaves the pending queue.
+    let hash = pending_hashes(&ipc_a).await.remove(0);
+    let resolve = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 3,
+            op: CmdOp::ResolvePending {
+                hash: hash.clone(),
+                allow: true,
+            },
+        },
+    )
+    .await;
+    assert!(resolve.ok, "resolve(allow) failed: {resolve:?}");
+    assert!(
+        wait_until(Duration::from_secs(2), || async {
+            history_count(&ipc_b, deliver).await >= 1
+        })
+        .await,
+        "approved item never reached B"
+    );
+    assert!(
+        pending_hashes(&ipc_a).await.is_empty(),
+        "pending not cleared after approve"
+    );
+
+    // ── 2. push "ask-drop" → park, then DENY → never delivered ──
+    let drop_text = "ask-drop";
+    let p2 = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 4,
+            op: CmdOp::Push {
+                text: drop_text.into(),
+            },
+        },
+    )
+    .await;
+    assert!(p2.ok);
+    let parked2 = wait_until(Duration::from_secs(2), || async {
+        pending_hashes(&ipc_a).await.len() == 1
+    })
+    .await;
+    assert!(parked2, "second item was not parked");
+    let hash2 = pending_hashes(&ipc_a).await.remove(0);
+    let deny = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 5,
+            op: CmdOp::ResolvePending {
+                hash: hash2,
+                allow: false,
+            },
+        },
+    )
+    .await;
+    assert!(deny.ok, "resolve(deny) failed: {deny:?}");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        history_count(&ipc_b, drop_text).await,
+        0,
+        "denied item leaked to the peer"
+    );
+    assert!(
+        pending_hashes(&ipc_a).await.is_empty(),
+        "pending not cleared after deny"
+    );
+
+    sd_a.cancel();
+    sd_b.cancel();
+    let _ = timeout(Duration::from_secs(2), h_a).await;
+    let _ = timeout(Duration::from_secs(2), h_b).await;
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a daemon panicked during the ask/resolve test"
+    );
+}

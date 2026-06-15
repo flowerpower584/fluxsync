@@ -1,5 +1,5 @@
 use crate::error::CoreError;
-use crate::policy::FirewallPolicy;
+use crate::policy::{Direction, FirewallPolicy};
 use fluxsync_proto::Kind;
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +53,27 @@ pub struct State {
     /// default)]` keeps older snapshots (pre-firewall) deserializing.
     #[serde(default)]
     pub firewall: FirewallPolicy,
+    /// Items the firewall held under an `Ask` rule, awaiting the user's
+    /// approve/deny. The UI lists these; a `resolve` IPC clears one by its
+    /// `hash`. Binary payloads are NOT carried here (only a hash + preview) —
+    /// the daemon keeps the bytes out of the wire, same as `history`.
+    #[serde(default)]
+    pub pending: Vec<PendingItem>,
+}
+
+/// One clipboard item parked by the firewall's `Ask` rule, surfaced to the UI
+/// so the user can approve or deny it. Mirrors a `HistoryItem`'s display fields
+/// but adds the flow `direction` and omits the payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PendingItem {
+    /// Hex of the 32-byte content hash. The resolve key.
+    pub hash: String,
+    pub kind: Kind,
+    pub preview: String,
+    pub sensitive: bool,
+    /// Inbound (awaiting apply) or Outbound (awaiting send).
+    pub direction: Direction,
 }
 
 /// One mesh peer in the `State.peers` list (FluxMesh Phase 3). A flat
@@ -199,6 +220,7 @@ impl State {
             metrics: None,
             charge_override: config.charge_override,
             firewall: config.firewall.clone(),
+            pending: Vec::new(),
         }
     }
 
@@ -299,6 +321,7 @@ mod tests {
             "cipher",
             "charge_override",
             "firewall",
+            "pending",
         ] {
             assert!(j.get(k).is_some(), "missing key {k} in JSON shape");
         }

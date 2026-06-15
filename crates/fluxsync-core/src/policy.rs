@@ -103,8 +103,11 @@ impl Rule {
     }
 }
 
-/// Which way a clipboard item is flowing when the firewall judges it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which way a clipboard item is flowing when the firewall judges it. Also
+/// stored on a deferred [`crate::state::PendingItem`] so the UI can show
+/// whether an awaiting item is incoming or outgoing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Direction {
     /// Arriving from a peer, about to be written to this device's clipboard.
     Inbound,

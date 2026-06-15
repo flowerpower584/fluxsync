@@ -88,6 +88,14 @@ pub enum Event {
         hash: String,
         favorite: bool,
     },
+    /// Clipboard firewall (chantier A): the user approved (`allow=true`) or
+    /// rejected (`allow=false`) an item the `Ask` rule had parked. Keyed by the
+    /// pending item's hex content `hash`. On approval the FSM re-emits the held
+    /// `SendItem`/`WriteClipboard`; either way the entry leaves `State.pending`.
+    ResolvePending {
+        hash: String,
+        allow: bool,
+    },
 }
 
 /// Side-effect commands the daemon must execute. The FSM never performs
