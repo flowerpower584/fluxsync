@@ -765,69 +765,18 @@ async fn dispatch(
                 let origin = event_id.origin.into_bytes();
                 let event_seq = event_id.seq;
 
-                // Build every datagram for this item up front, encoded.
-                // The same bytes are kept in the inflight table so the
-                // retransmit timer can re-send them verbatim until acked.
-                let mut frames: Vec<Vec<u8>> = Vec::new();
-                if payload.len() <= MAX_CHUNK_DATA {
-                    let item = ClipboardItem {
-                        lamport: app.clock.now(),
-                        hash,
-                        kind,
-                        payload,
-                        sensitive,
-                        wall_time_ms: 0,
-                        origin,
-                        event_seq,
-                    };
-                    let frame = Frame {
-                        version: PROTOCOL_VERSION,
-                        msg: Msg::ClipboardItem(item),
-                    };
-                    if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                        frames.push(bytes);
-                    } else {
-                        tracing::error!("SendItem: CBOR encode failed");
-                    }
-                } else {
-                    // Large payload: a header frame (empty payload), then
-                    // one frame per chunk.
-                    let header = ClipboardItem {
-                        lamport: app.clock.now(),
-                        hash,
-                        kind,
-                        payload: Vec::new(),
-                        sensitive,
-                        wall_time_ms: 0,
-                        origin,
-                        event_seq,
-                    };
-                    let frame = Frame {
-                        version: PROTOCOL_VERSION,
-                        msg: Msg::ClipboardItem(header),
-                    };
-                    if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                        frames.push(bytes);
-                    }
-
-                    let chunks: Vec<_> = payload.chunks(MAX_CHUNK_DATA).collect();
-                    let total = chunks.len() as u16;
-                    for (idx, data) in chunks.into_iter().enumerate() {
-                        let chunk = fluxsync_proto::Chunk {
-                            item_id: hash,
-                            idx: idx as u16,
-                            total,
-                            data: data.to_vec(),
-                        };
-                        let frame = Frame {
-                            version: PROTOCOL_VERSION,
-                            msg: Msg::Chunk(chunk),
-                        };
-                        if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                            frames.push(bytes);
-                        }
-                    }
-                }
+                // Build every datagram for this item up front, encoded. The
+                // same bytes are kept in the inflight table so the retransmit
+                // timer can re-send them verbatim until acked.
+                let frames = build_item_frames(
+                    app.clock.now(),
+                    hash,
+                    kind,
+                    &payload,
+                    sensitive,
+                    origin,
+                    event_seq,
+                );
 
                 if frames.is_empty() {
                     tracing::error!("SendItem: nothing to send (encode failed)");
@@ -2907,6 +2856,119 @@ async fn ack_source(transport: &Arc<Transport>, peer_id: [u8; 32], hash: [u8; 32
 /// Relay a freshly-seen item to every linked peer except its `source` and
 /// `origin`, tracking the relayed hash in `inflight` so retransmits cover a
 /// dropped relay datagram (FluxMesh 2C-b mesh forwarding).
+/// Encode a clipboard item into its wire frames: one `ClipboardItem` for a
+/// small payload, or an empty-payload header followed by one `Chunk` per slice
+/// for a large one. Shared by the outbound `SendItem` path and the chunked
+/// relay (FluxMesh robustness slice 3), so a relayed image is re-chunked
+/// identically and keeps the original `origin`/`event_seq`.
+fn build_item_frames(
+    lamport: u64,
+    hash: [u8; 32],
+    kind: Kind,
+    payload: &[u8],
+    sensitive: bool,
+    origin: [u8; 32],
+    event_seq: u64,
+) -> Vec<Vec<u8>> {
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+    if payload.len() <= MAX_CHUNK_DATA {
+        let item = ClipboardItem {
+            lamport,
+            hash,
+            kind,
+            payload: payload.to_vec(),
+            sensitive,
+            wall_time_ms: 0,
+            origin,
+            event_seq,
+        };
+        if let Ok(bytes) = fluxsync_proto::encode(&Frame {
+            version: PROTOCOL_VERSION,
+            msg: Msg::ClipboardItem(item),
+        }) {
+            frames.push(bytes);
+        } else {
+            tracing::error!("build_item_frames: CBOR encode failed");
+        }
+    } else {
+        // Large payload: a header frame (empty payload), then one per chunk.
+        let header = ClipboardItem {
+            lamport,
+            hash,
+            kind,
+            payload: Vec::new(),
+            sensitive,
+            wall_time_ms: 0,
+            origin,
+            event_seq,
+        };
+        if let Ok(bytes) = fluxsync_proto::encode(&Frame {
+            version: PROTOCOL_VERSION,
+            msg: Msg::ClipboardItem(header),
+        }) {
+            frames.push(bytes);
+        }
+        let chunks: Vec<_> = payload.chunks(MAX_CHUNK_DATA).collect();
+        let total = chunks.len() as u16;
+        for (idx, data) in chunks.into_iter().enumerate() {
+            let chunk = fluxsync_proto::Chunk {
+                item_id: hash,
+                idx: idx as u16,
+                total,
+                data: data.to_vec(),
+            };
+            if let Ok(bytes) = fluxsync_proto::encode(&Frame {
+                version: PROTOCOL_VERSION,
+                msg: Msg::Chunk(chunk),
+            }) {
+                frames.push(bytes);
+            }
+        }
+    }
+    frames
+}
+
+/// Fan one item's frames out to every linked peer except `source` and `origin`
+/// (mesh relay), with the same burst-16/pause-2ms pacing as the outbound path
+/// for multi-frame items, and arm the retransmit timer until each target acks.
+async fn forward_frames(
+    transport: &Arc<Transport>,
+    inflight: &InflightMap,
+    source: [u8; 32],
+    origin: [u8; 32],
+    hash: [u8; 32],
+    frames: Vec<Vec<u8>>,
+) {
+    let targets: Vec<[u8; 32]> = transport
+        .linked_peer_ids()
+        .await
+        .into_iter()
+        .filter(|d| *d != source && *d != origin)
+        .collect();
+    if targets.is_empty() || frames.is_empty() {
+        return;
+    }
+    let multi = frames.len() > 1;
+    for peer in &targets {
+        for (i, bytes) in frames.iter().enumerate() {
+            let _ = transport.send_encrypted_to(*peer, bytes).await;
+            if multi && (i + 1) % 16 == 0 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+    }
+    inflight.lock().await.insert(
+        hash,
+        Inflight {
+            frames,
+            attempts: 0,
+            last_sent: Instant::now(),
+            first_sent: Instant::now(),
+            pending_peers: targets.into_iter().collect(),
+        },
+    );
+}
+
 async fn forward_item(
     transport: &Arc<Transport>,
     inflight: &InflightMap,
@@ -2915,28 +2977,46 @@ async fn forward_item(
     hash: [u8; 32],
     frame_bytes: Vec<u8>,
 ) {
-    let targets: Vec<[u8; 32]> = transport
-        .linked_peer_ids()
-        .await
-        .into_iter()
-        .filter(|d| *d != source && *d != origin)
-        .collect();
-    if targets.is_empty() {
+    forward_frames(transport, inflight, source, origin, hash, vec![frame_bytes]).await;
+}
+
+/// FluxMesh robustness slice 3: finish a reassembled chunked item. Acks the
+/// source (always, so it stops retransmitting), then — only on first sight of
+/// this `EventId` (mesh anti-loop) — re-chunks the full payload and relays it
+/// across further hops, and delivers it locally. A chunked image now reaches
+/// a third node B→C, not just direct neighbours.
+#[allow(clippy::too_many_arguments)]
+async fn complete_reassembled_item(
+    transport: &Arc<Transport>,
+    inflight: &InflightMap,
+    mesh_seen: &MeshSeen,
+    event_tx: &mpsc::Sender<Event>,
+    source: [u8; 32],
+    origin: [u8; 32],
+    event_seq: u64,
+    hash: [u8; 32],
+    kind: Kind,
+    sensitive: bool,
+    lamport: u64,
+    payload: Vec<u8>,
+) {
+    ack_source(transport, source, hash).await;
+    let eid = EventId::new(DeviceId::from(origin), event_seq);
+    if !mesh_seen.lock().await.observe(eid) {
+        // Already seen this item on the mesh — don't re-apply or re-loop it.
         return;
     }
-    for peer in &targets {
-        let _ = transport.send_encrypted_to(*peer, &frame_bytes).await;
-    }
-    inflight.lock().await.insert(
+    let frames = build_item_frames(lamport, hash, kind, &payload, sensitive, origin, event_seq);
+    forward_frames(transport, inflight, source, origin, hash, frames).await;
+    let preview = preview_label(kind, &payload);
+    let _ = event_tx.try_send(Event::FrameReceivedClipboard {
         hash,
-        Inflight {
-            frames: vec![frame_bytes],
-            attempts: 0,
-            last_sent: Instant::now(),
-            first_sent: Instant::now(),
-            pending_peers: targets.into_iter().collect(),
-        },
-    );
+        kind,
+        payload,
+        preview,
+        sensitive,
+        lamport,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2989,11 +3069,15 @@ async fn dispatch_inbound_frame(
                 }
                 let r = map.entry(item.hash).or_insert_with(|| Reassembly {
                     metadata: Some((item.lamport, item.kind, item.sensitive)),
+                    origin: item.origin,
+                    event_seq: item.event_seq,
                     chunks: Vec::new(),
                     last_update: Instant::now(),
                     first_seen: Instant::now(),
                 });
                 r.metadata = Some((item.lamport, item.kind, item.sensitive));
+                r.origin = item.origin;
+                r.event_seq = item.event_seq;
                 r.last_update = Instant::now();
                 // A header datagram can arrive AFTER all its chunks (UDP
                 // reorders freely). Check completion here too — not only in
@@ -3003,6 +3087,7 @@ async fn dispatch_inbound_frame(
                     .filter(|_| !r.chunks.is_empty())
                     .filter(|_| r.chunks.iter().all(std::option::Option::is_some))
                 {
+                    let (origin, event_seq) = (r.origin, r.event_seq);
                     let mut full_payload = Vec::new();
                     for chunk in r.chunks.drain(..) {
                         full_payload.extend(chunk.unwrap());
@@ -3010,19 +3095,11 @@ async fn dispatch_inbound_frame(
                     map.remove(&item.hash);
                     drop(map);
 
-                    // FluxMesh 2C-b: ack the source on completion. (Chunked
-                    // relay across a third hop is not yet wired — chunked items
-                    // sync to direct neighbours only; see plan.)
-                    ack_source(transport, peer_id, item.hash).await;
-                    let preview = preview_label(kind, &full_payload);
-                    let _ = event_tx.try_send(Event::FrameReceivedClipboard {
-                        hash: item.hash,
-                        kind,
-                        payload: full_payload,
-                        preview,
-                        sensitive,
-                        lamport,
-                    });
+                    complete_reassembled_item(
+                        transport, inflight, mesh_seen, event_tx, peer_id, origin, event_seq,
+                        item.hash, kind, sensitive, lamport, full_payload,
+                    )
+                    .await;
                 }
             } else {
                 // FluxMesh 2C-b: ack the sender, then ingest by EventId for mesh
@@ -3074,6 +3151,8 @@ async fn dispatch_inbound_frame(
 
             let r = map.entry(c.item_id).or_insert_with(|| Reassembly {
                 metadata: None,
+                origin: [0u8; 32],
+                event_seq: 0,
                 chunks: vec![None; c.total as usize],
                 last_update: Instant::now(),
                 first_seen: Instant::now(),
@@ -3093,6 +3172,7 @@ async fn dispatch_inbound_frame(
                 .metadata
                 .filter(|_| r.chunks.iter().all(std::option::Option::is_some))
             {
+                let (origin, event_seq) = (r.origin, r.event_seq);
                 let mut full_payload = Vec::new();
                 for chunk in r.chunks.drain(..) {
                     full_payload.extend(chunk.unwrap());
@@ -3100,16 +3180,11 @@ async fn dispatch_inbound_frame(
                 map.remove(&c.item_id);
                 drop(map);
 
-                ack_source(transport, peer_id, c.item_id).await;
-                let preview = preview_label(kind, &full_payload);
-                let _ = event_tx.try_send(Event::FrameReceivedClipboard {
-                    hash: c.item_id,
-                    kind,
-                    payload: full_payload,
-                    preview,
-                    sensitive,
-                    lamport,
-                });
+                complete_reassembled_item(
+                    transport, inflight, mesh_seen, event_tx, peer_id, origin, event_seq,
+                    c.item_id, kind, sensitive, lamport, full_payload,
+                )
+                .await;
             }
         }
         Msg::BatteryStatus(b) => {
@@ -3302,6 +3377,11 @@ async fn dispatch_inbound_frame(
 
 struct Reassembly {
     metadata: Option<(u64, Kind, bool)>,
+    /// FluxMesh robustness slice 3: the header's EventId, kept so a completed
+    /// chunked item can be anti-loop-gated and relayed across a third hop with
+    /// the SAME identity (set in the header arm; meaningful once metadata Some).
+    origin: [u8; 32],
+    event_seq: u64,
     chunks: Vec<Option<Vec<u8>>>,
     last_update: Instant,
     first_seen: Instant,

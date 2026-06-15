@@ -249,6 +249,44 @@ async fn three_node_line_relays_one_item_exactly_once() {
         "A has more than its single local copy (item looped back)"
     );
 
+    // ── 3b. a CHUNKED item (payload > MAX_CHUNK_DATA = 1 KiB) must ALSO relay
+    //        A → B (direct) → C (B re-chunks and forwards). Robustness slice 3.
+    // ~3.7 KiB → multi-frame. Pre-trimmed to match what the daemon stores
+    // (the Push handler trims, which would otherwise drop the trailing space).
+    let big = "the quick brown fox jumps over "
+        .repeat(120)
+        .trim()
+        .to_string();
+    let push2 = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 43,
+            op: CmdOp::Push { text: big.clone() },
+        },
+    )
+    .await;
+    assert!(push2.ok, "chunked push failed: {push2:?}");
+
+    let arrived2 = wait_until(Duration::from_secs(3), || async {
+        history_count(&ipc_b, &big).await >= 1 && history_count(&ipc_c, &big).await >= 1
+    })
+    .await;
+    assert!(
+        arrived2,
+        "chunked item did not reach both B and C within 3s (B={}, C={})",
+        history_count(&ipc_b, &big).await,
+        history_count(&ipc_c, &big).await
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(history_count(&ipc_b, &big).await, 1, "B applied chunked item twice");
+    assert_eq!(history_count(&ipc_c, &big).await, 1, "C applied chunked item twice");
+    assert_eq!(
+        history_count(&ipc_a, &big).await,
+        1,
+        "chunked item looped back to A"
+    );
+
     // ── 4. clean shutdown, no panic ──
     sd_a.cancel();
     sd_b.cancel();
