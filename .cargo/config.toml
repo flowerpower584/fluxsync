@@ -1,0 +1,18 @@
+# Force 16 KB ELF max-page-size on the Android targets. Android 15+ devices
+# warn (and 16 KB-only hardware refuses to load) when a packaged .so has
+# 4 KB-aligned LOAD segments. Rust's *-linux-android target specs historically
+# pin max-page-size to 4 KB regardless of the NDK, so the produced
+# libfluxsync_mobile_ffi.so is unaligned even with a recent NDK. This linker
+# arg overrides that. Scoped to the Android targets only — desktop builds use
+# the host triple and are unaffected.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.i686-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

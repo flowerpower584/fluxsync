@@ -193,10 +193,12 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
 
     // QR scanning: CameraX preview + ML Kit barcode (offline model).
-    implementation("androidx.camera:camera-core:1.3.4")
-    implementation("androidx.camera:camera-camera2:1.3.4")
-    implementation("androidx.camera:camera-lifecycle:1.3.4")
-    implementation("androidx.camera:camera-view:1.3.4")
+    // CameraX 1.4.x ships 16 KB-page-aligned native libs (libimage_processing_util_jni.so),
+    // required by Android 15+ — 1.3.4 was not aligned.
+    implementation("androidx.camera:camera-core:1.4.1")
+    implementation("androidx.camera:camera-camera2:1.4.1")
+    implementation("androidx.camera:camera-lifecycle:1.4.1")
+    implementation("androidx.camera:camera-view:1.4.1")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
     // Tooling.
