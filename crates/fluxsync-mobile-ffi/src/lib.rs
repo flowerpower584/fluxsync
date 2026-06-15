@@ -589,6 +589,19 @@ impl FluxsyncHandle {
             .map(|_| ())
             .map_err(|e| FluxError::Ipc(e.to_string()))
     }
+
+    /// FluxVault: pin (`favorite = true`) or unpin a history item by its hex
+    /// content hash. Pinned items survive the vault's TTL + disk cap.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn set_favorite(&self, hash: String, favorite: bool) -> Result<(), FluxError> {
+        self.runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({"id": 1, "op": "set_favorite", "hash": hash, "favorite": favorite}),
+            ))
+            .map(|_| ())
+            .map_err(|e| FluxError::Ipc(e.to_string()))
+    }
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────

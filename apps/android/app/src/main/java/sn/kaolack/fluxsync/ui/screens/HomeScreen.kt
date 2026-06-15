@@ -127,7 +127,7 @@ fun HomeScreen(vm: FluxsyncViewModel) {
             item { EmptyHistory() }
         } else {
             items(s.history) { h ->
-                RecentRow(h)
+                RecentRow(h, onToggleFavorite = { vm.setFavorite(h.hash, !h.favorite) })
             }
         }
     }
@@ -371,7 +371,7 @@ private fun ConditionsPanel(s: DaemonState, onThresholdChange: (Int) -> Unit, on
 }
 
 @Composable
-private fun RecentRow(h: HistoryItem) {
+private fun RecentRow(h: HistoryItem, onToggleFavorite: () -> Unit) {
     val shape = RoundedCornerShape(FsRadius.Item)
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -400,7 +400,17 @@ private fun RecentRow(h: HistoryItem) {
         KindIcon(h.kind)
         Spacer(Modifier.width(10.dp))
         Text(h.preview, color = FsDarkFg, fontFamily = FsSans, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(
+            if (h.favorite) "★" else "☆",
+            color = if (h.favorite) FsWarn else FsDarkSubtle,
+            fontSize = 14.sp,
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .clickable(onClick = onToggleFavorite)
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+        )
+        Spacer(Modifier.width(8.dp))
         if (copyable) {
             Text("Copy", color = FsDarkMuted, fontFamily = FsSans, fontSize = 9.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.width(8.dp))

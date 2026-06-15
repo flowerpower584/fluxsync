@@ -152,6 +152,7 @@ data class DaemonState(
                     source = o.optString("source", "local"),
                     sensitive = o.optBoolean("sensitive", false),
                     lamport = o.optLong("lamport", 0L),
+                    favorite = o.optBoolean("favorite", false),
                 )
             }
             return out
@@ -260,6 +261,7 @@ data class HistoryItem(
     val source: String,
     val sensitive: Boolean,
     val lamport: Long,
+    val favorite: Boolean = false,
 )
 
 /**

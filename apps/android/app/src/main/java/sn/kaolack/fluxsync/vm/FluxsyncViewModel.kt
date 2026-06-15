@@ -155,6 +155,10 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
     fun resolvePending(hash: String, allow: Boolean) =
         ffi(if (allow) "Approve item" else "Reject item") { it.resolvePending(hash, allow) }
 
+    /** FluxVault: pin/unpin a history item past the vault TTL + cap. */
+    fun setFavorite(hash: String, favorite: Boolean) =
+        ffi(if (favorite) "Pin item" else "Unpin item") { it.setFavorite(hash, favorite) }
+
     fun checkAccessibility() {
         val app = getApplication<Application>()
         _isAccessibilityEnabled.value = isAccessibilityServiceEnabled(app, FluxsyncAccessibilityService::class.java)

@@ -666,6 +666,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_charge_override(
     ): Short
+    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_favorite(
+    ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_firewall(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_self_battery(
@@ -731,6 +733,8 @@ internal object UniffiLib {
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_battery_threshold(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_charge_override(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_favorite(`ptr`: Long,`hash`: RustBuffer.ByValue,`favorite`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_firewall(`ptr`: Long,`policyJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -904,6 +908,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_charge_override() != 22905.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_favorite() != 58674.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_firewall() != 12791.toShort()) {
@@ -1452,6 +1459,12 @@ public interface FluxsyncHandleInterface {
     fun `setChargeOverride`(`value`: kotlin.Boolean)
     
     /**
+     * FluxVault: pin (`favorite = true`) or unpin a history item by its hex
+     * content hash. Pinned items survive the vault's TTL + disk cap.
+     */
+    fun `setFavorite`(`hash`: kotlin.String, `favorite`: kotlin.Boolean)
+    
+    /**
      * FluxFirewall: replace the whole clipboard firewall policy. `policy_json`
      * is the serialized `FirewallPolicy` object (`enabled` + the per-kind
      * rules); the daemon swaps it in and re-emits state so the Android
@@ -1852,6 +1865,23 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
     UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_charge_override(
         it,
         FfiConverterBoolean.lower(`value`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * FluxVault: pin (`favorite = true`) or unpin a history item by its hex
+     * content hash. Pinned items survive the vault's TTL + disk cap.
+     */
+    @Throws(FluxException::class)override fun `setFavorite`(`hash`: kotlin.String, `favorite`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_favorite(
+        it,
+        FfiConverterString.lower(`hash`),FfiConverterBoolean.lower(`favorite`),_status)
 }
     }
     
