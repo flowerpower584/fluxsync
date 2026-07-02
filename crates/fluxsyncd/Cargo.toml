@@ -58,6 +58,22 @@ zeroize = "1.8"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["fs", "hostname"] }
 
+# macOS-only — `keystore.rs` calls the legacy `SecAccessCreate` /
+# `kSecAttrAccess` API directly to attach a self-only ACL to the identity
+# keychain item (P1a / DIR-P2-01, opt-in via FLUXSYNC_STRICT_KEYCHAIN=1;
+# becomes the default once Developer ID signing lands). Neither `keyring`
+# nor the safe
+# `security-framework` wrapper expose that call (only the modern
+# `kSecAttrAccessControl` / Data Protection Keychain path, which needs a
+# `keychain-access-groups` entitlement fluxsyncd doesn't have). Both crates
+# are already in the dependency tree transitively via `keyring`'s
+# `apple-native` feature; this promotes them to direct deps at the same
+# resolved versions.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework-sys = "2"
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+
 # `arboard` only ships backends for desktop OSes (macOS Cocoa, Linux
 # X11/Wayland, Windows Win32). On Android the same daemon is linked
 # into `fluxsync-mobile-ffi` and the OS clipboard is read/written from

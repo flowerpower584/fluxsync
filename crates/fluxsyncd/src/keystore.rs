@@ -20,6 +20,29 @@
 //!   backend; a future migration to Android Keystore via JNI is tracked
 //!   separately.
 //!
+//! Keychain ACL (FS-062 / DIR-P2-01, macOS only, **opt-in**): `keyring`'s
+//! macOS write path leaves the item with the OS default access-control
+//! list, on which "Always Allow" grants accumulate silently — a one-time
+//! human mistake becomes a permanent skeleton key for that app. Setting
+//! `FLUXSYNC_STRICT_KEYCHAIN=1` routes writes through `mac_acl` below,
+//! which attaches a self-only ACL via the legacy `SecAccessCreate` API
+//! and re-asserts it on every boot; reads are unaffected since
+//! `SecItemAdd` and `keyring`'s `SecKeychainFindGenericPassword` read
+//! path operate on the same underlying keychain item.
+//!
+//! Strict mode is NOT the default because the trusted-application entry
+//! is anchored to the binary's identity: unsigned/self-built daemons
+//! change identity on every rebuild, so a strict ACL makes macOS
+//! re-prompt for the keychain password after each update — recurring
+//! prompts, which the product explicitly rejects ("it just works"). It
+//! becomes the default once Developer ID signing (DIR-P4-01) lands: a
+//! signature-anchored trusted-application entry survives app updates
+//! without re-prompting. In default mode the boot path performs exactly
+//! the same keychain calls as before FS-062 (plain `keyring` get/set).
+//! See `docs/SECURITY.md` §2.4 for the full per-platform breakdown,
+//! including why Windows/Linux are left as documented residuals rather
+//! than given equivalent ceremony.
+//!
 //! `peers.json` is written atomically (`*.tmp` + fsync + rename) so a
 //! crash mid-write cannot corrupt the registry. The fallback identity
 //! file on Android uses the same atomic write.
@@ -40,27 +63,39 @@ const FIREWALL_FILE: &str = "firewall.json";
 #[cfg(not(target_os = "android"))]
 const KEYCHAIN_SERVICE: &str = "fluxsyncd";
 
-// C3 (open) — the `keyring` crate stores secrets as a generic password
-// with the default ACL: any process running as the current user can
-// read them without prompting. That preserves the disk-level hardening
-// from Phase 1 (no plaintext file) but does not stop a same-UID
-// malware from harvesting the Noise IK static key via
-// `security find-generic-password -s fluxsyncd -w` (macOS) or the
-// equivalent on Windows/Linux.
+// C3 (FS-062 / DIR-P2-01) — the `keyring` crate stores secrets as a
+// generic password with the default ACL: any process running as the
+// current user can read them without prompting once trust has ever been
+// granted once (e.g. a human clicking "Always Allow" on a `security
+// find-generic-password -s fluxsyncd -w` prompt during debugging).
 //
-// Fix path (deferred to a follow-up because it requires bypassing
-// `keyring` and calling `security-framework` directly on macOS plus
-// equivalent platform code on Windows/Linux):
-//   1. macOS: `SecAccessControlCreateWithFlags` + `kSecAttrAccess`
-//      whitelisting the signed daemon binary, optionally chained with
-//      biometry (`kSecAccessControlBiometryAny`) for sensitive ops.
-//   2. Windows: bind DPAPI with `CRYPTPROTECT_AUDIT` and an entropy
-//      derived from `KnownFolderId::LocalAppData` so non-daemon
-//      processes cannot unprotect.
-//   3. Linux: Secret Service items with the `org.freedesktop.Secret.Item`
-//      attribute set to a peer-locked schema.
+// Fix, by platform:
+//   1. macOS: built, opt-in via `FLUXSYNC_STRICT_KEYCHAIN=1` (see
+//      `strict_keychain_enabled`). `mac_acl::store_with_acl` /
+//      `mac_acl::tighten_access` below attach an explicit self-only ACL
+//      via the legacy `SecAccessCreate` API. Not the default: the
+//      trusted-app entry pins the exact binary, so unsigned dev builds
+//      re-prompt after every rebuild (prompt fatigue). Becomes the
+//      default with Developer ID signing (DIR-P4-01). The modern
+//      `kSecAttrAccessControl` / Data Protection Keychain path was tried
+//      first and rejected: it needs the `keychain-access-groups`
+//      entitlement, which an unsigned/self-built daemon binary does not
+//      have (confirmed: `SecItemAdd` fails with
+//      `errSecMissingEntitlement`, and forcing an ad-hoc entitlement gets
+//      the process killed by AMFI before it touches the keychain). If
+//      fluxsyncd ever gets a stable Developer ID signature, the DPK is
+//      the natural upgrade.
+//   2. Windows: not changed. Credential Manager is already DPAPI-backed
+//      at rest, and has no per-app ACL primitive to attach — any same-user
+//      process can call `CredReadW`. Documented as an accepted residual
+//      in `docs/SECURITY.md` §2.4 rather than given ceremony that
+//      wouldn't raise the real bar.
+//   3. Linux: not changed. The Secret Service model grants access per
+//      D-Bus session, not per requesting binary; no per-app ACL to
+//      attach either. Documented as an accepted residual.
 //
-// Tracked in `docs/THREAT-MODEL.md` (FS-053 follow-up).
+// Tracked in `docs/THREAT-MODEL.md` (FS-053 follow-up) and
+// `docs/SECURITY.md` §2.4 / §7 (FS-062).
 
 /// Account name on the keychain entry. We only ever store one secret
 /// per service today (the long-term Noise identity), so a constant
@@ -188,6 +223,16 @@ pub fn load_or_create_identity(dir: &Path) -> Result<Identity> {
                     // Wipe it so a backup grab can't lift the secret.
                     secure_wipe_identity_file(&legacy);
                 }
+                // FS-062 / DIR-P2-01: in strict mode only, idempotently
+                // re-assert the self-only ACL on every successful load.
+                // A no-op (zero keychain calls) unless
+                // FLUXSYNC_STRICT_KEYCHAIN=1 — the default boot path must
+                // never issue a call that can trigger or worsen a
+                // keychain prompt. Non-fatal: this boot already has `id`
+                // in memory either way, so a failure here is logged and
+                // retried next boot, never surfaced as a startup error.
+                #[cfg(target_os = "macos")]
+                tighten_keychain_acl_if_needed(&entry, &hex);
                 return Ok(id);
             }
             Err(keyring::Error::NoEntry) => {
@@ -196,6 +241,14 @@ pub fn load_or_create_identity(dir: &Path) -> Result<Identity> {
                 let id = if legacy.exists() {
                     let imported = read_legacy_identity(&legacy)?;
                     store_identity_in_keychain(&entry, &imported)?;
+                    // Fail-safe migration order: the secret is already
+                    // safely in the keychain at this point; confirm it
+                    // reads back correctly *before* wiping the only other
+                    // copy. This is the device's cryptographic identity —
+                    // losing it unpairs every peer — so we refuse to wipe
+                    // on any doubt.
+                    verify_keychain_readback(&entry, &imported)
+                        .context("post-migration readback check for legacy identity.bin")?;
                     secure_wipe_identity_file(&legacy);
                     tracing::info!(
                         path = %legacy.display(),
@@ -261,13 +314,102 @@ fn read_legacy_identity(path: &Path) -> Result<Identity> {
     Identity::from_secret_bytes(arr).context("decode persisted identity bytes")
 }
 
+/// FS-062 / DIR-P2-01: whether the opt-in strict self-only keychain ACL
+/// is enabled (macOS only). Default OFF — the trusted-application entry
+/// pins the exact binary, so unsigned/self-built daemons would re-prompt
+/// for the keychain password after every rebuild. Mirrors how
+/// `FLUXSYNC_NO_KEYCHAIN` is read.
+#[cfg(target_os = "macos")]
+fn strict_keychain_enabled() -> bool {
+    std::env::var("FLUXSYNC_STRICT_KEYCHAIN").as_deref() == Ok("1")
+}
+
+/// Persist the identity in the OS keychain. Default path on every
+/// platform is `keyring::Entry::set_password` — identical to the
+/// pre-FS-062 behavior. On macOS with `FLUXSYNC_STRICT_KEYCHAIN=1`, the
+/// write goes through `mac_acl::store_with_acl` instead, which attaches a
+/// self-only ACL at creation (see the `mac_acl` module doc for why this
+/// is opt-in).
 #[cfg(not(target_os = "android"))]
 fn store_identity_in_keychain(entry: &keyring::Entry, id: &Identity) -> Result<()> {
     let secret = id.secret_bytes();
     let hex_secret = zeroize::Zeroizing::new(hex::encode(secret.as_ref()));
+    #[cfg(target_os = "macos")]
+    if strict_keychain_enabled() {
+        return mac_acl::store_with_acl(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, hex_secret.as_bytes())
+            .context("write fluxsyncd identity to OS keychain with self-only ACL");
+    }
     entry
         .set_password(&hex_secret)
         .context("write fluxsyncd identity to OS keychain")
+}
+
+/// Re-read the keychain entry and confirm it decodes to exactly `expected`.
+/// Used right after a migration writes the keychain for the first time and
+/// before the only other copy of the secret (the legacy file) is wiped —
+/// losing this identity unpairs every peer, so the wipe must never run on
+/// unverified faith that the write succeeded.
+#[cfg(not(target_os = "android"))]
+fn verify_keychain_readback(entry: &keyring::Entry, expected: &Identity) -> Result<()> {
+    let raw = entry
+        .get_password()
+        .context("read back identity from OS keychain immediately after writing it")?;
+    let hex = zeroize::Zeroizing::new(raw);
+    let id = decode_identity_hex(&hex).context("decode keychain identity during readback verification")?;
+    if id.secret_bytes().as_ref() == expected.secret_bytes().as_ref() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "keychain readback does not match the identity that was just written; refusing to \
+             wipe the legacy identity.bin"
+        ))
+    }
+}
+
+/// FS-062 / DIR-P2-01: in strict mode, idempotently re-assert the
+/// self-only keychain ACL on every successful load. Covers an item
+/// created before strict mode was enabled (default ACL), or one loosened
+/// by a stray "Always Allow" click during manual debugging with
+/// `security find-generic-password`. A no-op — zero keychain API calls —
+/// unless `FLUXSYNC_STRICT_KEYCHAIN=1`: in default mode nothing here may
+/// run, because `SecItemUpdate` on an item this (rebuilt, unsigned)
+/// binary is not trusted for would itself trigger a password prompt.
+/// Non-fatal by design: the caller already has a valid `id` in memory for
+/// this boot regardless of outcome, so failures here are logged and
+/// retried next boot, never surfaced as a startup error.
+#[cfg(target_os = "macos")]
+fn tighten_keychain_acl_if_needed(entry: &keyring::Entry, expected_hex: &str) {
+    if !strict_keychain_enabled() {
+        return;
+    }
+    if let Err(e) = mac_acl::tighten_access(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+        tracing::warn!(
+            error = %e,
+            "failed to tighten keychain ACL for fluxsyncd identity; will retry next boot"
+        );
+        return;
+    }
+    match entry.get_password() {
+        Ok(readback_raw) => {
+            let readback = zeroize::Zeroizing::new(readback_raw);
+            if readback.as_str() == expected_hex {
+                tracing::info!("tightened keychain ACL for fluxsyncd identity to self-only access");
+            } else {
+                tracing::error!(
+                    "keychain identity readback mismatch immediately after ACL tighten; this \
+                     boot's in-memory identity is still correct, but the on-disk keychain entry \
+                     may be inconsistent — investigate before the next restart"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "keychain identity became unreadable immediately after ACL tighten; this boot's \
+                 in-memory identity is still correct, but investigate before the next restart"
+            );
+        }
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -462,6 +604,321 @@ pub fn save_firewall(dir: &Path, policy: &FirewallPolicy) -> Result<()> {
     fs::rename(&tmp, &path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+/// FS-062 / DIR-P2-01 — self-only keychain ACL for the identity item.
+///
+/// **Opt-in** (`FLUXSYNC_STRICT_KEYCHAIN=1`, see `strict_keychain_enabled`
+/// and the module doc at the top of this file): the trusted-application
+/// entry created here pins the exact binary, so unsigned/self-built
+/// daemons re-prompt after every rebuild. The machinery is kept complete
+/// and tested so it can become the default once Developer ID signing
+/// (DIR-P4-01) lands — a signature-anchored entry survives updates
+/// without re-prompting.
+///
+/// Not expressible through `keyring`, nor through `security-framework`'s
+/// safe wrapper: both only support the default (unrestricted) ACL. The
+/// modern alternative, `kSecAttrAccessControl` on the Data Protection
+/// Keychain (`kSecUseDataProtectionKeychain`), was tried and rejected —
+/// it needs the `keychain-access-groups` entitlement, which an
+/// unsigned/self-built daemon binary does not have. Confirmed empirically:
+/// `SecItemAdd` with `kSecAttrAccessControl` fails with
+/// `errSecMissingEntitlement` (-34018) for this binary, and forcing an
+/// ad-hoc entitlements claim gets the process killed by AMFI before it
+/// ever reaches the keychain. If fluxsyncd ever ships with a stable
+/// Developer ID signature, the Data Protection Keychain is the natural
+/// upgrade over what's here.
+///
+/// So this calls the legacy `SecAccessCreate` / `kSecAttrAccess` API
+/// directly against the classic file keychain, which needs no
+/// entitlement — it's the same mechanism `keyring`'s own macOS backend
+/// (`SecKeychainAddGenericPassword`) implicitly relies on, just with an
+/// explicit trusted-application list instead of the OS default. `SecItemAdd`
+/// / `SecItemUpdate` (used here) and the legacy
+/// `SecKeychainFindGenericPassword` (used by `keyring::Entry::get_password`,
+/// still used for all reads in this file) operate on the same underlying
+/// keychain item, so reads did not need to change — verified: an item
+/// created here is found and returned correctly by `keyring::Entry`.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod mac_acl {
+    use anyhow::{anyhow, Result};
+    use core_foundation::array::CFArray;
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::data::CFData;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::array::CFArrayRef;
+    use core_foundation_sys::base::{CFRelease, CFTypeRef, OSStatus};
+    use core_foundation_sys::string::CFStringRef;
+    use security_framework_sys::base::{errSecDuplicateItem, SecAccessRef};
+    use security_framework_sys::item::{
+        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecValueData,
+    };
+    use security_framework_sys::keychain_item::{SecItemAdd, SecItemUpdate};
+    use std::os::raw::c_char;
+    use std::ptr;
+
+    // Not bound by `security-framework-sys` (only the modern
+    // `kSecAttrAccessControl` path is). Declared straight from
+    // `Security/SecAccess.h` and `Security/SecTrustedApplication.h` —
+    // deprecated since macOS 10.10 but still present and linkable.
+    // `security-framework-sys`'s build script already links
+    // `Security.framework`, so no extra linker configuration is needed.
+    enum OpaqueSecTrustedApplication {}
+    type SecTrustedApplicationRef = *mut OpaqueSecTrustedApplication;
+
+    extern "C" {
+        static kSecAttrAccess: CFStringRef;
+
+        /// NULL `path` resolves to "the calling application" per Apple's
+        /// documented behavior. Returns a `CF_RETURNS_RETAINED` ref.
+        fn SecTrustedApplicationCreateFromPath(
+            path: *const c_char,
+            app: *mut SecTrustedApplicationRef,
+        ) -> OSStatus;
+
+        /// A `trusted_list` of exactly one app makes that app the sole
+        /// reader that bypasses the system authorization prompt. Returns a
+        /// `CF_RETURNS_RETAINED` ref.
+        fn SecAccessCreate(
+            descriptor: CFStringRef,
+            trusted_list: CFArrayRef,
+            access_ref: *mut SecAccessRef,
+        ) -> OSStatus;
+    }
+
+    /// Build a `SecAccess` whose trusted-application list contains
+    /// exactly the current process. Any other process — signed or not —
+    /// that later tries to read the item is handed to the system's
+    /// keychain authorization UI instead of getting the secret silently.
+    fn self_only_access() -> Result<CFType> {
+        // Safety: `SecTrustedApplicationCreateFromPath` writes a
+        // `CF_RETURNS_RETAINED` ref into `app_ref` on success;
+        // `wrap_under_create_rule` takes ownership of that retain and
+        // releases it on drop. `SecTrustedApplication` is a
+        // toll-free-bridged CF type, so wrapping it as the generic
+        // `CFType` is valid (`CFRelease` doesn't need the concrete type).
+        let app: CFType = unsafe {
+            let mut app_ref: SecTrustedApplicationRef = ptr::null_mut();
+            let status = SecTrustedApplicationCreateFromPath(
+                ptr::null(),
+                std::ptr::addr_of_mut!(app_ref),
+            );
+            if status != 0 || app_ref.is_null() {
+                return Err(anyhow!(
+                    "SecTrustedApplicationCreateFromPath failed with OSStatus {status}"
+                ));
+            }
+            CFType::wrap_under_create_rule(app_ref as CFTypeRef)
+        };
+        let trusted_list = CFArray::from_CFTypes(&[app]);
+        let descriptor = CFString::new("FluxSync device identity");
+
+        // Safety: same reasoning as above — `SecAccess` is also
+        // `CF_RETURNS_RETAINED` and toll-free-bridged. `descriptor` and
+        // `trusted_list` outlive the call.
+        unsafe {
+            let mut access_ref: SecAccessRef = ptr::null_mut();
+            let status = SecAccessCreate(
+                descriptor.as_concrete_TypeRef(),
+                trusted_list.as_concrete_TypeRef(),
+                std::ptr::addr_of_mut!(access_ref),
+            );
+            if status != 0 || access_ref.is_null() {
+                return Err(anyhow!("SecAccessCreate failed with OSStatus {status}"));
+            }
+            Ok(CFType::wrap_under_create_rule(access_ref as CFTypeRef))
+        }
+    }
+
+    /// `kSecClass`/`kSecAttrService`/`kSecAttrAccount` triple identifying
+    /// the item, shared by add/update/query dictionaries.
+    fn class_service_account(service: &str, account: &str) -> Vec<(CFString, CFType)> {
+        // Safety: `kSecClass`, `kSecClassGenericPassword`,
+        // `kSecAttrService`, `kSecAttrAccount` are read-only `CFStringRef`
+        // constants exported by `Security.framework`, valid for the
+        // process lifetime.
+        unsafe {
+            vec![
+                (
+                    CFString::wrap_under_get_rule(kSecClass),
+                    CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType(),
+                ),
+                (
+                    CFString::wrap_under_get_rule(kSecAttrService),
+                    CFString::from(service).into_CFType(),
+                ),
+                (
+                    CFString::wrap_under_get_rule(kSecAttrAccount),
+                    CFString::from(account).into_CFType(),
+                ),
+            ]
+        }
+    }
+
+    fn access_pair(access: CFType) -> (CFString, CFType) {
+        // Safety: `kSecAttrAccess` is a read-only constant (see above).
+        (unsafe { CFString::wrap_under_get_rule(kSecAttrAccess) }, access)
+    }
+
+    fn data_pair(secret: &[u8]) -> (CFString, CFType) {
+        // Safety: `kSecValueData` is a read-only constant; `secret`
+        // outlives the call that consumes this pair.
+        unsafe {
+            (
+                CFString::wrap_under_get_rule(kSecValueData),
+                CFData::from_buffer(secret).into_CFType(),
+            )
+        }
+    }
+
+    /// Update the ACL (and, if `secret` is `Some`, the data) of an
+    /// existing item matching `service`/`account`, in one atomic call.
+    fn update(service: &str, account: &str, secret: Option<&[u8]>, access: CFType) -> Result<()> {
+        let query = CFDictionary::from_CFType_pairs(&class_service_account(service, account));
+        let mut pairs = vec![access_pair(access)];
+        if let Some(secret) = secret {
+            pairs.push(data_pair(secret));
+        }
+        let update = CFDictionary::from_CFType_pairs(&pairs);
+        // Safety: both dictionaries are valid CF objects for the duration
+        // of the call; `SecItemUpdate` does not retain them past return.
+        let status =
+            unsafe { SecItemUpdate(query.as_concrete_TypeRef(), update.as_concrete_TypeRef()) };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(anyhow!("SecItemUpdate failed with OSStatus {status}"))
+        }
+    }
+
+    /// Create the keychain item with `secret` and a self-only ACL. If one
+    /// already exists (an older boot lost a race, or this runs twice),
+    /// falls back to updating it in place with the same data + ACL —
+    /// matching `keyring::Entry::set_password`'s create-or-update
+    /// semantics.
+    pub(super) fn store_with_acl(service: &str, account: &str, secret: &[u8]) -> Result<()> {
+        let access = self_only_access()?;
+        let mut pairs = class_service_account(service, account);
+        pairs.push(data_pair(secret));
+        pairs.push(access_pair(access.clone()));
+        let add_dict = CFDictionary::from_CFType_pairs(&pairs);
+
+        // Safety: `add_dict` is a valid CF object for the duration of the
+        // call. On success the output ref is `CF_RETURNS_RETAINED`; we
+        // don't need it, so it's released immediately.
+        let status = unsafe {
+            let mut result: CFTypeRef = ptr::null();
+            let status = SecItemAdd(add_dict.as_concrete_TypeRef(), std::ptr::addr_of_mut!(result));
+            if !result.is_null() {
+                CFRelease(result);
+            }
+            status
+        };
+        if status == 0 {
+            return Ok(());
+        }
+        if status == errSecDuplicateItem {
+            return update(service, account, Some(secret), access);
+        }
+        Err(anyhow!("SecItemAdd failed with OSStatus {status}"))
+    }
+
+    /// Re-assert the self-only ACL on an item that already exists and was
+    /// just read successfully, without touching its secret data.
+    /// Idempotent: safe to call on every boot. `SecItemUpdate` is a
+    /// single atomic call, so there is no window where the item is
+    /// missing or only partially written.
+    pub(super) fn tighten_access(service: &str, account: &str) -> Result<()> {
+        let access = self_only_access()?;
+        update(service, account, None, access)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{class_service_account, store_with_acl, tighten_access};
+        use core_foundation::base::TCFType;
+        use core_foundation::dictionary::CFDictionary;
+        use security_framework_sys::keychain_item::SecItemDelete;
+
+        // All three tests are `#[ignore]`: they exercise the REAL login
+        // keychain (there is no mockable seam below `SecItemAdd`), and
+        // although they only ever touch dedicated `fluxsyncd-dir-p2-01-
+        // test-*` service names — never the real `KEYCHAIN_SERVICE` /
+        // `KEYCHAIN_ACCOUNT` item — any leftover item from an aborted
+        // previous run was created by a *different* test binary (each
+        // rebuild changes the binary identity), and reading or
+        // overwriting such an item makes macOS raise a keychain
+        // password prompt. Repo invariant: a default `cargo test` run
+        // must produce ZERO keychain dialogs. Run these explicitly with
+        // `cargo test -p fluxsyncd --lib mac_acl -- --ignored`.
+        //
+        // Each test gets its own service name rather than sharing one,
+        // because `cargo test` runs tests in parallel and a shared
+        // keychain item across threads would race.
+        const TEST_ACCOUNT: &str = "identity-test";
+
+        /// Delete the test item WITHOUT reading its data. `SecItemDelete`
+        /// never decrypts the secret, so unlike `keyring`'s
+        /// `delete_credential` (which does a find-with-data first) it
+        /// cannot trigger an authorization prompt even on a stale item
+        /// whose ACL trusts a previous test binary. Called at both start
+        /// (purge leftovers from aborted runs) and end of every test so
+        /// stale-ACL items never accumulate across rebuilds.
+        fn cleanup(service: &str) {
+            let query =
+                CFDictionary::from_CFType_pairs(&class_service_account(service, TEST_ACCOUNT));
+            // Safety: `query` is a valid CF dictionary for the duration
+            // of the call; a not-found status is fine (nothing to clean).
+            unsafe {
+                SecItemDelete(query.as_concrete_TypeRef());
+            }
+        }
+
+        /// `store_with_acl` creates an item that `keyring::Entry` (the
+        /// read path every platform actually uses) can read back — this
+        /// is the interoperability guarantee the whole design leans on.
+        #[test]
+        #[ignore = "touches real login keychain — run explicitly with --ignored"]
+        fn store_with_acl_is_readable_via_keyring() {
+            let service = "fluxsyncd-dir-p2-01-test-readable";
+            cleanup(service);
+            store_with_acl(service, TEST_ACCOUNT, b"deadbeef00").expect("create with ACL");
+            let entry = keyring::Entry::new(service, TEST_ACCOUNT).expect("open entry");
+            assert_eq!(entry.get_password().expect("read back"), "deadbeef00");
+            cleanup(service);
+        }
+
+        /// Calling `store_with_acl` again on the same service/account
+        /// exercises the `errSecDuplicateItem` fallback path and must
+        /// overwrite the data.
+        #[test]
+        #[ignore = "touches real login keychain — run explicitly with --ignored"]
+        fn store_with_acl_overwrites_existing_item() {
+            let service = "fluxsyncd-dir-p2-01-test-overwrite";
+            cleanup(service);
+            store_with_acl(service, TEST_ACCOUNT, b"first-value").expect("first create");
+            store_with_acl(service, TEST_ACCOUNT, b"second-value")
+                .expect("second store hits the duplicate-item fallback");
+            let entry = keyring::Entry::new(service, TEST_ACCOUNT).expect("open entry");
+            assert_eq!(entry.get_password().expect("read back"), "second-value");
+            cleanup(service);
+        }
+
+        /// `tighten_access` must not touch the stored data, only the ACL.
+        #[test]
+        #[ignore = "touches real login keychain — run explicitly with --ignored"]
+        fn tighten_access_leaves_data_untouched() {
+            let service = "fluxsyncd-dir-p2-01-test-tighten";
+            cleanup(service);
+            store_with_acl(service, TEST_ACCOUNT, b"untouched-secret").expect("create");
+            tighten_access(service, TEST_ACCOUNT).expect("tighten");
+            let entry = keyring::Entry::new(service, TEST_ACCOUNT).expect("open entry");
+            assert_eq!(entry.get_password().expect("read back"), "untouched-secret");
+            cleanup(service);
+        }
+    }
 }
 
 #[cfg(test)]

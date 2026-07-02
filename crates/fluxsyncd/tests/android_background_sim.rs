@@ -15,6 +15,21 @@ use tempfile::tempdir;
 
 #[test]
 fn simulate_android_background_restart_identity_persistence() -> Result<()> {
+    // Force the file-based identity path. Two reasons:
+    // 1. Fidelity: on Android (the platform being simulated) `keyring`
+    //    has no backend, so the daemon uses the file path — the desktop
+    //    keychain branch this host test would otherwise take is the
+    //    wrong code under test.
+    // 2. Hermeticity: without this, the test reads (or worse, creates)
+    //    the REAL `fluxsyncd`/`identity` item in the developer's login
+    //    keychain — and because every `cargo test` rebuild is a new
+    //    binary, macOS re-prompts for keychain authorization on each
+    //    run. No test may touch the real login keychain in a default
+    //    `cargo test` run.
+    // Safe here: this integration-test binary contains only this one
+    // test, so there is no parallel-test env-var race.
+    std::env::set_var("FLUXSYNC_NO_KEYCHAIN", "1");
+
     // 1. App installation: Setup a keystore directory
     let keystore_dir = tempdir()?;
     let keystore_path = keystore_dir.path();
