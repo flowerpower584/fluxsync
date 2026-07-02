@@ -167,6 +167,14 @@ flowchart LR
     A_udp <-- "ChaCha20-Poly1305 ciphertext" --> B_udp
 ```
 
+## Support
+
+FluxSync is free, open source, and will stay that way — no paid tier, no account, no cloud.
+If it saves you time and you want to support development, you can
+[sponsor the project](https://github.com/sponsors/flowerpower584). Donations go toward
+shipping costs like the Apple Developer ID ($99/year) that unlocks a signed, notarized
+macOS build for everyone.
+
 ## License
 
 FluxSync is dual-licensed under either of:
