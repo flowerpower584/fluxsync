@@ -6,7 +6,8 @@
 
 use fluxsync_proto::{
     decode, encode, Ack, BatteryStatus, Chunk, ClipboardItem, Frame, HandshakeInit, HandshakeResp,
-    Heartbeat, Kind, Msg, PROTOCOL_VERSION,
+    Heartbeat, Hello, Kind, Msg, Nak, MAX_HELLO_NAME, MAX_HELLO_PLATFORM, MAX_NAK_MISSING,
+    PROTOCOL_VERSION,
 };
 use proptest::prelude::*;
 
@@ -101,6 +102,43 @@ fn arb_handshake_resp() -> impl Strategy<Value = HandshakeResp> {
     )
 }
 
+// ASCII-only so `.len()` (the byte length `validate()` checks) equals the
+// char count exactly, which keeps boundary generation exact. Weighted so the
+// cap-boundary case is exercised often rather than left to a 1-in-(max_len+1)
+// chance of a uniform pick landing on it.
+fn arb_bounded_ascii(max_len: usize) -> impl Strategy<Value = String> {
+    prop_oneof![
+        3 => prop::collection::vec(prop::char::range('a', 'z'), 0..=max_len)
+            .prop_map(|chars| chars.into_iter().collect::<String>()),
+        1 => Just("x".repeat(max_len)),
+    ]
+}
+
+fn arb_hello() -> impl Strategy<Value = Hello> {
+    (
+        arb_bounded_ascii(MAX_HELLO_NAME),
+        arb_bounded_ascii(MAX_HELLO_PLATFORM),
+    )
+        .prop_map(|(name, platform)| Hello { name, platform })
+}
+
+fn arb_nak_missing() -> impl Strategy<Value = Vec<u16>> {
+    prop_oneof![
+        3 => prop::collection::vec(any::<u16>(), 0..=MAX_NAK_MISSING),
+        1 => Just(vec![0u16; MAX_NAK_MISSING]),
+    ]
+}
+
+fn arb_nak() -> impl Strategy<Value = Nak> {
+    (arb_array32(), any::<bool>(), arb_nak_missing()).prop_map(|(item_id, want_header, missing)| {
+        Nak {
+            item_id,
+            want_header,
+            missing,
+        }
+    })
+}
+
 fn arb_msg() -> impl Strategy<Value = Msg> {
     prop_oneof![
         arb_handshake_init().prop_map(Msg::HandshakeInit),
@@ -110,7 +148,10 @@ fn arb_msg() -> impl Strategy<Value = Msg> {
         arb_heartbeat().prop_map(Msg::Heartbeat),
         arb_chunk().prop_map(Msg::Chunk),
         arb_ack().prop_map(Msg::Ack),
+        arb_nak().prop_map(Msg::Nak),
         Just(Msg::Bye),
+        Just(Msg::Revoke),
+        arb_hello().prop_map(Msg::Hello),
     ]
 }
 
@@ -133,4 +174,18 @@ proptest! {
         let back = decode(&bytes).expect("decode within v0.1 bounds");
         prop_assert_eq!(frame, back);
     }
+}
+
+// `Msg::Revoke` had no round-trip coverage anywhere before this — not even
+// via `arb_msg()` above. A plain #[test] locks it in independent of proptest
+// ever generating that arm.
+#[test]
+fn revoke_round_trip_explicit() {
+    let frame = Frame {
+        version: PROTOCOL_VERSION,
+        msg: Msg::Revoke,
+    };
+    let bytes = encode(&frame).expect("encode Revoke");
+    let back = decode(&bytes).expect("decode Revoke");
+    assert_eq!(frame, back);
 }

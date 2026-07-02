@@ -65,8 +65,7 @@ fn boundary_16_ok_17_rejected_on_decode() {
     let err = decode(&raw_cbor(&over));
     assert!(
         matches!(err, Err(ProtoError::HelloPlatformTooLong(n)) if n == MAX_HELLO_PLATFORM + 1),
-        "platform == {}+1 must be rejected on decode, got {err:?}",
-        MAX_HELLO_PLATFORM
+        "platform == {MAX_HELLO_PLATFORM}+1 must be rejected on decode, got {err:?}"
     );
 }
 
