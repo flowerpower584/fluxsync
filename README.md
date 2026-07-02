@@ -112,6 +112,38 @@ fluxctl push "Hello from Kaolack! 🇸🇳"
 fluxctl pair show-qr   # render this device's pair QR in the terminal
 ```
 
+### 4. Sync across networks with Tailscale (optional)
+FluxSync discovers peers on the **same LAN** via mDNS. To sync across different
+networks (home ↔ office, laptop ↔ phone on cellular), put your devices on a
+[Tailscale](https://tailscale.com) tailnet and pair by address — no LAN required.
+
+FluxSync has **zero Tailscale dependency**: the daemon already listens on
+`0.0.0.0`, so it's reachable on your tailnet IP the moment Tailscale is up.
+Tailscale just provides a stable, encrypted `100.x.y.z` address; FluxSync routes
+to it like any other IP. You can drop Tailscale anytime and LAN mode still works.
+
+mDNS does **not** propagate over a tailnet, so auto-discovery won't find the
+peer. FluxSync handles this automatically: when a tailnet interface is present,
+the pair URI/QR carries **both** addresses — `a=<lan>,<tailnet>` — and the other
+device tries each in order (LAN first, then tailnet). **The same QR works whether
+the peer is on your LAN or only reachable over the tailnet** — nothing to toggle.
+
+```sh
+# pair show-qr / show now emit a multi-address URI when Tailscale is up,
+# and print the detected tailnet address on a "tailnet" line:
+fluxctl pair show          # uri: fluxsync://pair/<pubkey>?a=192.168.1.5:41889,100.92.14.7:41889&f=<words>
+                           # tailnet: 100.92.14.7:41889
+
+# On the other device, trust the peer from that single URI (works both ways):
+fluxctl pair from-uri --uri "fluxsync://pair/<pubkey>?a=192.168.1.5:41889,100.92.14.7:41889&f=<words>" --name laptop
+```
+
+If you ever need to pin a specific address by hand, `fluxctl pair accept
+--pubkey <b32> --name laptop --addr 100.92.14.7:41889` still works.
+
+Verify the 6 safe-words match on both devices, exactly as on LAN. Everything
+else — Noise IK encryption, SAS verification, clipboard sync — is unchanged.
+
 ## Architecture
 
 ```mermaid
