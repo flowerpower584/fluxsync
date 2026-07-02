@@ -87,6 +87,89 @@ fn ffi_rejects_bad_identity_b64() {
     assert!(res.is_err(), "expected InvalidIdentity error");
 }
 
+/// DIR-P2-02: `IdentitySource::Provided` is the injection path Android's
+/// `KeystoreIdentityStore` hands the AndroidKeyStore-decrypted secret to.
+/// This drives it the same way Kotlin will — a raw 32-byte secret plus
+/// the app-private dir — and checks the daemon boots and round-trips a
+/// push, and that `dir` still wires up peers/firewall persistence the
+/// same as `IdentitySource::Keystore` (verified indirectly: `start()`
+/// succeeds, which requires `keystore_dir` to be set for `start_on`/
+/// peers.json loading to run without error).
+#[test]
+fn ffi_provided_identity_starts_and_roundtrips() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ipc = dir.path().join("ffi-provided.sock");
+    let port = pick_free_udp_port();
+
+    let handle = FluxsyncHandle::start(
+        "host-test".into(),
+        ipc.to_string_lossy().into_owned(),
+        port,
+        IdentitySource::Provided {
+            secret: [0x11u8; 32].to_vec(),
+            dir: dir.path().to_string_lossy().into_owned(),
+        },
+    )
+    .expect("start with Provided identity");
+
+    handle.push_text("provided-identity-ok".into()).expect("push");
+
+    let start = std::time::Instant::now();
+    let mut hit = false;
+    while start.elapsed() < std::time::Duration::from_secs(2) {
+        if handle.poll_state().contains("provided-identity-ok") {
+            hit = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    handle.stop();
+    assert!(hit, "poll_state never saw the pushed text in JSON state");
+}
+
+/// DIR-P2-02: a secret of the wrong length must be rejected, not
+/// silently truncated/padded — that would derive a different identity
+/// than the one Kotlin decrypted, unpairing the device from every peer.
+#[test]
+fn ffi_rejects_bad_provided_length() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ipc = dir.path().join("ffi-provided-len.sock");
+    let port = pick_free_udp_port();
+
+    let res = FluxsyncHandle::start(
+        "host-test".into(),
+        ipc.to_string_lossy().into_owned(),
+        port,
+        IdentitySource::Provided {
+            secret: vec![0x11u8; 31],
+            dir: dir.path().to_string_lossy().into_owned(),
+        },
+    );
+    assert!(res.is_err(), "expected error for a 31-byte secret");
+}
+
+/// DIR-P2-02: an empty `dir` must be rejected up front, mirroring
+/// `IdentitySource::Keystore`'s empty-dir guard — silently accepting it
+/// would boot with `keystore_dir = None` and lose peers/firewall
+/// persistence + auto-start without any signal to the caller.
+#[test]
+fn ffi_rejects_empty_provided_dir() {
+    let ipc_dir = tempfile::tempdir().expect("tempdir");
+    let ipc = ipc_dir.path().join("ffi-provided-dir.sock");
+    let port = pick_free_udp_port();
+
+    let res = FluxsyncHandle::start(
+        "host-test".into(),
+        ipc.to_string_lossy().into_owned(),
+        port,
+        IdentitySource::Provided {
+            secret: [0x11u8; 32].to_vec(),
+            dir: String::new(),
+        },
+    );
+    assert!(res.is_err(), "expected error for an empty dir");
+}
+
 #[test]
 fn ffi_rejects_empty_peer_name() {
     // SE-05: empty peer_name used to be accepted silently — the daemon

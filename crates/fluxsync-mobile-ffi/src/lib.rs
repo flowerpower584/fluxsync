@@ -78,11 +78,24 @@ pub enum IdentitySource {
     /// or "reset device" flows.
     Generate,
     /// Load the persisted identity from `dir`, or create+persist a new
-    /// one if none exists. This is the normal mobile path.
+    /// one if none exists. Historically "the normal mobile path"; Android
+    /// now prefers `Provided` (DIR-P2-02) and only falls back to this one
+    /// if the on-device AndroidKeyStore itself is broken (rare OEM bugs).
+    /// Still the normal desktop path via `FLUXSYNC_NO_KEYCHAIN=1`.
     Keystore { dir: String },
     /// Decode a base64-encoded 32-byte secret. Testing / migration only —
-    /// production callers should use `Keystore`.
+    /// production callers should use `Keystore` or `Provided`.
     SecretBase64 { secret: String },
+    /// DIR-P2-02: a 32-byte secret the caller already decrypted from its
+    /// own secure store — on Android, a `KeystoreIdentityStore`-managed
+    /// AES-256-GCM key held in `AndroidKeyStore` (the `keyring` crate the
+    /// desktop `Keystore` path relies on has no Android backend, which is
+    /// why identity used to sit in a plaintext file there). `dir` is
+    /// still the app-private data directory: it wires up `peers.json` /
+    /// `firewall.json` persistence and `start_on` auto-sync exactly like
+    /// `Keystore` does — only the identity secret itself skips Rust-side
+    /// file I/O.
+    Provided { secret: Vec<u8>, dir: String },
 }
 
 /// One row of the Logs screen — synthesized at FFI receipt from the
@@ -126,7 +139,9 @@ pub struct FluxsyncHandle {
 impl FluxsyncHandle {
     /// Boot the daemon. Returns once the IPC socket is reachable and a
     /// state-subscriber task is running. Pass `IdentitySource::Keystore`
-    /// for the normal "remember pairing across reboots" path.
+    /// for the normal "remember pairing across reboots" path on desktop;
+    /// Android passes `IdentitySource::Provided` with a secret it already
+    /// decrypted from `AndroidKeyStore` (DIR-P2-02).
     #[uniffi::constructor]
     #[allow(clippy::too_many_lines)]
     pub fn start(
@@ -181,6 +196,28 @@ impl FluxsyncHandle {
                 let id = Identity::from_secret_bytes(arr)
                     .map_err(|e| FluxError::Identity(format!("identity: {e}")))?;
                 (id, None)
+            }
+            IdentitySource::Provided { secret, dir } => {
+                if dir.is_empty() {
+                    return Err(FluxError::Invalid(
+                        "IdentitySource::Provided.dir must not be empty".into(),
+                    ));
+                }
+                // Wrap the incoming Vec in `Zeroizing` so the heap
+                // allocation is scrubbed once we've copied the bytes
+                // into the fixed array — same treatment as `SecretBase64`.
+                let secret = zeroize::Zeroizing::new(secret);
+                if secret.len() != 32 {
+                    return Err(FluxError::Identity(format!(
+                        "IdentitySource::Provided: expected 32 bytes, got {}",
+                        secret.len()
+                    )));
+                }
+                let mut arr = zeroize::Zeroizing::new([0u8; 32]);
+                arr.copy_from_slice(&secret);
+                let id = Identity::from_secret_bytes(arr)
+                    .map_err(|e| FluxError::Identity(format!("identity: {e}")))?;
+                (id, Some(PathBuf::from(dir)))
             }
         };
 

@@ -928,7 +928,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_unpair() != 17136.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fluxsync_mobile_ffi_checksum_constructor_fluxsynchandle_start() != 30614.toShort()) {
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_constructor_fluxsynchandle_start() != 43190.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1987,7 +1987,9 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
     /**
      * Boot the daemon. Returns once the IPC socket is reachable and a
      * state-subscriber task is running. Pass `IdentitySource::Keystore`
-     * for the normal "remember pairing across reboots" path.
+     * for the normal "remember pairing across reboots" path on desktop;
+     * Android passes `IdentitySource::Provided` with a secret it already
+     * decrypted from `AndroidKeyStore` (DIR-P2-02).
      */
     @Throws(FluxException::class) fun `start`(`peerName`: kotlin.String, `ipcPath`: kotlin.String, `udpPort`: kotlin.UShort, `identity`: IdentitySource): FluxsyncHandle {
             return FfiConverterTypeFluxsyncHandle.lift(
@@ -2178,7 +2180,10 @@ sealed class IdentitySource {
     
     /**
      * Load the persisted identity from `dir`, or create+persist a new
-     * one if none exists. This is the normal mobile path.
+     * one if none exists. Historically "the normal mobile path"; Android
+     * now prefers `Provided` (DIR-P2-02) and only falls back to this one
+     * if the on-device AndroidKeyStore itself is broken (rare OEM bugs).
+     * Still the normal desktop path via `FLUXSYNC_NO_KEYCHAIN=1`.
      */
     data class Keystore(
         val `dir`: kotlin.String) : IdentitySource()
@@ -2191,10 +2196,31 @@ sealed class IdentitySource {
     
     /**
      * Decode a base64-encoded 32-byte secret. Testing / migration only —
-     * production callers should use `Keystore`.
+     * production callers should use `Keystore` or `Provided`.
      */
     data class SecretBase64(
         val `secret`: kotlin.String) : IdentitySource()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * DIR-P2-02: a 32-byte secret the caller already decrypted from its
+     * own secure store — on Android, a `KeystoreIdentityStore`-managed
+     * AES-256-GCM key held in `AndroidKeyStore` (the `keyring` crate the
+     * desktop `Keystore` path relies on has no Android backend, which is
+     * why identity used to sit in a plaintext file there). `dir` is
+     * still the app-private data directory: it wires up `peers.json` /
+     * `firewall.json` persistence and `start_on` auto-sync exactly like
+     * `Keystore` does — only the identity secret itself skips Rust-side
+     * file I/O.
+     */
+    data class Provided(
+        val `secret`: kotlin.ByteArray, 
+        val `dir`: kotlin.String) : IdentitySource()
         
     {
         
@@ -2225,6 +2251,10 @@ public object FfiConverterTypeIdentitySource : FfiConverterRustBuffer<IdentitySo
             3 -> IdentitySource.SecretBase64(
                 FfiConverterString.read(buf),
                 )
+            4 -> IdentitySource.Provided(
+                FfiConverterByteArray.read(buf),
+                FfiConverterString.read(buf),
+                )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
@@ -2250,6 +2280,14 @@ public object FfiConverterTypeIdentitySource : FfiConverterRustBuffer<IdentitySo
                 + FfiConverterString.allocationSize(value.`secret`)
             )
         }
+        is IdentitySource.Provided -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterByteArray.allocationSize(value.`secret`)
+                + FfiConverterString.allocationSize(value.`dir`)
+            )
+        }
     }
 
     override fun write(value: IdentitySource, buf: ByteBuffer) {
@@ -2266,6 +2304,12 @@ public object FfiConverterTypeIdentitySource : FfiConverterRustBuffer<IdentitySo
             is IdentitySource.SecretBase64 -> {
                 buf.putInt(3)
                 FfiConverterString.write(value.`secret`, buf)
+                Unit
+            }
+            is IdentitySource.Provided -> {
+                buf.putInt(4)
+                FfiConverterByteArray.write(value.`secret`, buf)
+                FfiConverterString.write(value.`dir`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

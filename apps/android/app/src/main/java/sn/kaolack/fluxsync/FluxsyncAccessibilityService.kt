@@ -232,12 +232,40 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                 // accepted `keystoreDir=""` + `identitySecretB64=""` as a
                 // silent "regenerate fresh keypair" sentinel that erased
                 // pairings on any caller typo.
-                val h = FluxsyncHandle.start(
-                    peerName = formatPeerName(Build.MANUFACTURER, Build.MODEL),
-                    ipcPath = ipc,
-                    udpPort = 0.toUShort(),
-                    identity = IdentitySource.Keystore(keystore)
-                )
+                //
+                // DIR-P2-02: the secret itself is decrypted here from an
+                // AndroidKeyStore-backed key (KeystoreIdentityStore) and
+                // handed to the FFI as raw bytes via IdentitySource.Provided
+                // — the daemon's Rust keystore module has no Android
+                // backend for its usual OS-keychain path (the `keyring`
+                // crate doesn't support Android), so it used to fall back
+                // to a plaintext identity.bin. If AndroidKeyStore itself is
+                // broken on this device, fall back to that legacy plaintext
+                // path with a loud log rather than failing to boot at all.
+                val secret = KeystoreIdentityStore.readOrMigrate(filesDir)
+                val identity = if (secret != null) {
+                    IdentitySource.Provided(secret = secret, dir = keystore)
+                } else {
+                    android.util.Log.w(
+                        "FluxSync",
+                        "AndroidKeyStore identity path unavailable; falling back to plaintext identity.bin",
+                    )
+                    IdentitySource.Keystore(keystore)
+                }
+                val h = try {
+                    FluxsyncHandle.start(
+                        peerName = formatPeerName(Build.MANUFACTURER, Build.MODEL),
+                        ipcPath = ipc,
+                        udpPort = 0.toUShort(),
+                        identity = identity
+                    )
+                } finally {
+                    // Best-effort: the FFI call has already copied the
+                    // bytes across to Rust by the time this runs. The JVM
+                    // may hold other internal copies (array growth, GC
+                    // compaction) this can't reach.
+                    secret?.fill(0)
+                }
                 FluxsyncManager.setHandle(h)
                 android.util.Log.i("FluxSync", "Daemon booted successfully by AccessibilityService")
 
