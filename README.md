@@ -17,7 +17,7 @@
 **Universal clipboard. Local-first. Peer-to-peer. End-to-end encrypted.**
 One Rust daemon, dedicated apps for macOS, Windows, Linux + Android, zero servers.
 
-> **Platform status (v0.6.1):** Android, macOS, Windows and Linux all ship a GUI. macOS = menu-bar / Dock app (Tauri v2, built from source — no signed DMG until an Apple Dev ID is funded). Windows = NSIS tray app (x64 + ARM64). Linux = full Tauri GUI (deb / AppImage) plus a native ksni `StatusNotifierItem` system-tray. Android is the first-class mobile client. The daemon + CLI also build cleanly everywhere for headless use.
+> **Platform status (v0.6.2):** Android, macOS, Windows and Linux all ship a GUI. macOS = Dock app (Tauri v2, built from source — no signed DMG until an Apple Dev ID is funded). Windows = NSIS tray app (x64 + ARM64). Linux = full Tauri GUI (deb / AppImage) plus a native ksni `StatusNotifierItem` system-tray. Android is the first-class mobile client. The daemon + CLI also build cleanly everywhere for headless use.
 
 See [CHANGELOG.md](CHANGELOG.md) for the per-release history.
 
@@ -28,11 +28,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the per-release history.
 Prebuilt apps for every platform are on the [**latest release**](https://github.com/flowerpower584/fluxsync/releases/latest). Desktop builds are **unsigned** (no Apple Developer ID / Windows code-signing cert yet), so you'll need to click through a first-run warning — see each section.
 
 ### 📱 Android
-1. Download [**FluxSync-v0.6.1-arm64-v8a.apk**](https://github.com/flowerpower584/fluxsync/releases/download/v0.6.1/FluxSync-v0.6.1-arm64-v8a.apk) (~25 MB, arm64-v8a).
+1. Download [**FluxSync-v0.6.2-arm64-v8a.apk**](https://github.com/flowerpower584/fluxsync/releases/download/v0.6.2/FluxSync-v0.6.2-arm64-v8a.apk) (~25 MB, arm64-v8a).
 2. On the device, allow installs from the browser/Files app (Settings → Apps → Special access → Install unknown apps).
 3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access.
 
-### 🍎 macOS — menu-bar app
+### 🍎 macOS — Dock app
 Download the DMG for your chip: [`aarch64`](https://github.com/flowerpower584/fluxsync/releases/latest) (Apple Silicon) or [`x64`](https://github.com/flowerpower584/fluxsync/releases/latest) (Intel). It's **unsigned**, so on first launch right-click the app → **Open** (or run `xattr -dr com.apple.quarantine /Applications/FluxSync.app`). Prefer to build it yourself? Needs Rust (`rustup`) + Node.js:
 
 ```sh
@@ -43,10 +43,10 @@ npm run tauri dev              # run with hot-reload, or:
 npm run tauri build            # → src-tauri/target/release/bundle/macos/FluxSync.app
 ```
 
-The tray app gives you the menu-bar icon, the master toggle, the peer + battery card, and the QR pairing popup. Want a signed `.app`? Sponsor the Apple Dev ID.
+The app gives you the menu-bar icon, the master toggle, the peer + battery card, and the QR pairing popup. Want a signed `.app`? Sponsor the Apple Dev ID.
 
 ### 🪟 Windows — tray app
-Download the NSIS installer for your arch from the [latest release](https://github.com/flowerpower584/fluxsync/releases/latest): `FluxSync_0.6.1_x64-setup.exe` or `FluxSync_0.6.1_arm64-setup.exe`. It installs per-user and fetches the WebView2 runtime if missing. Unsigned, so SmartScreen shows **More info → Run anyway** on first launch.
+Download the NSIS installer for your arch from the [latest release](https://github.com/flowerpower584/fluxsync/releases/latest): `FluxSync_0.6.2_x64-setup.exe` or `FluxSync_0.6.2_arm64-setup.exe`. It installs per-user and fetches the WebView2 runtime if missing. Unsigned, so SmartScreen shows **More info → Run anyway** on first launch.
 
 ### 🐧 Linux — GUI or headless
 Download the [`AppImage`](https://github.com/flowerpower584/fluxsync/releases/latest) (portable, `chmod +x` then run) or the [`.deb`](https://github.com/flowerpower584/fluxsync/releases/latest) from the latest release — both ship the full Tauri GUI and a native ksni system-tray. For servers / power-users, the headless daemon + CLI build from source:
@@ -54,7 +54,7 @@ Download the [`AppImage`](https://github.com/flowerpower584/fluxsync/releases/la
 ```sh
 # Option A: cargo install (any distro with rustup)
 cargo install --git https://github.com/flowerpower584/fluxsync \
-              --tag v0.6.1 fluxsyncd fluxctl
+              --tag v0.6.2 fluxsyncd fluxctl
 
 # Option B: clone and build (lets you keep up with HEAD)
 git clone https://github.com/flowerpower584/fluxsync.git
@@ -176,7 +176,7 @@ FluxSync is dual-licensed under either of:
 
 at your option. This is the standard Rust ecosystem dual-license — pick whichever fits your downstream project. Apache 2.0 adds an explicit patent grant; MIT keeps things short and GPL-compatible.
 
-## 🔒 Security & Known Issues (v0.6.1)
+## 🔒 Security & Known Issues (v0.6.2)
 
 - **End-to-End Encryption**: All traffic is encrypted using the **Noise IK** handshake (Curve25519, ChaCha20, Poly1305).
 - **No Servers**: Peer discovery happens via mDNS (local network only); mDNS-advertised identities are always re-verified against the Noise static key.
