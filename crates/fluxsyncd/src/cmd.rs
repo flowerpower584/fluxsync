@@ -205,6 +205,14 @@ pub enum CmdData {
         /// when the PIN rotates.
         #[serde(skip_serializing_if = "Option::is_none")]
         pin_expires_at_ms: Option<u64>,
+        /// Tailnet (Tailscale, `100.64.0.0/10`) socket address, when a
+        /// tailnet interface is present. `None` on machines without
+        /// Tailscale. Informational only — it is already folded into `uri`
+        /// (`a=lan,tailnet`), so a single QR works on the LAN and across a
+        /// tailnet. Detected via a dependency-free routing probe, no
+        /// Tailscale SDK. Surfaced so the UI can show "also reachable at …".
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tailnet_addr_hint: Option<String>,
     },
     /// Raw bytes of a fetched clipboard item, base64-encoded. Reply to a
     /// `FetchItem` request.

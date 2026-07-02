@@ -33,7 +33,13 @@ pub enum DiscoveryEvent {
         peer_id_hex: String,
         static_pub_hex: String,
         name: String,
-        addr: std::net::SocketAddr,
+        /// Every advertised, reachable address for the peer, ranked
+        /// most-likely-reachable first (Wi-Fi LAN IPv4 before cellular /
+        /// IPv6). The initiator tries each in order. A peer on both Wi-Fi
+        /// and cellular advertises several IPs; handing over only one
+        /// arbitrary HashSet element used to send the initiator to the
+        /// cellular or IPv6 address → "no resp in 5s" forever.
+        addrs: Vec<std::net::SocketAddr>,
         /// PR2: 6-digit pairing PIN advertised by the peer's
         /// `PairShow`. `None` when the peer has no open pair window —
         /// PIN-method pairing requires a `Some(_)`.
@@ -188,6 +194,39 @@ fn is_valid_hex_id(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Link-local addresses (169.254/16, fe80::/10) are never the LAN address a
+/// peer is reachable at, so they're dropped before ranking.
+fn is_link_local(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+    }
+}
+
+/// Sort key (lower = tried first) for a peer's advertised addresses. Home
+/// Wi-Fi IPv4 (192.168/16, 172.16/12) goes first; the 10/8 block is ranked
+/// after the other private ranges because it is the usual cellular-CGNAT
+/// range, so a phone on both Wi-Fi and data tries the Wi-Fi IP first; public
+/// IPv4 next; IPv6 last. The initiator still tries every address, so a
+/// mis-rank only costs one 5s timeout, never a failed link.
+fn addr_rank(ip: &IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            if o[0] == 192 && o[1] == 168 {
+                0
+            } else if o[0] == 172 && (16..=31).contains(&o[1]) {
+                1
+            } else if o[0] == 10 {
+                2
+            } else {
+                3
+            }
+        }
+        IpAddr::V6(_) => 4,
+    }
+}
+
 async fn browse_loop(
     receiver: mdns_sd::Receiver<ServiceEvent>,
     self_peer_id: String,
@@ -209,16 +248,24 @@ async fn browse_loop(
                         let Some(static_pub) = props.get_property_val_str("static_pub") else { continue };
                         if !is_valid_hex_id(static_pub) { continue; }
                         // mdns-sd 0.19: `get_addresses` returns
-                        // `&HashSet<ScopedIp>` (was `HashSet<IpAddr>`).
-                        // Unwrap to plain `IpAddr` via `to_ip_addr()`.
-                        let Some(ip) = info
+                        // `&HashSet<ScopedIp>`. Collect EVERY advertised
+                        // address (not an arbitrary `.next()`), drop the
+                        // unreachable ones, and rank LAN-Wi-Fi-IPv4 first so a
+                        // peer that also has cellular / IPv6 still links fast.
+                        let port = info.get_port();
+                        let mut addrs: Vec<std::net::SocketAddr> = info
                             .get_addresses()
                             .iter()
-                            .next()
                             .map(mdns_sd::ScopedIp::to_ip_addr)
-                        else { continue };
-                        let port = info.get_port();
-                        let sock_addr = std::net::SocketAddr::new(ip, port);
+                            .filter(|ip| {
+                                !ip.is_loopback()
+                                    && !ip.is_unspecified()
+                                    && !is_link_local(ip)
+                            })
+                            .map(|ip| std::net::SocketAddr::new(ip, port))
+                            .collect();
+                        addrs.sort_by_key(|a| addr_rank(&a.ip()));
+                        if addrs.is_empty() { continue; }
                         let name = info.get_fullname()
                             .split('.')
                             .next()
@@ -236,7 +283,7 @@ async fn browse_loop(
                             peer_id_hex: peer_id.to_string(),
                             static_pub_hex: static_pub.to_string(),
                             name,
-                            addr: sock_addr,
+                            addrs,
                             pair_pin,
                         });
                     }
@@ -252,11 +299,40 @@ async fn browse_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_hex_id, supervise, DISCOVERY_RETRY};
+    use super::{addr_rank, is_link_local, is_valid_hex_id, supervise, DISCOVERY_RETRY};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn wifi_lan_ipv4_ranks_before_cellular_and_ipv6() {
+        // A phone on Wi-Fi (192.168.1.9) + cellular (10.238.x CGNAT) + IPv6
+        // advertises all three. The Wi-Fi LAN address must be tried first so
+        // the initiator doesn't waste 5s timing out on the unreachable ones.
+        let v4_wifi: IpAddr = Ipv4Addr::new(192, 168, 1, 9).into();
+        let v4_cell: IpAddr = Ipv4Addr::new(10, 238, 131, 121).into();
+        let v6: IpAddr = Ipv6Addr::new(0x2001, 0x4278, 0, 0, 0, 0, 0, 1).into();
+        let mut addrs: Vec<SocketAddr> = [v4_cell, v6, v4_wifi]
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, 41889))
+            .collect();
+        addrs.sort_by_key(|a| addr_rank(&a.ip()));
+        assert_eq!(addrs.first().unwrap().ip(), v4_wifi);
+        assert_eq!(addrs.last().unwrap().ip(), v6);
+        // 10/8 ranks after 192.168 but before IPv6.
+        assert!(addr_rank(&v4_wifi) < addr_rank(&v4_cell));
+        assert!(addr_rank(&v4_cell) < addr_rank(&v6));
+    }
+
+    #[test]
+    fn link_local_is_filtered() {
+        assert!(is_link_local(&Ipv4Addr::new(169, 254, 1, 2).into()));
+        assert!(is_link_local(&Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).into()));
+        assert!(!is_link_local(&Ipv4Addr::new(192, 168, 1, 9).into()));
+        assert!(!is_link_local(&Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 1).into()));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn fs036_supervise_retries_until_shutdown() {

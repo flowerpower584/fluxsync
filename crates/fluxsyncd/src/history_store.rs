@@ -136,6 +136,15 @@ pub fn save(
 /// the daemon deliberately cleared. A missing file is success.
 pub fn clear(dir: &Path) -> Result<()> {
     let path = dir.join(HISTORY_FILE);
+    // Also unlink a stale `history.enc.tmp` that a crash mid-`save` could have
+    // left behind holding the secret we are wiping; `load` never reads it, but
+    // it must not outlive a security wipe on disk.
+    let tmp = path.with_extension("enc.tmp");
+    if let Err(e) = fs::remove_file(&tmp) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(e).with_context(|| format!("remove {}", tmp.display()));
+        }
+    }
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

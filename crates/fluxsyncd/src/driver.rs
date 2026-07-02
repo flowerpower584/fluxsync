@@ -220,7 +220,16 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
             last: app.snapshot().history.clone(),
             entries,
         };
-        tokio::spawn(run_vault_persister(ctx, state_watch_tx.subscribe()));
+        // Seed the persister's wipe-gen baseline from the snapshot it is
+        // constructed against (0 at boot), so a security wipe published before
+        // the task's first poll is still observed as a change (see the note in
+        // run_vault_persister).
+        let initial_wipe_gen = app.snapshot().vault_wipe_gen;
+        tokio::spawn(run_vault_persister(
+            ctx,
+            state_watch_tx.subscribe(),
+            initial_wipe_gen,
+        ));
     }
     let (logs_bcast_tx, _) = broadcast::channel::<LogEntry>(64);
     // M-DAEMON-11: bounded so a hostile LAN flood (mDNS spam → DiscoveryEvent,
@@ -471,6 +480,14 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         });
     }
 
+    // This device's latest battery reading, shared with the heartbeat loop so
+    // it can re-broadcast the current level to the primary peer every tick.
+    // Battery is otherwise only sent on change (macOS poll) or via the Android
+    // broadcast — a steady level would never refresh on the peer after the
+    // handshake. 255 = "not read yet" → the heartbeat skips sending until real.
+    let self_batt_level = Arc::new(std::sync::atomic::AtomicU8::new(255));
+    let self_batt_charging = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Heartbeat loop.
     {
         let transport = transport.clone();
@@ -478,8 +495,20 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let shutdown = shutdown.clone();
         let metrics = metrics.clone();
         let peer_meta = peer_meta.clone();
+        let self_batt_level = self_batt_level.clone();
+        let self_batt_charging = self_batt_charging.clone();
         tasks.spawn(async move {
-            if let Err(e) = heartbeat_loop(transport, event_tx, shutdown, metrics, peer_meta).await {
+            if let Err(e) = heartbeat_loop(
+                transport,
+                event_tx,
+                shutdown,
+                metrics,
+                peer_meta,
+                self_batt_level,
+                self_batt_charging,
+            )
+            .await
+            {
                 tracing::warn!(error = %e, "heartbeat loop exited");
             }
             Ok(())
@@ -621,8 +650,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         });
     }
 
-    // Battery watcher.
-    #[cfg(target_os = "macos")]
+    // Battery watcher (desktop OSes; Android is event-driven via the FFI).
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
         let event_tx = event_tx.clone();
         let shutdown = shutdown.clone();
@@ -642,6 +671,10 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
             Some(event) = event_rx.recv() => {
                 if let Event::HandshakeOk = event {
                     metrics.lock().await.on_handshake_ok();
+                }
+                if let Event::BatteryChangedSelf { level, charging } = &event {
+                    self_batt_level.store(*level, std::sync::atomic::Ordering::Relaxed);
+                    self_batt_charging.store(*charging, std::sync::atomic::Ordering::Relaxed);
                 }
                 let actions = app.handle(event.clone(), &*wall_clock);
                 if !actions.is_empty() {
@@ -801,12 +834,12 @@ async fn dispatch(
                 use fluxsync_core::Clock;
 
                 let payload = if payload.len() > MAX_PAYLOAD {
-                    // Truncating a PNG yields garbage, but a payload over
-                    // the 16 MiB cap can't go on the wire either — the
-                    // watcher already refuses oversized images upstream,
-                    // so this only guards text and is effectively dead
-                    // code for images.
-                    tracing::warn!(size = payload.len(), "payload too large; truncating");
+                    // Unreachable backstop: every producer caps upstream now —
+                    // the watcher (text + image), CmdOp::Push (text), and
+                    // CmdOp::PushImage (image) all reject over-cap payloads
+                    // before they reach here. Kept defensively; truncating a
+                    // PNG would yield garbage, so reaching this is a bug.
+                    tracing::error!(size = payload.len(), "BUG: over-cap payload reached SendItem; truncating");
                     payload[..MAX_PAYLOAD].to_vec()
                 } else {
                     payload
@@ -1211,10 +1244,23 @@ async fn handle_driver_cmd(
             use fluxsync_core::Clock;
             tracing::info!(len = text.len(), "IPC: push requested from local");
             let text = text.trim().to_string();
-            if !text.is_empty() {
+            if text.len() > MAX_PAYLOAD {
+                // Reject early so the caller learns the paste was too big,
+                // instead of dispatch silently truncating the bytes mid-wire
+                // (the receiver would otherwise get a corrupted partial item).
+                CmdResponse::err(
+                    req_id,
+                    format!(
+                        "clipboard text too large: {} bytes (max {} bytes)",
+                        text.len(),
+                        MAX_PAYLOAD
+                    ),
+                )
+            } else if !text.is_empty() {
                 let kind = kind_of(&text);
                 let sensitive = fluxsync_core::is_sensitive(&text);
-                let hash = DedupRing::hash(text.as_bytes()).into_bytes();
+                // Canon hash so CRLF/LF copies dedup (see clipboard_dedup_hash).
+                let hash = clipboard_dedup_hash(&text);
                 let lamport = app.clock.tick();
                 let actions = app.handle(
                     Event::LocalClipboardChange {
@@ -1244,13 +1290,22 @@ async fn handle_driver_cmd(
                     peer_meta,
                 )
                 .await;
+                CmdResponse::ok(req_id, None)
+            } else {
+                CmdResponse::ok(req_id, None)
             }
-            CmdResponse::ok(req_id, None)
         }
         CmdOp::PushImage { data } => {
             use fluxsync_core::Clock;
             tracing::info!(b64_len = data.len(), "IPC: push_image requested from local");
             match B64.decode(data.as_bytes()) {
+                Ok(png) if png.len() > MAX_PAYLOAD => CmdResponse::err(
+                    req_id,
+                    format!(
+                        "push_image: image too large ({} bytes > {MAX_PAYLOAD} cap)",
+                        png.len()
+                    ),
+                ),
                 Ok(png) => match decode_png_to_rgba(&png) {
                     Some((w, h, rgba)) => {
                         let hash = image_rgba_hash(w, h, &rgba);
@@ -1674,7 +1729,17 @@ async fn handle_driver_cmd(
             let words = fingerprint(&static_pub);
             let words_vec: Vec<String> = words.iter().map(|s| (*s).to_string()).collect();
             let addr_hint = local_lan_addr(udp_bind, udp_port);
-            let uri = build_pair_uri(&pubkey_b32, &addr_hint, &words_vec);
+            // Optional Tailscale path: if this host has a tailnet address,
+            // fold it into the SAME uri (`a=lan,tailnet`) so a single QR
+            // works on the LAN and across a tailnet — the initiator tries
+            // each hint in order. Pure routing probe, no Tailscale
+            // dependency — see tailnet_local_addr.
+            let tailnet_addr_hint = tailnet_local_addr(udp_port);
+            let addr_hints = match &tailnet_addr_hint {
+                Some(t) => format!("{addr_hint},{t}"),
+                None => addr_hint.clone(),
+            };
+            let uri = build_pair_uri(&pubkey_b32, &addr_hints, &words_vec);
             // Open the TOFU window so the peer that scans this QR is
             // accepted on first handshake even though we don't know its
             // pubkey yet. Kept short (see `handshake::PAIRING_WINDOW`) so
@@ -1748,6 +1813,7 @@ async fn handle_driver_cmd(
                     uri,
                     pin: Some(pin),
                     pin_expires_at_ms,
+                    tailnet_addr_hint,
                 }),
             )
         }
@@ -1791,13 +1857,13 @@ async fn handle_driver_cmd(
                     );
                 }
             }
-            // Re-pairing a peer the user already SAS-confirmed must behave
-            // like a reconnect, not a fresh pair: passing the pending set to
-            // the initiator would re-gate clipboard AND let the reaper revoke
-            // the long-standing trust if the user abandons the verify screen.
-            // "Confirmed" = in trusted with no live pending entry.
-            let already_confirmed = trusted.lock().await.contains_key(&peer_id)
-                && !pending_pairs.lock().await.contains_key(&peer_id);
+            // An explicit QR scan is user intent to (re)verify, so it ALWAYS
+            // engages the SAS gate — even for an already-trusted peer (see the
+            // initiator `Some(pending_pairs)` below). This is what surfaces the
+            // 6 SAS words on the scanning side: without it, re-scanning a known
+            // peer ran as a silent reconnect and the initiator never created a
+            // pending entry, so its verify screen showed nothing. Silent
+            // discovery reconnects still pass `None` (no re-verify) elsewhere.
             trusted.lock().await.insert(
                 peer_id,
                 TrustedPeer {
@@ -1856,31 +1922,27 @@ async fn handle_driver_cmd(
                 peer_meta,
             )
             .await;
-            // URI always carries an address hint; if it parses, kick off
-            // the initiator immediately. If not, the trust has been
-            // recorded and discovery (or a later pair-accept --addr) can
-            // drive the handshake.
-            if let Some(addr_str) = parsed.addr {
-                if let Ok(parsed_addr) = addr_str.parse::<SocketAddr>() {
-                    start_initiator(
-                        identity.clone(),
-                        static_pub,
-                        parsed_addr,
-                        peer_id,
-                        name,
-                        transport.clone(),
-                        pending_initiator_tx.clone(),
-                        event_tx.clone(),
-                        if already_confirmed {
-                            None
-                        } else {
-                            Some(pending_pairs.clone())
-                        },
-                    )
-                    .await;
-                } else {
-                    tracing::warn!(addr = %addr_str, "pair uri addr unparseable; deferring to discovery");
-                }
+            // URI carries one or more address hints; if any parsed, kick
+            // off the initiator immediately (it tries each in order, LAN
+            // before tailnet). If none, the trust has been recorded and
+            // discovery (or a later pair-accept --addr) can drive it.
+            if !parsed.addrs.is_empty() {
+                start_initiator(
+                    identity.clone(),
+                    static_pub,
+                    parsed.addrs,
+                    peer_id,
+                    name,
+                    transport.clone(),
+                    pending_initiator_tx.clone(),
+                    event_tx.clone(),
+                    // Always Some on an explicit scan → the SAS gate engages and
+                    // the initiator's verify screen gets its 6 words.
+                    Some(pending_pairs.clone()),
+                )
+                .await;
+            } else {
+                tracing::warn!("pair uri carried no usable addr; deferring to discovery");
             }
             CmdResponse::ok(req_id, None)
         }
@@ -1980,7 +2042,7 @@ async fn handle_driver_cmd(
                         start_initiator(
                             identity.clone(),
                             static_pub,
-                            parsed,
+                            vec![parsed],
                             peer_id,
                             name,
                             transport.clone(),
@@ -2098,7 +2160,7 @@ async fn handle_driver_cmd(
             start_initiator(
                 identity.clone(),
                 static_pub,
-                target.addr,
+                vec![target.addr],
                 peer_id,
                 name,
                 transport.clone(),
@@ -2415,7 +2477,11 @@ async fn transport_recv_loop(
 /// Dedup hash over the *trimmed* clipboard text, so the write side and
 /// the watcher (which trims before hashing) agree — see FS-026.
 fn clipboard_dedup_hash(text: &str) -> [u8; 32] {
-    DedupRing::hash(text.trim().as_bytes()).into_bytes()
+    // CRLF-canonicalize (not just trim) so a Windows `\r\n` copy and a
+    // Unix `\n` copy of the same text — or an app that LF-normalizes the
+    // clipboard on read-back — dedup against each other instead of
+    // ping-ponging. Mirrors the core's inbound hashing (app.rs).
+    DedupRing::hash(fluxsync_core::canon_text(text).as_bytes()).into_bytes()
 }
 
 /// Build the history label for a clipboard payload. Text-like kinds show
@@ -2476,9 +2542,49 @@ impl VaultCtx {
 /// publish, skips when the history list is unchanged, and writes the
 /// encrypted vault off-thread (`spawn_blocking`) so the fsync never stalls
 /// a runtime worker. Exits when the watch sender drops at shutdown.
-async fn run_vault_persister(mut ctx: VaultCtx, mut rx: watch::Receiver<State>) {
+async fn run_vault_persister(
+    mut ctx: VaultCtx,
+    mut rx: watch::Receiver<State>,
+    initial_wipe_gen: u64,
+) {
+    // Baseline is seeded from the CONSTRUCTION snapshot, not a late
+    // `rx.borrow()`: a security wipe that lands between `subscribe()` and the
+    // first poll would otherwise be adopted as the baseline, so `rx.changed()`
+    // would never observe it and the disk clear would be skipped while
+    // ctx.entries still holds the favorite (which rebuild() would resurrect).
+    let mut last_wipe_gen = initial_wipe_gen;
     while rx.changed().await.is_ok() {
-        let history = rx.borrow_and_update().history.clone();
+        let (history, wipe_gen) = {
+            let snap = rx.borrow_and_update();
+            (snap.history.clone(), snap.vault_wipe_gen)
+        };
+        // A security wipe (untrusted-peer, ghost-timeout, peer-swap) cleared
+        // the in-memory history for safety; mirror it on disk. Delete the
+        // encrypted vault and forget cached favorites so a pinned secret can't
+        // be re-appended by rebuild() and the file can't outlive the wipe.
+        // The disk clear is async relative to the in-memory wipe; a crash in
+        // that sub-second window can leave history.enc on disk until the next
+        // boot rehydrates+re-wipes it (residual, low-severity: the secret is
+        // the user's own, on the user's own device).
+        if wipe_gen != last_wipe_gen {
+            ctx.entries.clear();
+            let dir = ctx.dir.clone();
+            match tokio::task::spawn_blocking(move || history_store::clear(&dir)).await {
+                // Only advance past this generation once the file is actually
+                // gone; on failure keep last_wipe_gen so the next state publish
+                // re-attempts the clear instead of permanently losing the wipe.
+                Ok(Ok(())) => last_wipe_gen = wipe_gen,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "vault security wipe failed; will retry on next change");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "vault security wipe task join failed; will retry on next change");
+                }
+            }
+            // Force the post-wipe history (empty, or freshly-started for a
+            // peer-swap) to be re-persisted below instead of short-circuiting.
+            ctx.last = Vec::new();
+        }
         if history == ctx.last {
             continue;
         }
@@ -2788,8 +2894,13 @@ async fn heartbeat_loop(
     shutdown: CancellationToken,
     metrics: Arc<Mutex<MetricsTracker>>,
     peer_meta: PeerMetaMap,
+    self_batt_level: Arc<std::sync::atomic::AtomicU8>,
+    self_batt_charging: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    // 3s interval + 3-miss threshold ⇒ an ungraceful disconnect (crash,
+    // sleep, Wi-Fi drop — no Bye) surfaces in ~9s instead of the old ~30s,
+    // matching the "3 missed = offline" contract documented in state.rs.
+    let mut interval = tokio::time::interval(Duration::from_secs(3));
     let mut missed_pings = 0;
     // FluxMesh robustness slice 1: per-secondary-peer missed-ping counters.
     // The primary's `missed_pings` lives above; each `extra` peer ghost-times
@@ -2824,14 +2935,33 @@ async fn heartbeat_loop(
                         let _ = transport.send_encrypted(&bytes).await;
                     }
 
+                    // 1b. Re-broadcast this device's current battery so the peer
+                    // stays fresh even when the level is steady (no change event
+                    // would fire otherwise). 255 = not read yet → skip.
+                    let level = self_batt_level.load(std::sync::atomic::Ordering::Relaxed);
+                    if level != 255 {
+                        let charging = self_batt_charging.load(std::sync::atomic::Ordering::Relaxed);
+                        let frame = fluxsync_proto::Frame {
+                            version: fluxsync_proto::PROTOCOL_VERSION,
+                            msg: fluxsync_proto::Msg::BatteryStatus(fluxsync_proto::BatteryStatus {
+                                lamport: 0,
+                                level,
+                                charging,
+                            }),
+                        };
+                        if let Ok(bytes) = fluxsync_proto::encode(&frame) {
+                            let _ = transport.send_encrypted(&bytes).await;
+                        }
+                    }
+
                     // 2. Check the primary's receive timeout.
                     let last_rx = transport.last_rx();
 
-                    if now.saturating_sub(last_rx) > 5_000 {
+                    if now.saturating_sub(last_rx) > 3_000 {
                         missed_pings += 1;
                         metrics.lock().await.on_heartbeat_missed();
-                        if missed_pings >= 6 {
-                            tracing::warn!("Peer timed out (6 missed pings/30s). Dropping link.");
+                        if missed_pings >= 3 {
+                            tracing::warn!("Peer timed out (3 missed pings/~9s). Dropping link.");
                             metrics.lock().await.on_disconnect(DisconnectReason::HeartbeatTimeout);
                             transport.set_last_rx(now);
                             // FluxMesh robustness slice 2: rebind to a live
@@ -2868,13 +2998,13 @@ async fn heartbeat_loop(
                     if let Some(bytes) = ping_bytes() {
                         let _ = transport.send_encrypted_to(peer_id, &bytes).await;
                     }
-                    if now.saturating_sub(last_rx) > 5_000 {
+                    if now.saturating_sub(last_rx) > 3_000 {
                         let missed = secondary_missed.entry(peer_id).or_insert(0);
                         *missed += 1;
-                        if *missed >= 6 {
+                        if *missed >= 3 {
                             tracing::warn!(
                                 peer = %hex::encode(peer_id),
-                                "Secondary peer timed out (30s). Dropping its session."
+                                "Secondary peer timed out (~9s). Dropping its session."
                             );
                             transport.drop_session_for(peer_id).await;
                             secondary_missed.remove(&peer_id);
@@ -3210,6 +3340,20 @@ async fn forward_item(
 /// across further hops, and delivers it locally. A chunked image now reaches
 /// a third node B→C, not just direct neighbours.
 #[allow(clippy::too_many_arguments)]
+/// Namespace the reassembly map by the immediate source peer so concurrent
+/// transfers of the same `item_id` from different mesh peers cannot share a
+/// `Reassembly` slot vector. Without this, a paired-but-misbehaving peer could
+/// send `Chunk{item_id=H, ..}` to overwrite a slot another peer is filling for
+/// the same H, delivering a corrupted payload under an authentic hash. Keyed by
+/// BLAKE3(source ‖ item_id); the content hash itself is still carried unchanged
+/// into `complete_reassembled_item`.
+fn reassembly_key(source: [u8; 32], item_id: [u8; 32]) -> [u8; 32] {
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(&source);
+    buf[32..].copy_from_slice(&item_id);
+    fluxsync_core::DedupRing::hash(&buf).into_bytes()
+}
+
 async fn complete_reassembled_item(
     transport: &Arc<Transport>,
     inflight: &InflightMap,
@@ -3279,10 +3423,13 @@ async fn dispatch_inbound_frame(
             if item.payload.is_empty() {
                 // Header for a chunked transfer
                 let mut map = reassembly.lock().await;
+                // Per-source namespacing: same item_id from different peers
+                // must not collide in one Reassembly (see reassembly_key).
+                let key = reassembly_key(peer_id, item.hash);
                 // FS-058 V2: mirror the chunk-arm cap. A flood of headers
                 // for new items must not grow `reassembly` unbounded —
                 // evict the least-recently-updated entry first.
-                if !map.contains_key(&item.hash) && map.len() >= 5 {
+                if !map.contains_key(&key) && map.len() >= 5 {
                     let oldest = map
                         .iter()
                         .min_by_key(|(_, r)| r.last_update)
@@ -3291,7 +3438,7 @@ async fn dispatch_inbound_frame(
                         map.remove(&k);
                     }
                 }
-                let r = map.entry(item.hash).or_insert_with(|| Reassembly {
+                let r = map.entry(key).or_insert_with(|| Reassembly {
                     metadata: Some((item.lamport, item.kind, item.sensitive)),
                     origin: item.origin,
                     event_seq: item.event_seq,
@@ -3316,7 +3463,7 @@ async fn dispatch_inbound_frame(
                     for chunk in r.chunks.drain(..) {
                         full_payload.extend(chunk.unwrap());
                     }
-                    map.remove(&item.hash);
+                    map.remove(&key);
                     drop(map);
 
                     complete_reassembled_item(
@@ -3362,8 +3509,11 @@ async fn dispatch_inbound_frame(
             }
 
             let mut map = reassembly.lock().await;
+            // Per-source namespacing (see reassembly_key): a peer can only fill
+            // its own item_id's slots, never overwrite another peer's transfer.
+            let key = reassembly_key(peer_id, c.item_id);
 
-            if !map.contains_key(&c.item_id) && map.len() >= 5 {
+            if !map.contains_key(&key) && map.len() >= 5 {
                 let oldest = map
                     .iter()
                     .min_by_key(|(_, r)| r.last_update)
@@ -3373,7 +3523,7 @@ async fn dispatch_inbound_frame(
                 }
             }
 
-            let r = map.entry(c.item_id).or_insert_with(|| Reassembly {
+            let r = map.entry(key).or_insert_with(|| Reassembly {
                 metadata: None,
                 origin: [0u8; 32],
                 event_seq: 0,
@@ -3401,7 +3551,7 @@ async fn dispatch_inbound_frame(
                 for chunk in r.chunks.drain(..) {
                     full_payload.extend(chunk.unwrap());
                 }
-                map.remove(&c.item_id);
+                map.remove(&key);
                 drop(map);
 
                 complete_reassembled_item(
@@ -3656,13 +3806,14 @@ struct PeerMeta {
 }
 
 impl PeerMeta {
-    /// Battery defaults to 100 (not 0) so a peer seen via Hello before its
-    /// first `BatteryStatus` doesn't render as Critical.
+    /// Battery defaults to the 255 "unknown" sentinel so a peer seen via Hello
+    /// before its first `BatteryStatus` renders "—", not a fake 100%. 255 is
+    /// also safe for the Critical check (255 <= 5 is false).
     fn new() -> Self {
         Self {
             name: String::new(),
             platform: String::new(),
-            battery: 100,
+            battery: 255,
             charging: false,
         }
     }
@@ -3688,7 +3839,7 @@ async fn build_peers(
                 peer_id: id,
                 name: m.map(|m| m.name.clone()).unwrap_or_default(),
                 platform: m.map(|m| m.platform.clone()).unwrap_or_default(),
-                battery: m.map_or(100, |m| m.battery),
+                battery: m.map_or(255, |m| m.battery), // 255 = unknown → UI "—"
                 charging: m.is_some_and(|m| m.charging),
                 primary: Some(id) == primary,
             }
@@ -3772,7 +3923,7 @@ async fn discovery_dispatcher(
                                     start_initiator(
                                         id_clone,
                                         static_pub,
-                                        h_addr,
+                                        vec![h_addr],
                                         peer_id_clone,
                                         peer_name,
                                         transport_clone,
@@ -3788,13 +3939,16 @@ async fn discovery_dispatcher(
             }
             Some(disc) = rx.recv() => {
                 match disc {
-                    DiscoveryEvent::Resolved { peer_id_hex, static_pub_hex, name, addr, pair_pin } => {
+                    DiscoveryEvent::Resolved { peer_id_hex, static_pub_hex, name, addrs, pair_pin } => {
                         let Ok(peer_id) = decode_hex32(&peer_id_hex) else { continue };
                         let Ok(static_pub) = decode_hex32(&static_pub_hex) else { continue };
                         if handshake::peer_id_for(&static_pub) != peer_id {
                             tracing::warn!("mDNS peer_id != BLAKE3(static_pub); ignoring");
                             continue;
                         }
+                        // Best (highest-ranked) address for the reconnect
+                        // cache; the initiator below gets the full ranked list.
+                        let Some(best_addr) = addrs.first().copied() else { continue };
                         // PR2: feed the discovery cache before the trust
                         // gate so `PairFromPin` can resolve a not-yet-
                         // trusted peer. Cap to avoid unbounded growth from
@@ -3809,7 +3963,7 @@ async fn discovery_dispatcher(
                             if cache.len() < 256 || cache.contains_key(&peer_id) {
                                 cache.insert(peer_id, ResolvedPeer {
                                     static_pub,
-                                    addr,
+                                    addr: best_addr,
                                     name: name.clone(),
                                     pair_pin: pair_pin.clone(),
                                     last_seen: now,
@@ -3856,7 +4010,7 @@ async fn discovery_dispatcher(
                         start_initiator(
                             identity.clone(),
                             static_pub,
-                            addr,
+                            addrs,
                             peer_id,
                             name,
                             transport.clone(),
@@ -3866,7 +4020,16 @@ async fn discovery_dispatcher(
                         ).await;
                     }
                     DiscoveryEvent::Removed { .. } => {
-                        let _ = event_tx.try_send(Event::PeerLost);
+                        // mDNS removal is unreliable — TTL expiry, transient
+                        // multicast loss, or an unrelated FluxSync device
+                        // leaving the LAN all fire it. It must NOT tear down a
+                        // healthy link: while an encrypted session is live,
+                        // heartbeat timeout (~9s) is the sole authority on peer
+                        // liveness. Only surface PeerLost when there is no
+                        // session to lose (already discovering / never linked).
+                        if !transport.has_session().await {
+                            let _ = event_tx.try_send(Event::PeerLost);
+                        }
                     }
                 }
             }
@@ -3879,7 +4042,7 @@ async fn discovery_dispatcher(
 async fn start_initiator(
     identity: Identity,
     static_pub: [u8; 32],
-    addr: SocketAddr,
+    addrs: Vec<SocketAddr>,
     peer_id: [u8; 32],
     name: String,
     transport: Arc<Transport>,
@@ -3887,33 +4050,60 @@ async fn start_initiator(
     event_tx: mpsc::Sender<Event>,
     pending: Option<PendingSet>,
 ) {
+    if addrs.is_empty() {
+        return;
+    }
     // Single-flight: refuse to start a second initiator while one is
     // still waiting on its msg2. The pending slot doubles as the route
     // for HandshakeResp datagrams (transport_recv_loop), so two
     // overlapping initiators would steer the second peer's reply to
-    // the first peer's session and corrupt both.
-    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    // the first peer's session and corrupt both. Reserve the slot here
+    // (under the lock, before spawning) with a placeholder; the loop
+    // installs the real per-attempt channel before each handshake.
     {
         let mut g = pending_initiator_tx.lock().await;
         if g.is_some() {
             tracing::debug!("initiator already pending; skipping");
             return;
         }
-        *g = Some(tx);
+        let (placeholder, _) = mpsc::unbounded_channel::<Vec<u8>>();
+        *g = Some(placeholder);
     }
-    transport.set_peer_addr(addr).await;
-    let pending_clear = pending_initiator_tx.clone();
     tokio::spawn(async move {
-        let result = handshake::run_initiator(
-            identity, static_pub, addr, transport, rx, event_tx, peer_id, name, pending,
-        )
-        .await;
-        // Clear the pending slot whether the handshake succeeded or
-        // failed, so the next discovery resolve / PairAccept can retry.
-        *pending_clear.lock().await = None;
-        if let Err(e) = result {
-            tracing::warn!(error = %e, "initiator failed");
+        // Try each address hint in order (LAN first, then tailnet). A dead
+        // hint fails fast via run_initiator's 5s msg2 timeout, then we
+        // refresh the channel + pending slot and try the next. One QR with
+        // `a=lan,tailnet` thus works on the LAN and across a tailnet.
+        for (i, addr) in addrs.iter().enumerate() {
+            let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            *pending_initiator_tx.lock().await = Some(tx);
+            transport.set_peer_addr(*addr).await;
+            let result = handshake::run_initiator(
+                identity.clone(),
+                static_pub,
+                *addr,
+                transport.clone(),
+                rx,
+                event_tx.clone(),
+                peer_id,
+                name.clone(),
+                pending.clone(),
+            )
+            .await;
+            match result {
+                Ok(()) => {
+                    // Linked. Leave the slot cleared and stop trying hints.
+                    *pending_initiator_tx.lock().await = None;
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, addr = %addr, attempt = i, "initiator attempt failed");
+                }
+            }
         }
+        // All hints exhausted; clear the slot so the next discovery resolve
+        // / PairAccept can retry.
+        *pending_initiator_tx.lock().await = None;
     });
 }
 
@@ -4042,6 +4232,33 @@ fn local_lan_addr(udp_bind: &str, udp_port: u16) -> String {
     format!("{ip}:{udp_port}")
 }
 
+/// Best-effort tailnet (Tailscale) socket address for this host, if any.
+///
+/// Tailscale assigns each node an address in the CGNAT range
+/// `100.64.0.0/10`. We discover ours the same dependency-free way as
+/// `local_lan_addr`: open a UDP socket "connected" to a target inside that
+/// range (Tailscale's MagicDNS resolver, `100.100.100.100`) and read back
+/// the source address the kernel picks. With no tailnet route the source IP
+/// won't land in the CGNAT range, so we reject it and return `None`. No
+/// Tailscale SDK or dependency — purely a routing probe, so Tailscale stays
+/// 100% optional. (False positive only if the host itself sits behind ISP
+/// CGNAT in the same range; harmless — it's a hint the user can verify.)
+fn tailnet_local_addr(udp_port: u16) -> Option<String> {
+    use std::net::{IpAddr, UdpSocket};
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("100.100.100.100:80").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        IpAddr::V4(v4) if is_cgnat(v4) => Some(format!("{v4}:{udp_port}")),
+        _ => None,
+    }
+}
+
+/// True if `ip` is in the `100.64.0.0/10` CGNAT range Tailscale assigns.
+fn is_cgnat(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 100 && (o[1] & 0xC0) == 64
+}
+
 /// Render a `fluxsync://pair/<pubkey_b32>?a=<addr>&f=<w1.w2...>` URI.
 fn build_pair_uri(pubkey_b32: &str, addr_hint: &str, fp_words: &[String]) -> String {
     format!(
@@ -4052,7 +4269,10 @@ fn build_pair_uri(pubkey_b32: &str, addr_hint: &str, fp_words: &[String]) -> Str
 
 struct ParsedPairUri {
     pubkey_b32: String,
-    addr: Option<String>,
+    /// Address hints from `a=` (comma-separated), parsed + validated, in
+    /// order. Lets one URI/QR carry LAN + tailnet so the initiator can try
+    /// each until one handshake succeeds.
+    addrs: Vec<SocketAddr>,
     #[allow(dead_code)]
     fp_words: Vec<String>,
 }
@@ -4069,19 +4289,28 @@ fn parse_pair_uri(s: &str) -> Result<ParsedPairUri> {
     if pubkey_b32.is_empty() {
         return Err(anyhow!("missing pubkey segment"));
     }
-    let mut addr = None;
+    let mut addrs: Vec<SocketAddr> = Vec::new();
     let mut fp_words: Vec<String> = Vec::new();
     for kv in query.split('&').filter(|s| !s.is_empty()) {
         let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
         match k {
-            "a" => addr = Some(v.to_string()),
+            // `a` may carry several comma-separated hints (LAN,tailnet).
+            // Keep only the ones that parse; order is preserved so the
+            // initiator tries LAN before tailnet.
+            "a" => {
+                addrs = v
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse::<SocketAddr>().ok())
+                    .collect();
+            }
             "f" => fp_words = v.split('.').map(str::to_string).collect(),
             _ => {}
         }
     }
     Ok(ParsedPairUri {
         pubkey_b32: pubkey_b32.to_string(),
-        addr,
+        addrs,
         fp_words,
     })
 }
@@ -4125,6 +4354,49 @@ async fn ipc_accept_loop(
     Ok(())
 }
 
+/// Cap on a single IPC NDJSON line. The largest legitimate request is a
+/// base64 image push (~4/3 of `MAX_PAYLOAD`); 64 MiB leaves headroom while
+/// bounding a malicious/buggy local client that streams a newline-less line
+/// (which would otherwise let `read_line` buffer unbounded → OOM the daemon).
+const MAX_IPC_LINE: usize = 64 * 1024 * 1024;
+
+/// Like `AsyncBufReadExt::read_line` but refuses to buffer more than `max`
+/// bytes for one line. Reads via `fill_buf`/`consume` so accumulation is
+/// bounded; returns `InvalidData` once the line would exceed the cap. Bytes
+/// are decoded lossily once the whole line is collected, so multi-byte UTF-8
+/// never splits across an internal buffer boundary.
+async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    out: &mut String,
+    max: usize,
+) -> std::io::Result<usize> {
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            break; // EOF
+        }
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        if bytes.len() + take > max {
+            reader.consume(take);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "IPC line exceeds max length",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if done {
+            break;
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(&bytes));
+    Ok(bytes.len())
+}
+
 async fn handle_ipc_client(
     conn: IpcConn,
     cmd_tx: mpsc::UnboundedSender<DriverCmd>,
@@ -4137,7 +4409,7 @@ async fn handle_ipc_client(
     let mut reader = BufReader::new(read_half);
 
     let mut opening = String::new();
-    reader.read_line(&mut opening).await?;
+    read_line_capped(&mut reader, &mut opening, MAX_IPC_LINE).await?;
     let sub: Subscribe = serde_json::from_str(opening.trim())
         .map_err(|e| anyhow!("opening line not a Subscribe: {e}"))?;
 
@@ -4148,7 +4420,7 @@ async fn handle_ipc_client(
                 line.clear();
                 tokio::select! {
                     () = shutdown.cancelled() => return Ok(()),
-                    res = reader.read_line(&mut line) => {
+                    res = read_line_capped(&mut reader, &mut line, MAX_IPC_LINE) => {
                         let n = res?;
                         if n == 0 { return Ok(()); }
                         let req: CmdRequest = match serde_json::from_str(line.trim()) {
@@ -4268,6 +4540,160 @@ mod tests {
             clipboard_dedup_hash("world"),
             "distinct payloads must still hash differently",
         );
+    }
+
+    /// C1: the dedup hash CRLF-canonicalizes, so the SAME text copied with
+    /// Windows `\r\n` vs Unix `\n` line endings dedups instead of bouncing.
+    #[test]
+    fn c1_clipboard_dedup_hash_canonicalizes_crlf() {
+        use super::clipboard_dedup_hash;
+        assert_eq!(
+            clipboard_dedup_hash("line1\r\nline2"),
+            clipboard_dedup_hash("line1\nline2"),
+            "CRLF and LF of the same text must hash equal",
+        );
+        assert_eq!(
+            clipboard_dedup_hash("a\rb"),
+            clipboard_dedup_hash("a\nb"),
+            "lone CR must canonicalize to LF",
+        );
+    }
+
+    /// C2: the vault persister mirrors a security wipe onto disk. When the
+    /// published `State.vault_wipe_gen` increments, the persister must delete
+    /// the encrypted vault AND forget its cached favorites — otherwise a
+    /// previously-favorited secret is re-appended by `rebuild()` and the file
+    /// outlives the in-memory wipe. This exercises the real persister glue
+    /// end-to-end (the only line the integration test couldn't reach).
+    #[tokio::test]
+    async fn c2_persister_clears_disk_vault_and_favorites_on_wipe_gen_bump() {
+        use super::{run_vault_persister, VaultCtx};
+        use crate::history_store;
+        use fluxsync_core::{Config, HistoryItem, HistorySource, Kind, State};
+        use std::time::Duration;
+        use tokio::sync::watch;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = zeroize::Zeroizing::new([0x11u8; 32]);
+        let now = 1_000_000u64;
+        let ttl = history_store::DEFAULT_TTL_SECS;
+        let disk_len = |d: &std::path::Path| {
+            history_store::load(d, &key, now, ttl)
+                .map(|v| v.len())
+                .unwrap_or(0)
+        };
+
+        let secret = HistoryItem {
+            kind: Kind::Text,
+            preview: "favorited secret".into(),
+            time: "12:00".into(),
+            source: HistorySource::Local,
+            sensitive: false,
+            lamport: 1,
+            hash: "aa".repeat(32),
+            favorite: true,
+        };
+
+        // Persister starts empty (ctx.last empty) so the baseline publish below
+        // forces a save we can poll on — a deterministic sync point that proves
+        // the loop captured wipe_gen=0 BEFORE we bump it (avoids a watch-init
+        // race where borrow() reads the post-send value).
+        let ctx = VaultCtx {
+            dir: dir.path().to_path_buf(),
+            key: key.clone(),
+            last: Vec::new(),
+            entries: Vec::new(),
+        };
+
+        // Channel init: empty, gen=0. Persister records last_wipe_gen=0.
+        let (tx, rx) = watch::channel(State::initial(&Config::default()));
+        let persister = tokio::spawn(run_vault_persister(ctx, rx, 0));
+
+        // Baseline: publish the favorited secret (gen still 0) → persister saves
+        // it to disk and caches it as a favorite in ctx.entries.
+        let mut base = State::initial(&Config::default());
+        base.history = vec![secret.clone()];
+        base.vault_wipe_gen = 0;
+        tx.send(base).expect("publish baseline");
+        let mut saved = false;
+        for _ in 0..200 {
+            if disk_len(dir.path()) == 1 {
+                saved = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(saved, "baseline favorite must reach the on-disk vault first");
+
+        // Security wipe with a NON-EMPTY post-wipe history (a peer-swap starts
+        // a fresh, non-favorite item). This is what makes ctx.entries.clear()
+        // load-bearing: with a non-empty history the persister does NOT
+        // short-circuit on `history == ctx.last`, so it runs rebuild(). If
+        // ctx.entries still held the favorited secret, rebuild()'s favorite
+        // re-append loop would resurrect it onto disk — so this test fails iff
+        // the cached favorites are not forgotten on the wipe.
+        let fresh = HistoryItem {
+            kind: Kind::Text,
+            preview: "post-swap item".into(),
+            time: "12:01".into(),
+            source: HistorySource::Local,
+            sensitive: false,
+            lamport: 2,
+            hash: "bb".repeat(32),
+            favorite: false,
+        };
+        let mut wiped = State::initial(&Config::default());
+        wiped.history = vec![fresh.clone()];
+        wiped.vault_wipe_gen = 1;
+        tx.send(wiped).expect("publish wipe");
+
+        // Poll until the on-disk vault reflects the wipe: the fresh item is
+        // persisted and the previously-favorited secret is GONE.
+        let disk_previews = |d: &std::path::Path| -> Vec<String> {
+            history_store::load(d, &key, now, ttl)
+                .map(|v| v.into_iter().map(|e| e.item.preview).collect())
+                .unwrap_or_default()
+        };
+        let mut cleared = false;
+        for _ in 0..200 {
+            let p = disk_previews(dir.path());
+            if p.iter().any(|x| x == "post-swap item")
+                && !p.iter().any(|x| x == "favorited secret")
+            {
+                cleared = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            cleared,
+            "security wipe must drop the cached favorite: on-disk vault should hold only \
+             the fresh post-swap item, never the previously-favorited secret. Got: {:?}",
+            disk_previews(dir.path()),
+        );
+
+        drop(tx);
+        let _ = persister.await;
+    }
+
+    /// Phase 5: reassembly is namespaced per source peer, so two paired peers
+    /// sending the same item_id get DISTINCT reassembly slots (no cross-peer
+    /// chunk overwrite), while a given (peer, item_id) pair is stable.
+    #[test]
+    fn reassembly_key_namespaces_by_source_peer() {
+        use super::reassembly_key;
+        let item = [0xAAu8; 32];
+        let peer_a = [1u8; 32];
+        let peer_b = [2u8; 32];
+
+        // Same peer + same item ⇒ stable key (header and chunks collate).
+        assert_eq!(reassembly_key(peer_a, item), reassembly_key(peer_a, item));
+        // Different source peers, same item_id ⇒ different keys (the fix).
+        assert_ne!(reassembly_key(peer_a, item), reassembly_key(peer_b, item));
+        // Same peer, different items ⇒ different keys.
+        assert_ne!(reassembly_key(peer_a, item), reassembly_key(peer_a, [0xBBu8; 32]));
+        // The key is not just the item_id passed through.
+        assert_ne!(reassembly_key(peer_a, item), item);
     }
 
     /// FS-041: an inbound `Msg::Bye` must emit `Event::PeerLost` so the FSM
