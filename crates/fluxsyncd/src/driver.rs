@@ -22,7 +22,9 @@
 use crate::cmd::{Channel, CmdData, CmdOp, CmdRequest, CmdResponse, PeerEntry, Subscribe};
 use crate::config::{DaemonConfig, TestPair};
 use crate::discovery::{self, DiscoveryEvent};
-use crate::handshake::{self, PairingWindow, PendingSet, TrustedPeer, TrustedSet};
+use crate::handshake::{
+    self, PairingWindow, PendingSet, TrustedPeer, TrustedSet, MAX_PERSISTED_PEERS,
+};
 use crate::ipc::{IpcConn, IpcServer};
 use crate::logs::LogTail;
 use crate::metrics::{DisconnectReason, MetricsTracker};
@@ -208,29 +210,6 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     let initial = app.snapshot().clone();
     let (state_watch_tx, state_watch_rx) = watch::channel(initial);
 
-    // Persist history off the state-watch channel: a dedicated task wakes
-    // on every state change, diffs the history list, and writes the vault
-    // only when it actually changed (skipping the frequent battery /
-    // heartbeat / peer-list EmitStates). Lives only when a keystore dir is
-    // configured; exits when the watch sender drops at shutdown.
-    if let Some((dir, key, entries)) = vault {
-        let ctx = VaultCtx {
-            dir,
-            key,
-            last: app.snapshot().history.clone(),
-            entries,
-        };
-        // Seed the persister's wipe-gen baseline from the snapshot it is
-        // constructed against (0 at boot), so a security wipe published before
-        // the task's first poll is still observed as a change (see the note in
-        // run_vault_persister).
-        let initial_wipe_gen = app.snapshot().vault_wipe_gen;
-        tokio::spawn(run_vault_persister(
-            ctx,
-            state_watch_tx.subscribe(),
-            initial_wipe_gen,
-        ));
-    }
     let (logs_bcast_tx, _) = broadcast::channel::<LogEntry>(64);
     // M-DAEMON-11: bounded so a hostile LAN flood (mDNS spam → DiscoveryEvent,
     // or forged frames → Event) can't grow the daemon's memory without bound.
@@ -289,6 +268,33 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     let pin_advert: PinAdvertisement = Arc::new(Mutex::new(None));
     let disc_cache: DiscoveryCache = Arc::new(Mutex::new(HashMap::new()));
     let mdns_ctx: MdnsCtx = Arc::new(Mutex::new(None));
+
+    // Persist history off the state-watch channel: a dedicated task wakes
+    // on every state change, diffs the history list, and writes the vault
+    // only when it actually changed (skipping the frequent battery /
+    // heartbeat / peer-list EmitStates). Lives only when a keystore dir is
+    // configured; exits when the watch sender drops at shutdown. Spawned
+    // here (after `disc_cache` exists) so the persister can also purge it
+    // on a security wipe (DIR-P2-04a).
+    if let Some((dir, key, entries)) = vault {
+        let ctx = VaultCtx {
+            dir,
+            key,
+            last: app.snapshot().history.clone(),
+            entries,
+        };
+        // Seed the persister's wipe-gen baseline from the snapshot it is
+        // constructed against (0 at boot), so a security wipe published before
+        // the task's first poll is still observed as a change (see the note in
+        // run_vault_persister).
+        let initial_wipe_gen = app.snapshot().vault_wipe_gen;
+        tokio::spawn(run_vault_persister(
+            ctx,
+            state_watch_tx.subscribe(),
+            initial_wipe_gen,
+            disc_cache.clone(),
+        ));
+    }
 
     if let Some(tpp) = test_pending_pair {
         pending_pairs.lock().await.insert(
@@ -443,6 +449,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let pending_pairs_for_recv = pending_pairs.clone();
         let mesh_seen_for_recv = mesh_seen.clone();
         let peer_meta_for_recv = peer_meta.clone();
+        let disc_cache_for_recv = disc_cache.clone();
         tasks.spawn(async move {
             transport_recv_loop(
                 transport,
@@ -458,6 +465,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 pending_pairs_for_recv,
                 mesh_seen_for_recv,
                 peer_meta_for_recv,
+                disc_cache_for_recv,
                 lan_only_handshakes,
             )
             .await
@@ -833,17 +841,28 @@ async fn dispatch(
             } => {
                 use fluxsync_core::Clock;
 
-                let payload = if payload.len() > MAX_PAYLOAD {
+                if payload.len() > MAX_PAYLOAD {
                     // Unreachable backstop: every producer caps upstream now —
                     // the watcher (text + image), CmdOp::Push (text), and
                     // CmdOp::PushImage (image) all reject over-cap payloads
-                    // before they reach here. Kept defensively; truncating a
-                    // PNG would yield garbage, so reaching this is a bug.
-                    tracing::error!(size = payload.len(), "BUG: over-cap payload reached SendItem; truncating");
-                    payload[..MAX_PAYLOAD].to_vec()
-                } else {
-                    payload
-                };
+                    // before they reach here. Fail closed if one ever slips
+                    // through anyway: drop the item rather than truncate (a
+                    // truncated PNG/text blob is corrupt, and sending it
+                    // would silently desync the peer). `debug_assert!` turns
+                    // this into a hard test failure if an upstream cap is
+                    // ever removed or bypassed.
+                    tracing::error!(
+                        size = payload.len(),
+                        cap = MAX_PAYLOAD,
+                        "BUG: over-cap payload reached SendItem; dropping item (an upstream cap was bypassed)"
+                    );
+                    debug_assert!(
+                        false,
+                        "over-cap payload ({} bytes > {MAX_PAYLOAD} cap) reached Action::SendItem",
+                        payload.len()
+                    );
+                    continue;
+                }
 
                 // FluxMesh: stamp this item with its origin device + a
                 // per-origin sequence so the mesh dedups/anti-loops on
@@ -1473,6 +1492,12 @@ async fn handle_driver_cmd(
             // silently re-trust them.
             let snapshot = trusted.lock().await.clone();
             trusted.lock().await.clear();
+            // DIR-P2-04a: the mDNS discovery cache holds every seen peer's
+            // pubkey, name, addrs, and pairing PIN. Purge it unconditionally
+            // on unpair — even if the disk persist below fails and trust is
+            // rolled back, losing stale discovery data is harmless (mDNS
+            // re-announces), never a regression from the pre-unpair state.
+            disc_cache.lock().await.clear();
             if let Some(dir) = keystore_dir {
                 if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
                     *trusted.lock().await = snapshot;
@@ -1568,6 +1593,10 @@ async fn handle_driver_cmd(
             // disk before we acknowledge, otherwise a daemon restart
             // would re-trust the peer we just promised to drop.
             let removed_trusted = trusted.lock().await.remove(&arr);
+            // DIR-P2-04a: purge this peer's mDNS discovery-cache entry
+            // (pubkey, name, addrs, pairing PIN) so a revoked peer isn't
+            // still resolvable via a stale cache hit (e.g. PairFromPin).
+            disc_cache.lock().await.remove(&arr);
             if let Some(dir) = keystore_dir {
                 if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
                     if let Some(p) = removed_trusted {
@@ -1675,6 +1704,10 @@ async fn handle_driver_cmd(
             }
             if !accept {
                 let removed_trusted = trusted.lock().await.remove(&arr);
+                // DIR-P2-04a: same rationale as `CmdOp::Revoke` — per the
+                // comment above, this rejection IS a revoke, so purge the
+                // peer's discovery-cache entry too.
+                disc_cache.lock().await.remove(&arr);
                 if let Some(dir) = keystore_dir {
                     if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
                         // VULN-001 fix: roll back the in-memory removal
@@ -1847,12 +1880,12 @@ async fn handle_driver_cmd(
             // legal — `upsert` just refreshes the existing slot.
             {
                 let g = trusted.lock().await;
-                if !g.contains_key(&peer_id) && g.len() >= MAX_TRUSTED_PEERS {
+                if !g.contains_key(&peer_id) && g.len() >= MAX_PERSISTED_PEERS {
                     return reply_err(
                         reply,
                         req_id,
                         &format!(
-                            "trust store full ({MAX_TRUSTED_PEERS} peers); revoke an existing peer first"
+                            "trust store full ({MAX_PERSISTED_PEERS} peers); revoke an existing peer first"
                         ),
                     );
                 }
@@ -1926,7 +1959,9 @@ async fn handle_driver_cmd(
             // off the initiator immediately (it tries each in order, LAN
             // before tailnet). If none, the trust has been recorded and
             // discovery (or a later pair-accept --addr) can drive it.
-            if !parsed.addrs.is_empty() {
+            if parsed.addrs.is_empty() {
+                tracing::warn!("pair uri carried no usable addr; deferring to discovery");
+            } else {
                 start_initiator(
                     identity.clone(),
                     static_pub,
@@ -1941,8 +1976,6 @@ async fn handle_driver_cmd(
                     Some(pending_pairs.clone()),
                 )
                 .await;
-            } else {
-                tracing::warn!("pair uri carried no usable addr; deferring to discovery");
             }
             CmdResponse::ok(req_id, None)
         }
@@ -1967,12 +2000,12 @@ async fn handle_driver_cmd(
             // H3: trust-store cap. Same rationale as PairFromUri.
             {
                 let g = trusted.lock().await;
-                if !g.contains_key(&peer_id) && g.len() >= MAX_TRUSTED_PEERS {
+                if !g.contains_key(&peer_id) && g.len() >= MAX_PERSISTED_PEERS {
                     return reply_err(
                         reply,
                         req_id,
                         &format!(
-                            "trust store full ({MAX_TRUSTED_PEERS} peers); revoke an existing peer first"
+                            "trust store full ({MAX_PERSISTED_PEERS} peers); revoke an existing peer first"
                         ),
                     );
                 }
@@ -2096,12 +2129,12 @@ async fn handle_driver_cmd(
             // H3: trust-store cap.
             {
                 let g = trusted.lock().await;
-                if !g.contains_key(&peer_id) && g.len() >= MAX_TRUSTED_PEERS {
+                if !g.contains_key(&peer_id) && g.len() >= MAX_PERSISTED_PEERS {
                     return reply_err(
                         reply,
                         req_id,
                         &format!(
-                            "trust store full ({MAX_TRUSTED_PEERS} peers); revoke an existing peer first"
+                            "trust store full ({MAX_PERSISTED_PEERS} peers); revoke an existing peer first"
                         ),
                     );
                 }
@@ -2217,6 +2250,7 @@ async fn transport_recv_loop(
     pending_pairs: PendingSet,
     mesh_seen: MeshSeen,
     peer_meta: PeerMetaMap,
+    disc_cache: DiscoveryCache,
     lan_only_handshakes: bool,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
@@ -2457,7 +2491,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &peer_meta, keystore_dir.as_ref()).await,
+                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &peer_meta, keystore_dir.as_ref()).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -2546,6 +2580,7 @@ async fn run_vault_persister(
     mut ctx: VaultCtx,
     mut rx: watch::Receiver<State>,
     initial_wipe_gen: u64,
+    disc_cache: DiscoveryCache,
 ) {
     // Baseline is seeded from the CONSTRUCTION snapshot, not a late
     // `rx.borrow()`: a security wipe that lands between `subscribe()` and the
@@ -2568,6 +2603,12 @@ async fn run_vault_persister(
         // the user's own, on the user's own device).
         if wipe_gen != last_wipe_gen {
             ctx.entries.clear();
+            // DIR-P2-04a: a security wipe means this peer relationship is no
+            // longer trusted; the mDNS discovery cache still holds its
+            // pubkey, name, addrs, and pairing PIN from before the wipe.
+            // Purge it too — eagerly, since an in-memory clear cannot fail,
+            // rather than gating it on the disk clear below.
+            disc_cache.lock().await.clear();
             let dir = ctx.dir.clone();
             match tokio::task::spawn_blocking(move || history_store::clear(&dir)).await {
                 // Only advance past this generation once the file is actually
@@ -3058,18 +3099,18 @@ fn load_trusted_peers(dir: &Path) -> Vec<([u8; 32], TrustedPeer)> {
         ));
     }
     // H3: enforce the cap at load too. If a malicious or pre-fix
-    // peers.json has more than `MAX_TRUSTED_PEERS` entries, keep the
+    // peers.json has more than `MAX_PERSISTED_PEERS` entries, keep the
     // first N (load order = file order = insertion order under the
     // disk lock). This is conservative: it never silently *replaces*
     // a peer the user might still recognize, but it stops boot-time
     // memory blow-up.
-    if out.len() > MAX_TRUSTED_PEERS {
+    if out.len() > MAX_PERSISTED_PEERS {
         tracing::warn!(
             total = out.len(),
-            cap = MAX_TRUSTED_PEERS,
+            cap = MAX_PERSISTED_PEERS,
             "peers.json exceeds cap; truncating tail. Revoke unwanted entries via `fluxctl revoke <peer-id>`."
         );
-        out.truncate(MAX_TRUSTED_PEERS);
+        out.truncate(MAX_PERSISTED_PEERS);
     }
     out
 }
@@ -3128,14 +3169,6 @@ pub(crate) async fn save_peers_with_retry(
 /// out a transient ENOSPC / EBUSY / fs-quota hiccup without making the
 /// IPC reply hang forever on a broken disk.
 const PEERS_PERSIST_ATTEMPTS: u32 = 3;
-
-/// H3: hard cap on the trusted-peer set. A personal/family fluxsync
-/// rarely exceeds 4–6 devices; 64 leaves generous headroom while
-/// preventing an attacker (or a buggy script) from filling `peers.json`
-/// with garbage entries that survive across reboots. Re-pairing an
-/// existing peer is unaffected — the check is "new peer would exceed
-/// cap", not "any insert exceeds cap".
-pub const MAX_TRUSTED_PEERS: usize = 64;
 
 /// M-DAEMON-11: bounded capacity for the daemon's central `Event` channel.
 /// One mono-task consumer drains it; 1024 is orders of magnitude above any
@@ -3354,6 +3387,7 @@ fn reassembly_key(source: [u8; 32], item_id: [u8; 32]) -> [u8; 32] {
     fluxsync_core::DedupRing::hash(&buf).into_bytes()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn complete_reassembled_item(
     transport: &Arc<Transport>,
     inflight: &InflightMap,
@@ -3399,6 +3433,7 @@ async fn dispatch_inbound_frame(
     inflight: &InflightMap,
     pending_pairs: &PendingSet,
     trusted: &TrustedSet,
+    disc_cache: &DiscoveryCache,
     peer_meta: &PeerMetaMap,
     keystore_dir: Option<&std::path::PathBuf>,
 ) {
@@ -3683,6 +3718,10 @@ async fn dispatch_inbound_frame(
             // authenticated (peer_id is whose session decrypted it) — only its
             // own entry is removed, never the rest.
             let removed = trusted.lock().await.remove(&peer_id);
+            // DIR-P2-04a: the peer that just revoked us may still have a
+            // stale entry in our mDNS discovery cache (pubkey, name, addrs,
+            // pairing PIN) — drop it so a cache hit can't resurrect it.
+            disc_cache.lock().await.remove(&peer_id);
             if removed.is_some() {
                 if let Some(dir) = keystore_dir {
                     if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
@@ -4567,20 +4606,20 @@ mod tests {
     /// end-to-end (the only line the integration test couldn't reach).
     #[tokio::test]
     async fn c2_persister_clears_disk_vault_and_favorites_on_wipe_gen_bump() {
-        use super::{run_vault_persister, VaultCtx};
+        use super::{run_vault_persister, DiscoveryCache, ResolvedPeer, VaultCtx};
         use crate::history_store;
         use fluxsync_core::{Config, HistoryItem, HistorySource, Kind, State};
-        use std::time::Duration;
-        use tokio::sync::watch;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        use tokio::sync::{watch, Mutex};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let key = zeroize::Zeroizing::new([0x11u8; 32]);
         let now = 1_000_000u64;
         let ttl = history_store::DEFAULT_TTL_SECS;
         let disk_len = |d: &std::path::Path| {
-            history_store::load(d, &key, now, ttl)
-                .map(|v| v.len())
-                .unwrap_or(0)
+            history_store::load(d, &key, now, ttl).map_or(0, |v| v.len())
         };
 
         let secret = HistoryItem {
@@ -4605,9 +4644,24 @@ mod tests {
             entries: Vec::new(),
         };
 
+        // DIR-P2-04a: pre-seed the discovery cache (as a real mDNS resolve
+        // would) so this test also proves the security-wipe path purges it,
+        // not just the on-disk vault + cached favorites.
+        let disc_cache: DiscoveryCache = Arc::new(Mutex::new(HashMap::new()));
+        disc_cache.lock().await.insert(
+            [0x77u8; 32],
+            ResolvedPeer {
+                static_pub: [0x88u8; 32],
+                addr: "127.0.0.1:1".parse().unwrap(),
+                name: "stale-peer".into(),
+                pair_pin: Some("123456".into()),
+                last_seen: Instant::now(),
+            },
+        );
+
         // Channel init: empty, gen=0. Persister records last_wipe_gen=0.
         let (tx, rx) = watch::channel(State::initial(&Config::default()));
-        let persister = tokio::spawn(run_vault_persister(ctx, rx, 0));
+        let persister = tokio::spawn(run_vault_persister(ctx, rx, 0, disc_cache.clone()));
 
         // Baseline: publish the favorited secret (gen still 0) → persister saves
         // it to disk and caches it as a favorite in ctx.entries.
@@ -4670,6 +4724,11 @@ mod tests {
             "security wipe must drop the cached favorite: on-disk vault should hold only \
              the fresh post-swap item, never the previously-favorited secret. Got: {:?}",
             disk_previews(dir.path()),
+        );
+        assert!(
+            disc_cache.lock().await.is_empty(),
+            "security wipe must purge the mDNS discovery cache (DIR-P2-04a): a stale \
+             pubkey/name/addrs/pairing PIN must not survive the wipe"
         );
 
         drop(tx);
@@ -4739,6 +4798,7 @@ mod tests {
             &inflight,
             &pending_pairs,
             &Arc::new(Mutex::new(HashMap::new())),
+            &Arc::new(Mutex::new(HashMap::new())),
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
         )
@@ -4755,13 +4815,14 @@ mod tests {
     /// and emit `Event::PeerLost`.
     #[tokio::test]
     async fn revoke_frame_removes_trust_and_emits_peer_lost() {
-        use super::{dispatch_inbound_frame, Event, Reassembly};
+        use super::{dispatch_inbound_frame, DiscoveryCache, Event, Reassembly, ResolvedPeer};
         use crate::handshake::tofu_trusted_peer;
         use crate::metrics::MetricsTracker;
         use crate::transport::Transport;
         use fluxsync_proto::{Frame, Msg, PROTOCOL_VERSION};
         use std::collections::HashMap;
         use std::sync::Arc;
+        use std::time::Instant;
         use tokio::sync::{mpsc, Mutex};
 
         let (transport, _port) = Transport::bind("127.0.0.1", 0)
@@ -4782,6 +4843,20 @@ mod tests {
             .lock()
             .await
             .insert(peer_id, tofu_trusted_peer(peer_id));
+        // DIR-P2-04a: pre-seed a stale discovery-cache entry for this peer
+        // (as a real mDNS resolve would) so the test can prove Msg::Revoke
+        // purges it, not just the trust store.
+        let disc_cache: DiscoveryCache = Arc::new(Mutex::new(HashMap::new()));
+        disc_cache.lock().await.insert(
+            peer_id,
+            ResolvedPeer {
+                static_pub: [0x42u8; 32],
+                addr: "127.0.0.1:1".parse().unwrap(),
+                name: "stale-peer".into(),
+                pair_pin: Some("123456".into()),
+                last_seen: Instant::now(),
+            },
+        );
 
         dispatch_inbound_frame(
             Frame {
@@ -4797,6 +4872,7 @@ mod tests {
             &inflight,
             &pending_pairs,
             &trusted,
+            &disc_cache,
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
         )
@@ -4805,6 +4881,10 @@ mod tests {
         assert!(
             !trusted.lock().await.contains_key(&peer_id),
             "Msg::Revoke must remove the sender from the trust store"
+        );
+        assert!(
+            !disc_cache.lock().await.contains_key(&peer_id),
+            "Msg::Revoke must purge the sender's mDNS discovery-cache entry (DIR-P2-04a)"
         );
         assert!(
             matches!(event_rx.try_recv(), Ok(Event::PeerLost)),

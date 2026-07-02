@@ -131,9 +131,9 @@ async fn ipc_line_is_length_capped_no_oom() {
                 write_broke = true;
                 break;
             }
-            Err(_) => panic!(
-                "CAP: write blocked >5s after {sent_mib} MiB — daemon kept draining \
-                 a newline-less line (cap not enforced?)"
+            Err(elapsed) => panic!(
+                "CAP: write blocked >5s after {sent_mib} MiB ({elapsed}) — daemon kept \
+                 draining a newline-less line (cap not enforced?)"
             ),
         }
     }
@@ -144,13 +144,13 @@ async fn ipc_line_is_length_capped_no_oom() {
     let mut tail = String::new();
     let closed = match tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut tail)).await
     {
-        Ok(Ok(0)) => true,   // clean EOF: connection closed
-        Ok(Ok(_)) => false,  // daemon replied to an over-cap line?! -> not capped
-        Ok(Err(_)) => true,  // connection reset == torn down
-        Err(_) => false,     // timed out still buffering -> unbounded (bug)
+        Ok(Ok(0) | Err(_)) => true, // clean EOF, or connection reset == torn down
+        Ok(Ok(_)) | Err(_) => false, // over-cap reply, or timed out buffering -> unbounded (bug)
     };
 
     let after = rss_kb(pid);
+    // RSS KiB values never approach 2^52; no precision loss in practice.
+    #[allow(clippy::cast_precision_loss)]
     let growth_mib = (after.saturating_sub(base)) as f64 / 1024.0;
     eprintln!(
         "C5 REGRESSION: over-cap line ({sent_mib} MiB written, cap = 64 MiB) \

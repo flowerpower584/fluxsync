@@ -11,6 +11,7 @@
 //! `tokio::net::UnixStream`).
 
 #![cfg(unix)]
+#![allow(clippy::similar_names)] // sess_a_b/sess_b_a/sess_b_c/sess_c_b name link-specific session pairs
 
 use fluxsync_core::{FirewallPolicy, Rule};
 use fluxsync_crypto::{test_util::pair_for_test, Identity};
@@ -18,6 +19,7 @@ use fluxsyncd::{
     cmd::{CmdData, CmdOp, CmdRequest},
     run, DaemonConfig, TestPair,
 };
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -499,7 +501,10 @@ async fn revoke_secondary_drops_only_that_peer() {
     assert!(up, "B did not reach A-primary / 2-peer steady state");
 
     // B revokes ONLY its secondary C.
-    let pid_c_hex: String = pid_c.iter().map(|b| format!("{b:02x}")).collect();
+    let pid_c_hex: String = pid_c.iter().fold(String::new(), |mut out, b| {
+        write!(out, "{b:02x}").unwrap();
+        out
+    });
     let revoke = ipc_send_recv(
         &ipc_b,
         CmdRequest {

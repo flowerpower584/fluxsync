@@ -85,11 +85,28 @@ pub type PendingSet = Arc<Mutex<HashMap<[u8; 32], PendingPair>>>;
 /// DoS target.
 pub const MAX_PENDING_PAIRS: usize = 64;
 
-/// FS-058: hard cap on `TrustedSet`. The trusted map is persisted to
-/// `peers.json`, so without a cap an attacker who spams TOFU during an
-/// open pairing window can grow the on-disk file without bound (V1).
-/// 256 is far above any plausible legitimate device count.
-pub const MAX_TRUSTED_PEERS: usize = 256;
+/// FS-058: hard cap on `TrustedSet` growth via TOFU auto-trust. Without a
+/// cap an attacker who spams TOFU during an open pairing window could grow
+/// the on-disk `peers.json` without bound (V1). 256 is far above any
+/// plausible legitimate device count.
+///
+/// DIR-P1-08: deliberately different from [`MAX_PERSISTED_PEERS`] (64),
+/// which caps explicit pair commands (`pair from-uri` / `pair accept` /
+/// `pair from-pin`) and the `peers.json` load path. Two same-named
+/// constants with different values used to live in `handshake.rs` and
+/// `driver.rs` — a naming footgun. Keep the two distinct; do not unify.
+pub const MAX_TOFU_TRUSTED_PEERS: usize = 256;
+
+/// H3: hard cap on the trusted-peer set enforced by explicit pair commands
+/// (`pair from-uri` / `pair accept` / `pair from-pin`) and by the
+/// `peers.json` load path (`driver::load_trusted_peers`). A
+/// personal/family fluxsync rarely exceeds 4-6 devices; 64 leaves generous
+/// headroom. Re-pairing an existing peer is unaffected — the check is "new
+/// peer would exceed cap", not "any insert exceeds cap".
+///
+/// DIR-P1-08: deliberately different from [`MAX_TOFU_TRUSTED_PEERS`] (256),
+/// which gates unconfirmed TOFU auto-trust inserts. Keep the two distinct.
+pub const MAX_PERSISTED_PEERS: usize = 64;
 
 /// Run the initiator side. Sends msg1, then awaits one msg2 on the
 /// `incoming` channel. Times out after 5 s.
@@ -229,9 +246,9 @@ pub async fn run_responder(
             // a past pairing window could keep adding entries that survive
             // restart via `peers.json`. The user still has a clear path
             // forward — they unpair the offending peer or wipe the file.
-            if trusted_guard.len() >= MAX_TRUSTED_PEERS {
+            if trusted_guard.len() >= MAX_TOFU_TRUSTED_PEERS {
                 anyhow::bail!(
-                    "TOFU refused: trusted set at cap ({MAX_TRUSTED_PEERS}); unpair an unused peer first"
+                    "TOFU refused: trusted set at cap ({MAX_TOFU_TRUSTED_PEERS}); unpair an unused peer first"
                 );
             }
             let new_peer = tofu_trusted_peer(remote_static);

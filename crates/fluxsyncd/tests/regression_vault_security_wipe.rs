@@ -113,10 +113,13 @@ fn disk_history(dir: &std::path::Path, id: &Identity) -> Vec<HistoryItem> {
 
 fn fluxsyncd_now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .expect("current time in ms exceeds u64 range")
 }
 
 const SECRET: &str = "MyBankNote-Vault-KEEPME-7777"; // non-pattern, NOT classified sensitive
@@ -243,6 +246,7 @@ fn security_wipe_clears_history_and_bumps_vault_wipe_gen() {
 // daemon restarts and the legitimate device reconnects.
 // ───────────────────────────────────────────────────────────────────────────
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::similar_names)] // port_a1/port_b1/port_a2/port_b2 name two daemons across two runs
 async fn favorited_secret_does_not_survive_security_wipe_on_disk() {
     let _ = tracing_subscriber::fmt::try_init();
     install_panic_hook();
@@ -285,8 +289,7 @@ async fn favorited_secret_does_not_survive_security_wipe_on_disk() {
         ipc_a1.exists()
             && status(&ipc_a1)
                 .await
-                .map(|s| s.peer_name == "device-b")
-                .unwrap_or(false)
+                .is_some_and(|s| s.peer_name == "device-b")
     })
     .await;
     assert!(linked, "daemon A1 never reached Linked");
@@ -301,8 +304,7 @@ async fn favorited_secret_does_not_survive_security_wipe_on_disk() {
     let got = wait_until(Duration::from_secs(3), || async {
         status(&ipc_a1)
             .await
-            .map(|s| s.history.iter().any(|h| h.preview == SECRET))
-            .unwrap_or(false)
+            .is_some_and(|s| s.history.iter().any(|h| h.preview == SECRET))
     })
     .await;
     assert!(got, "pushed secret never appeared in history");
@@ -394,8 +396,7 @@ async fn favorited_secret_does_not_survive_security_wipe_on_disk() {
         ipc_a2.exists()
             && status(&ipc_a2)
                 .await
-                .map(|s| s.peer_name == "device-b")
-                .unwrap_or(false)
+                .is_some_and(|s| s.peer_name == "device-b")
     })
     .await;
     assert!(relinked, "daemon A2 never reached Linked on restart");

@@ -80,7 +80,7 @@ where
 async fn has_history_item(ipc: &PathBuf, deadline: Duration) -> bool {
     wait_until(deadline, || async {
         let resp = ipc_send_recv(ipc, CmdRequest { id: 7, op: fluxsyncd::cmd::CmdOp::Status }).await;
-        matches!(resp.data, Some(CmdData::State(s)) if s.history.first().is_some())
+        matches!(resp.data, Some(CmdData::State(s)) if !s.history.is_empty())
     })
     .await
 }
