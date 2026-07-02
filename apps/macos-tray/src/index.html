@@ -146,27 +146,30 @@
       <span class="pair-cta-sub">QR code or 6-digit code · local network only</span>
     </section>
 
-    <!-- History -->
-    <section class="history-section">
-      <div class="section-header">
-        <span class="label">Recent clipboard</span>
-        <span class="count" id="recent-count">0 ITEMS</span>
-      </div>
-      <div class="history-list" id="recent">
-        <!-- History items injected here -->
-      </div>
-    </section>
+    <!-- Scrollable lower area: history + firewall stack and scroll as one -->
+    <div class="tray-scroll" id="tray-scroll">
+      <!-- History -->
+      <section class="history-section">
+        <div class="section-header">
+          <span class="label">Recent clipboard</span>
+          <span class="count" id="recent-count">0 ITEMS</span>
+        </div>
+        <div class="history-list" id="recent">
+          <!-- History items injected here -->
+        </div>
+      </section>
 
-    <!-- Firewall: master switch + per-kind rules + Ask pending queue -->
-    <section class="firewall-section" id="firewall-section" style="display:none">
-      <div class="section-header">
-        <span class="label">Firewall</span>
-        <span class="count">policies &amp; decisions</span>
-      </div>
-      <div class="firewall-body" id="firewall-body">
-        <!-- Firewall UI injected here -->
-      </div>
-    </section>
+      <!-- Firewall: master switch + per-kind rules + Ask pending queue -->
+      <section class="firewall-section" id="firewall-section" style="display:none">
+        <div class="section-header">
+          <span class="label">Firewall</span>
+          <span class="count">policies &amp; decisions</span>
+        </div>
+        <div class="firewall-body" id="firewall-body">
+          <!-- Firewall UI injected here -->
+        </div>
+      </section>
+    </div>
 
     <!-- Footer -->
     <footer class="tray-footer">

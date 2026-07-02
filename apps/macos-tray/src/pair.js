@@ -111,6 +111,21 @@ async function watchForPair() {
   unlistenPair = await listen('pairing-success', async (event) => {
     const name = event.payload || 'peer';
     if (name && name !== 'pending' && name === initialPeerName) return;
+    // A reconnect / link flap re-fires this event while the QR is on screen
+    // (a peer on both Wi-Fi and cellular makes peer_name bounce empty→name).
+    // Only a REAL fresh pair leaves a pending SAS entry to verify — confirm
+    // one exists before abandoning the QR. If none surfaces, it's a flap:
+    // do nothing, keep the listener armed, and stay on the current screen so
+    // the QR the user came to show is never swallowed by a false "paired".
+    let hasPending = false;
+    for (let i = 0; i < 5; i++) {
+      try {
+        const list = await invoke('fluxsync_pair_pending');
+        if (Array.isArray(list) && list.length > 0) { hasPending = true; break; }
+      } catch (_) {}
+      await new Promise(r => setTimeout(r, 150));
+    }
+    if (!hasPending) return;
     if (unlistenPair) { unlistenPair(); unlistenPair = null; }
     const displayName = name === 'pending' ? 'your device' : name;
     // Both QR ('show') and PIN ('enter') must clear the SAS gate: the
@@ -348,10 +363,18 @@ async function enterVerifyScreen(peerDisplayName) {
     try {
       const st = await invoke('fluxsync_status');
       const peerName = (st && st.data && st.data.peer_name) || '';
-      if (peerName && peerName !== 'pending') {
+      const phase = (st && st.data && st.data.phase) || '';
+      // A real reconnect of an already-confirmed peer is LINKED with no
+      // pending SAS — that alone is "paired". But a non-pending event while
+      // merely discovering is a SPURIOUS 'pairing-success' from a half-open
+      // / stale link: it must NOT fake success and swallow the QR the user
+      // came to show. Stay on the QR (or entry) so pairing can actually run.
+      if (phase === 'linked' && peerName && peerName !== 'pending') {
         showPaired(peerName);
         return;
       }
+      showScreen(pairMethod === 'qr' ? 'show' : 'entry');
+      return;
     } catch (_) {}
   }
   const fp = $('verify-fp');

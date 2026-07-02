@@ -80,9 +80,14 @@ pub fn ensure_daemon_running() {
             return;
         }
     }
-    // Daemon usually creates the socket within ~200ms. Cap the wait at
-    // 3s so a wedged daemon doesn't freeze the menu-bar icon forever.
-    let boot_budget = Duration::from_secs(3);
+    // Daemon usually creates the socket within ~200ms, but a cold start
+    // (history decrypt + mDNS bring-up, or a debug build) can take a few
+    // seconds. Cap the wait at 8s so a wedged daemon doesn't freeze the
+    // menu-bar icon forever, while still covering a slow first boot — this
+    // wait returns before the state-stream loop starts, so a too-tight
+    // budget leaves the loop connecting to a not-yet-existent socket and
+    // flashes "state stream error" at the user.
+    let boot_budget = Duration::from_secs(8);
     let started = Instant::now();
     while started.elapsed() < boot_budget {
         if is_daemon_alive() {

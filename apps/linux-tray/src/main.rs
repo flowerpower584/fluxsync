@@ -55,10 +55,36 @@ struct Snapshot {
     online: bool,
     on: bool,
     status: String,
+    phase: String,
     peer: Option<String>,
     platform: Option<String>,
+    peer_battery: u8,
+    peer_charging: bool,
+    battery: u8,
+    charging: bool,
     history: usize,
     version: String,
+}
+
+impl Snapshot {
+    /// The peer link is genuinely up (not merely "name remembered for a
+    /// reconnect"). Battery / "linked" must gate on this, never on peer-name
+    /// presence — the daemon keeps the name across a drop for reconnect UX.
+    fn connected(&self) -> bool {
+        matches!(self.phase.as_str(), "linked" | "paused" | "halted")
+    }
+}
+
+/// Renders a battery reading: "—" for the 255 sentinel (not read / no
+/// battery), else "63%" with a ⚡ when on external power.
+fn fmt_batt(level: u8, charging: bool) -> String {
+    if level > 100 {
+        "—".to_string()
+    } else if charging {
+        format!("{level}% ⚡")
+    } else {
+        format!("{level}%")
+    }
 }
 
 fn query() -> Snapshot {
@@ -69,6 +95,7 @@ fn query() -> Snapshot {
                 online: true,
                 on: d["on"].as_bool().unwrap_or(false),
                 status: d["status"].as_str().unwrap_or("").to_string(),
+                phase: d["phase"].as_str().unwrap_or("").to_string(),
                 peer: d["peer_name"]
                     .as_str()
                     .filter(|s| !s.is_empty())
@@ -77,6 +104,10 @@ fn query() -> Snapshot {
                     .as_str()
                     .filter(|s| !s.is_empty())
                     .map(str::to_string),
+                peer_battery: d["peer_battery"].as_u64().unwrap_or(255) as u8,
+                peer_charging: d["peer_charging"].as_bool().unwrap_or(false),
+                battery: d["battery_level"].as_u64().unwrap_or(255) as u8,
+                charging: d["charging"].as_bool().unwrap_or(false),
                 history: d["history"].as_array().map_or(0, Vec::len),
                 version: d["version"].as_str().unwrap_or("").to_string(),
             }
@@ -110,11 +141,24 @@ impl Tray for FluxTray {
     fn tool_tip(&self) -> ToolTip {
         let description = if !self.snap.online {
             "Daemon unreachable".into()
-        } else if let Some(p) = &self.snap.peer {
-            let p = with_platform(p, self.snap.platform.as_deref());
-            format!("{} · {} · {} items", self.snap.status, p, self.snap.history)
+        } else if self.snap.connected() {
+            match &self.snap.peer {
+                Some(p) => format!(
+                    "Linked · {} {} · {} items",
+                    with_platform(p, self.snap.platform.as_deref()),
+                    fmt_batt(self.snap.peer_battery, self.snap.peer_charging),
+                    self.snap.history,
+                ),
+                None => format!("Linked · {} items", self.snap.history),
+            }
         } else if self.snap.on {
-            "Discovering — no peer".into()
+            match &self.snap.peer {
+                Some(p) => format!(
+                    "Reconnecting — {}",
+                    with_platform(p, self.snap.platform.as_deref())
+                ),
+                None => "Searching — no peer".into(),
+            }
         } else {
             "Paused".into()
         };
@@ -129,10 +173,23 @@ impl Tray for FluxTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let statusline = if !self.snap.online {
             "● daemon unreachable".to_string()
-        } else if let Some(p) = &self.snap.peer {
-            format!("● linked — {}", with_platform(p, self.snap.platform.as_deref()))
+        } else if self.snap.connected() {
+            match &self.snap.peer {
+                Some(p) => format!(
+                    "● linked — {} · {}",
+                    with_platform(p, self.snap.platform.as_deref()),
+                    fmt_batt(self.snap.peer_battery, self.snap.peer_charging),
+                ),
+                None => "● linked".to_string(),
+            }
         } else if self.snap.on {
-            "○ discovering".to_string()
+            match &self.snap.peer {
+                Some(p) => format!(
+                    "○ reconnecting — {}",
+                    with_platform(p, self.snap.platform.as_deref())
+                ),
+                None => "○ searching".to_string(),
+            }
         } else {
             "○ paused".to_string()
         };
@@ -183,7 +240,10 @@ fn main() {
     service.spawn();
 
     loop {
-        std::thread::sleep(Duration::from_secs(3));
+        // 1s poll: a local status IPC is cheap, and a tray that lags the
+        // real state by up to 3s reads as broken when a peer plugs in or
+        // drops. Pairs with the daemon's ~9s disconnect detection.
+        std::thread::sleep(Duration::from_secs(1));
         let snap = query();
         handle.update(move |t: &mut FluxTray| t.snap = snap.clone());
     }

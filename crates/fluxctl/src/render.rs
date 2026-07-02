@@ -21,6 +21,10 @@ pub fn render_status(v: &Value) {
     };
     let on = data.get("on").and_then(Value::as_bool).unwrap_or(false);
     let status = data.get("status").and_then(Value::as_str).unwrap_or("?");
+    // Real link state for gating the peer readout (a dropped peer keeps its
+    // name for reconnect UX, but its battery must not read as live).
+    let phase = data.get("phase").and_then(Value::as_str).unwrap_or("");
+    let peer_connected = matches!(phase, "linked" | "paused" | "halted");
     let cipher = data.get("cipher").and_then(Value::as_str).unwrap_or("?");
     let version = data.get("version").and_then(Value::as_str).unwrap_or("?");
     let battery = data
@@ -94,7 +98,10 @@ pub fn render_status(v: &Value) {
     } else {
         " ".to_string()
     };
-    let battery_color = if charging || battery > threshold {
+    // 255 (or any >100) = not read yet / no battery (desktop) → "—".
+    let battery_color = if battery > 100 {
+        "—".bright_black().to_string()
+    } else if charging || battery > threshold {
         format!("{battery}%").green().to_string()
     } else {
         format!("{battery}%").red().bold().to_string()
@@ -118,18 +125,28 @@ pub fn render_status(v: &Value) {
 
     let peer_line = if peer_name.is_empty() {
         "— (no peer)".bright_black().to_string()
+    } else if !peer_connected {
+        // Name retained for reconnect, but the link is down.
+        format!(
+            "{} {}",
+            peer_name.cyan().bold(),
+            "(reconnecting)".bright_black()
+        )
+    } else if peer_batt > 100 {
+        // Connected but no reading yet (or a battery-less peer).
+        format!("{} {}", peer_name.cyan().bold(), "—".bright_black())
     } else {
         let bolt = if peer_charging {
             "⚡".yellow().to_string()
         } else {
             String::new()
         };
-        format!(
-            "{} {}{}",
-            peer_name.cyan().bold(),
-            format!("{peer_batt}%").green(),
-            bolt
-        )
+        let batt_str = if peer_charging || peer_batt > threshold {
+            format!("{peer_batt}%").green().to_string()
+        } else {
+            format!("{peer_batt}%").red().bold().to_string()
+        };
+        format!("{} {}{}", peer_name.cyan().bold(), batt_str, bolt)
     };
     println!("  {}      {peer_line}", "peer".dimmed());
 
@@ -141,7 +158,7 @@ pub fn render_status(v: &Value) {
             for p in peers {
                 let name = p.get("name").and_then(Value::as_str).unwrap_or("");
                 let plat = p.get("platform").and_then(Value::as_str).unwrap_or("");
-                let batt = p.get("battery").and_then(Value::as_u64).unwrap_or(100);
+                let batt = p.get("battery").and_then(Value::as_u64).unwrap_or(255);
                 let charging = p.get("charging").and_then(Value::as_bool).unwrap_or(false);
                 let primary = p.get("primary").and_then(Value::as_bool).unwrap_or(false);
                 let bolt = if charging {
@@ -160,11 +177,16 @@ pub fn render_status(v: &Value) {
                 } else {
                     format!(" [{plat}]")
                 };
+                let batt_s = if batt > 100 {
+                    "—".bright_black().to_string()
+                } else {
+                    format!("{batt}%").green().to_string()
+                };
                 println!(
                     "    {star} {}{}  {}{}",
                     label.cyan(),
                     plat_s.dimmed(),
-                    format!("{batt}%").green(),
+                    batt_s,
                     bolt
                 );
             }
@@ -318,6 +340,15 @@ pub fn render_pair_show(v: &Value) -> Result<()> {
         words.join("  ").yellow().bold()
     );
     println!("  {}        {}", "uri".dimmed(), uri.bright_black());
+    let tailnet = data
+        .get("tailnet_addr_hint")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !tailnet.is_empty() {
+        // The uri above already carries this (a=lan,tailnet); shown so the
+        // user knows the QR also works across their tailnet.
+        println!("  {}    {}", "tailnet".dimmed(), tailnet.green());
+    }
     println!("{}", "─".repeat(40).dimmed());
     println!(
         "  Render the QR with: {}",

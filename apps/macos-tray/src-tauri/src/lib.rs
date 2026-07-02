@@ -333,7 +333,7 @@ pub fn run() {
 
             // Make the tray app self-sufficient: probe the daemon's
             // UNIX socket and, if missing, spawn `fluxsyncd` detached
-            // before the rest of `setup()` runs. Synchronous (≤ 3s) so
+            // before the rest of `setup()` runs. Synchronous (≤ 8s) so
             // the first popup the user opens already sees a live
             // daemon. Failures are logged but never fatal — the tray
             // still boots and the popup can surface "daemon offline".

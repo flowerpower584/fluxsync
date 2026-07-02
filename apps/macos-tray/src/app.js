@@ -49,7 +49,7 @@ function applyState(s) {
   // auto-spawn the separate pair window (that left two windows at launch).
   document.getElementById('tray-container').style.display = 'flex';
   document.getElementById('dashboard-body').style.display = isPaired ? 'flex' : 'none';
-  document.querySelector('.history-section').style.display = isPaired ? 'block' : 'none';
+  document.querySelector('.history-section').style.display = isPaired ? 'flex' : 'none';
   const fwSection = document.getElementById('firewall-section');
   if (fwSection) fwSection.style.display = isPaired ? 'block' : 'none';
   document.getElementById('pairing-entry').style.display = isPaired ? 'none' : 'flex';
@@ -109,15 +109,43 @@ function renderHero(s) {
     return;
   }
   const on = !!s.on;
-  const below = (s.battery_level ?? 0) <= (s.battery_threshold ?? 20);
-  const critical = (s.battery_level ?? 0) <= 5;
-  const charging = !!s.charging;
-  const paused = on && below && !charging;
-
   if (!on) return setHero('off', 'INACTIVE');
+
+  // 255 = battery not read yet (desktop / boot) → not "low"; only a real
+  // 0-100 reading can trip the low/critical hero states.
+  const known = (s.battery_level ?? 255) <= 100;
+  const below = known && s.battery_level <= (s.battery_threshold ?? 20);
+  const critical = known && s.battery_level <= 5;
+  const charging = !!s.charging;
+
   if (critical) return setHero('crit', 'CRITICAL');
-  if (paused) return setHero('warn', 'PAUSED · LOW BATTERY');
-  return setHero('ok', 'SYNCHRONIZING');
+  if (below && !charging) return setHero('warn', 'PAUSED · LOW BATTERY');
+
+  // Connection truth comes from the FSM phase, never the on-toggle: with
+  // sync enabled but no live peer the hero must NOT claim "SYNCHRONIZING".
+  switch (s.phase) {
+    case 'linked':      return setHero('ok', 'SYNCHRONIZING');
+    case 'paused':
+    case 'halted':      return setHero('warn', 'PAUSED');
+    case 'handshaking': return setHero('warn', 'CONNECTING');
+    case 'discovering':
+    case 'reconnecting':return setHero('warn', 'SEARCHING');
+    default:            return setHero('off', 'STANDBY');
+  }
+}
+
+// Maps the daemon's FSM phase to the peer status pill text. Single source of
+// truth so hero, peer pill and mesh rows never disagree about link state.
+function peerStatusText(phase) {
+  switch (phase) {
+    case 'linked':      return 'LINKED';
+    case 'paused':
+    case 'halted':      return 'PAUSED';
+    case 'handshaking': return 'CONNECTING';
+    case 'discovering': return 'SEARCHING';
+    case 'reconnecting':return 'RECONNECTING';
+    default:            return 'STANDBY';
+  }
 }
 
 function renderPeer(s) {
@@ -132,20 +160,35 @@ function renderPeer(s) {
 
   document.getElementById('peer-name-pill').textContent = peerName;
   renderPeerDevice(s ? s.peer_platform : '');
-  document.getElementById('peer-status-text').textContent = on ? 'LINKED' : 'STANDBY';
-  
+  // Status reflects the real link phase, not the on-toggle — so a dropped peer
+  // reads RECONNECTING/SEARCHING, never a stale "LINKED".
+  document.getElementById('peer-status-text').textContent =
+    on ? peerStatusText(s ? s.phase : '') : 'STANDBY';
+
   const bar = document.getElementById('peer-battery-bar');
   const text = document.getElementById('peer-battery-text');
-  
-  const color = peerBat <= 5 ? 'var(--fs-crit)' :
-                peerBat <= threshold ? 'var(--fs-warn)' : 'var(--fs-ok)';
-  
-  bar.style.width = `${Math.min(peerBat, 100)}%`;
-  bar.style.background = color;
-  text.textContent = `${peerBat}%${peerCharging ? '⚡' : ''}`;
-  text.style.color = peerBat <= 5 ? 'var(--fs-crit)' : peerBat <= threshold ? 'var(--fs-warn)' : 'var(--fs-muted)';
 
-  document.getElementById('pause-banner').style.display = (on && peerBat <= threshold && !peerCharging) ? 'flex' : 'none';
+  // Show the % whenever the peer is connected (linked OR battery-paused/halted
+  // — the link is still up, the value is still live) AND a real reading has
+  // arrived. 255 = not read yet → "—". Kills both the fake-100%-on-connect and
+  // the wrong "—" while merely paused.
+  const connected = !!s && (s.phase === 'linked' || s.phase === 'paused' || s.phase === 'halted');
+  const battKnown = peerBat <= 100;
+  if (connected && battKnown) {
+    const color = peerBat <= 5 ? 'var(--fs-crit)' :
+                  peerBat <= threshold ? 'var(--fs-warn)' : 'var(--fs-ok)';
+    bar.style.width = `${Math.min(peerBat, 100)}%`;
+    bar.style.background = color;
+    text.textContent = `${peerBat}%${peerCharging ? '⚡' : ''}`;
+    text.style.color = peerBat <= 5 ? 'var(--fs-crit)' : peerBat <= threshold ? 'var(--fs-warn)' : 'var(--fs-muted)';
+  } else {
+    bar.style.width = '0%';
+    text.textContent = '—';
+    text.style.color = 'var(--fs-muted)';
+  }
+
+  document.getElementById('pause-banner').style.display =
+    (connected && battKnown && peerBat <= threshold && !peerCharging) ? 'flex' : 'none';
 }
 
 // Phone vs computer icon driven by the peer's OS family (s.peer_platform,
@@ -213,7 +256,9 @@ function renderMesh(s) {
     right.style.cssText = 'display:flex;align-items:center;gap:8px;color:var(--fs-muted);';
 
     const batt = document.createElement('span');
-    batt.textContent = `${p.battery ?? 100}%${p.charging ? '⚡' : ''}`;
+    // 255 / null / >100 = no real reading yet → "—", never a fake 100%.
+    const mb = p.battery;
+    batt.textContent = (mb != null && mb <= 100) ? `${mb}%${p.charging ? '⚡' : ''}` : '—';
     right.appendChild(batt);
 
     // Secondaries get a per-peer unpair button (the primary uses the main

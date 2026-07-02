@@ -225,7 +225,9 @@ button:focus-visible { outline: 2px solid var(--fs-ok); outline-offset: 2px; }
 .mesh-unpair:hover { color: var(--fs-crit); border-color: rgba(224,99,94,.4); background: var(--fs-crit-soft); }
 
 /* ── Historique ────────────────────────────────────────────────── */
-.history-section { padding: 0 8px 4px; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.tray-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.history-section { padding: 0 8px 4px; flex: 0 0 auto; display: flex; flex-direction: column; }
+.firewall-section { flex: 0 0 auto; padding: 0 8px 4px; }
 .section-header { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px 7px; }
 .section-header .label { font-size: 12px; font-weight: 700; letter-spacing: -.01em; color: var(--fs-fg); }
 .section-header .count { color: var(--fs-subtle); font-size: 10.5px; font-family: var(--fs-mono); }
