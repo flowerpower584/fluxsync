@@ -7,6 +7,7 @@
 //! pre-paired [`fluxsync_crypto::Session`] via [`config::TestPair`] to
 //! skip the QR/handshake flow.
 
+pub mod backoff;
 pub mod battery;
 pub mod cmd;
 pub mod config;

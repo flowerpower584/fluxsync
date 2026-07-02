@@ -19,6 +19,7 @@
 //! joined, so callers (test harness, `main.rs`) get a deterministic
 //! shutdown deadline.
 
+use crate::backoff::PeerBackoff;
 use crate::cmd::{Channel, CmdData, CmdOp, CmdRequest, CmdResponse, PeerEntry, Subscribe};
 use crate::config::{DaemonConfig, TestPair};
 use crate::discovery::{self, DiscoveryEvent};
@@ -106,6 +107,11 @@ pub struct ResolvedPeer {
 }
 
 pub type DiscoveryCache = Arc<Mutex<HashMap<[u8; 32], ResolvedPeer>>>;
+
+/// DIR-P1-02: per-peer reconnect backoff state, keyed by peer-id. See
+/// [`crate::backoff::PeerBackoff`]. Purged wherever `DiscoveryCache` is
+/// purged (unpair / revoke / vault wipe) — same trust-removal paths.
+pub type BackoffMap = Arc<Mutex<HashMap<[u8; 32], PeerBackoff>>>;
 
 /// PR2: cache TTL. mdns-sd re-resolves periodically so an honest peer
 /// is refreshed well before this; the TTL only fires for peers that
@@ -268,6 +274,10 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // once mDNS is up so the PIN-rotation watchdog can re-publish.
     let pin_advert: PinAdvertisement = Arc::new(Mutex::new(None));
     let disc_cache: DiscoveryCache = Arc::new(Mutex::new(HashMap::new()));
+    // DIR-P1-02: reconnect backoff, one entry per peer-id. Created
+    // alongside `disc_cache` so it can be threaded to the same purge
+    // sites (unpair/revoke/wipe) and the same reconnect call sites.
+    let backoff: BackoffMap = Arc::new(Mutex::new(HashMap::new()));
     let mdns_ctx: MdnsCtx = Arc::new(Mutex::new(None));
 
     // Persist history off the state-watch channel: a dedicated task wakes
@@ -294,6 +304,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
             state_watch_tx.subscribe(),
             initial_wipe_gen,
             disc_cache.clone(),
+            backoff.clone(),
         ));
     }
 
@@ -451,6 +462,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let mesh_seen_for_recv = mesh_seen.clone();
         let peer_meta_for_recv = peer_meta.clone();
         let disc_cache_for_recv = disc_cache.clone();
+        let backoff_for_recv = backoff.clone();
         tasks.spawn(async move {
             transport_recv_loop(
                 transport,
@@ -467,6 +479,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 mesh_seen_for_recv,
                 peer_meta_for_recv,
                 disc_cache_for_recv,
+                backoff_for_recv,
                 lan_only_handshakes,
             )
             .await
@@ -568,10 +581,11 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 let event_tx = event_tx.clone();
                 let shutdown = shutdown.clone();
                 let disc_cache = disc_cache.clone();
+                let backoff = backoff.clone();
                 tasks.spawn(async move {
                     discovery_dispatcher(
                         disc_rx, identity, trusted, transport, pending, event_tx, disc_cache,
-                        shutdown,
+                        backoff, shutdown,
                     )
                     .await
                 });
@@ -734,6 +748,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &pending_pairs,
                             &pin_advert,
                             &disc_cache,
+                            &backoff,
                             &mdns_ctx,
                             &shutdown,
                         ).await;
@@ -1166,6 +1181,7 @@ async fn handle_driver_cmd(
     pending_pairs: &PendingSet,
     pin_advert: &PinAdvertisement,
     disc_cache: &DiscoveryCache,
+    backoff: &BackoffMap,
     mdns_ctx: &MdnsCtx,
     shutdown: &CancellationToken,
 ) {
@@ -1500,6 +1516,10 @@ async fn handle_driver_cmd(
             // rolled back, losing stale discovery data is harmless (mDNS
             // re-announces), never a regression from the pre-unpair state.
             disc_cache.lock().await.clear();
+            // DIR-P1-02: same rationale — a stale backoff timer for a
+            // now-untrusted peer must not survive to throttle a future
+            // re-pair of that same peer-id.
+            backoff.lock().await.clear();
             if let Some(dir) = keystore_dir {
                 if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
                     *trusted.lock().await = snapshot;
@@ -1599,6 +1619,9 @@ async fn handle_driver_cmd(
             // (pubkey, name, addrs, pairing PIN) so a revoked peer isn't
             // still resolvable via a stale cache hit (e.g. PairFromPin).
             disc_cache.lock().await.remove(&arr);
+            // DIR-P1-02: same rationale — drop the revoked peer's backoff
+            // timer too.
+            backoff.lock().await.remove(&arr);
             if let Some(dir) = keystore_dir {
                 if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
                     if let Some(p) = removed_trusted {
@@ -1710,6 +1733,8 @@ async fn handle_driver_cmd(
                 // comment above, this rejection IS a revoke, so purge the
                 // peer's discovery-cache entry too.
                 disc_cache.lock().await.remove(&arr);
+                // DIR-P1-02: same rationale — purge its backoff timer too.
+                backoff.lock().await.remove(&arr);
                 if let Some(dir) = keystore_dir {
                     if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
                         // VULN-001 fix: roll back the in-memory removal
@@ -1976,6 +2001,7 @@ async fn handle_driver_cmd(
                     // Always Some on an explicit scan → the SAS gate engages and
                     // the initiator's verify screen gets its 6 words.
                     Some(pending_pairs.clone()),
+                    backoff.clone(),
                 )
                 .await;
             }
@@ -2088,6 +2114,7 @@ async fn handle_driver_cmd(
                             } else {
                                 Some(pending_pairs.clone())
                             },
+                            backoff.clone(),
                         )
                         .await;
                     }
@@ -2206,6 +2233,7 @@ async fn handle_driver_cmd(
                 } else {
                     Some(pending_pairs.clone())
                 },
+                backoff.clone(),
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -2253,6 +2281,7 @@ async fn transport_recv_loop(
     mesh_seen: MeshSeen,
     peer_meta: PeerMetaMap,
     disc_cache: DiscoveryCache,
+    backoff: BackoffMap,
     lan_only_handshakes: bool,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
@@ -2493,7 +2522,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &peer_meta, keystore_dir.as_ref()).await,
+                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &backoff, &peer_meta, keystore_dir.as_ref()).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -2583,6 +2612,7 @@ async fn run_vault_persister(
     mut rx: watch::Receiver<State>,
     initial_wipe_gen: u64,
     disc_cache: DiscoveryCache,
+    backoff: BackoffMap,
 ) {
     // Baseline is seeded from the CONSTRUCTION snapshot, not a late
     // `rx.borrow()`: a security wipe that lands between `subscribe()` and the
@@ -2611,6 +2641,8 @@ async fn run_vault_persister(
             // Purge it too — eagerly, since an in-memory clear cannot fail,
             // rather than gating it on the disk clear below.
             disc_cache.lock().await.clear();
+            // DIR-P1-02: same rationale — drop every peer's backoff timer.
+            backoff.lock().await.clear();
             let dir = ctx.dir.clone();
             match tokio::task::spawn_blocking(move || history_store::clear(&dir)).await {
                 // Only advance past this generation once the file is actually
@@ -3437,6 +3469,7 @@ async fn dispatch_inbound_frame(
     pending_pairs: &PendingSet,
     trusted: &TrustedSet,
     disc_cache: &DiscoveryCache,
+    backoff: &BackoffMap,
     peer_meta: &PeerMetaMap,
     keystore_dir: Option<&std::path::PathBuf>,
 ) {
@@ -3725,6 +3758,8 @@ async fn dispatch_inbound_frame(
             // stale entry in our mDNS discovery cache (pubkey, name, addrs,
             // pairing PIN) — drop it so a cache hit can't resurrect it.
             disc_cache.lock().await.remove(&peer_id);
+            // DIR-P1-02: same rationale — drop its backoff timer too.
+            backoff.lock().await.remove(&peer_id);
             if removed.is_some() {
                 if let Some(dir) = keystore_dir {
                     if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
@@ -3940,9 +3975,16 @@ async fn discovery_dispatcher(
     pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
     event_tx: mpsc::Sender<Event>,
     disc_cache: DiscoveryCache,
+    backoff: BackoffMap,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    // DIR-P1-02: polled at the initial-backoff granularity (see
+    // `backoff::INITIAL_BASE`), not the redial cadence itself — actual
+    // dial pacing is governed by `PeerBackoff::ready` below. Checking
+    // this often is cheap (in-memory lock reads only, no I/O unless a
+    // dial is actually due) and matches the clipboard watcher's own
+    // 200ms poll elsewhere in this file.
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
     loop {
         tokio::select! {
             biased;
@@ -3961,6 +4003,22 @@ async fn discovery_dispatcher(
                         };
 
                         if let Some(peer) = peer_opt {
+                            // DIR-P1-02: this is the blind cache-redial path —
+                            // no fresh mDNS advert triggered it, we're just
+                            // retrying the last known address. Gate it on the
+                            // peer's backoff timer so a dead/flapping peer
+                            // doesn't get redialed every tick forever (that
+                            // was the pre-backoff handshake-storm bug). A
+                            // fresh `DiscoveryEvent::Resolved` below
+                            // deliberately bypasses this gate — see the
+                            // comment there.
+                            let ready = {
+                                let mut g = backoff.lock().await;
+                                g.entry(id).or_insert_with(PeerBackoff::new).ready(Instant::now())
+                            };
+                            if !ready {
+                                continue;
+                            }
                             let history = transport.roaming_history_snapshot().await;
                             for h_addr in history {
                                 let id_clone = identity.clone();
@@ -3970,6 +4028,7 @@ async fn discovery_dispatcher(
                                 let transport_clone = transport.clone();
                                 let pending_tx = pending_initiator_tx.clone();
                                 let event_tx_clone = event_tx.clone();
+                                let backoff_clone = backoff.clone();
 
                                 // [REMEDIATION] Proactive Probe Tie-break: only one side initiates.
                                 if id_clone.public_key() >= static_pub {
@@ -3993,6 +4052,7 @@ async fn discovery_dispatcher(
                                         pending_tx,
                                         event_tx_clone,
                                         None,
+                                        backoff_clone,
                                     ).await;
                                 });
                             }
@@ -4070,6 +4130,16 @@ async fn discovery_dispatcher(
                             );
                             continue;
                         }
+                        // DIR-P1-02: deliberately bypasses the backoff gate
+                        // (contrast the "PROACTIVE PROBE" arm above). This
+                        // fired because the peer *just* announced itself
+                        // over mDNS, i.e. it is provably alive on the LAN
+                        // right now — waiting out a stale backoff window
+                        // here would only hurt reconnect latency for no
+                        // storm-prevention benefit, since the trigger is a
+                        // real signal, not a blind timer. The attempt still
+                        // feeds `backoff` below so a failure here still
+                        // paces the *next* blind redial correctly.
                         start_initiator(
                             identity.clone(),
                             static_pub,
@@ -4080,6 +4150,7 @@ async fn discovery_dispatcher(
                             pending_initiator_tx.clone(),
                             event_tx.clone(),
                             None,
+                            backoff.clone(),
                         ).await;
                     }
                     DiscoveryEvent::Removed { .. } => {
@@ -4112,6 +4183,7 @@ async fn start_initiator(
     pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
     event_tx: mpsc::Sender<Event>,
     pending: Option<PendingSet>,
+    backoff: BackoffMap,
 ) {
     if addrs.is_empty() {
         return;
@@ -4155,6 +4227,16 @@ async fn start_initiator(
             .await;
             match result {
                 Ok(()) => {
+                    // Linked. DIR-P1-02: a *completed* handshake (not just
+                    // this send) resets backoff — the peer is confirmed
+                    // reachable, so the next drop starts fresh at the fast
+                    // initial retry.
+                    backoff
+                        .lock()
+                        .await
+                        .entry(peer_id)
+                        .or_insert_with(PeerBackoff::new)
+                        .on_handshake_ok();
                     // Linked. Leave the slot cleared and stop trying hints.
                     *pending_initiator_tx.lock().await = None;
                     return;
@@ -4167,6 +4249,16 @@ async fn start_initiator(
         // All hints exhausted; clear the slot so the next discovery resolve
         // / PairAccept can retry.
         *pending_initiator_tx.lock().await = None;
+        // DIR-P1-02: this whole call (every hint tried) is one logical
+        // reconnect attempt — schedule the next allowed blind redial.
+        // `OsRng` here is the real jitter source (tests inject a seeded
+        // RNG directly against `PeerBackoff`, see backoff.rs).
+        backoff
+            .lock()
+            .await
+            .entry(peer_id)
+            .or_insert_with(PeerBackoff::new)
+            .on_attempt_failed(Instant::now(), &mut rand_core::OsRng);
     });
 }
 
@@ -4630,7 +4722,7 @@ mod tests {
     /// end-to-end (the only line the integration test couldn't reach).
     #[tokio::test]
     async fn c2_persister_clears_disk_vault_and_favorites_on_wipe_gen_bump() {
-        use super::{run_vault_persister, DiscoveryCache, ResolvedPeer, VaultCtx};
+        use super::{run_vault_persister, BackoffMap, DiscoveryCache, ResolvedPeer, VaultCtx};
         use crate::history_store;
         use fluxsync_core::{Config, HistoryItem, HistorySource, Kind, State};
         use std::collections::HashMap;
@@ -4682,10 +4774,22 @@ mod tests {
                 last_seen: Instant::now(),
             },
         );
+        // DIR-P1-02: same rationale — pre-seed a backoff timer for the same
+        // peer so this test also proves the security-wipe path purges it.
+        let backoff: BackoffMap = Arc::new(Mutex::new(HashMap::new()));
+        let mut pb = crate::backoff::PeerBackoff::new();
+        pb.on_attempt_failed(Instant::now(), &mut rand_core::OsRng);
+        backoff.lock().await.insert([0x77u8; 32], pb);
 
         // Channel init: empty, gen=0. Persister records last_wipe_gen=0.
         let (tx, rx) = watch::channel(State::initial(&Config::default()));
-        let persister = tokio::spawn(run_vault_persister(ctx, rx, 0, disc_cache.clone()));
+        let persister = tokio::spawn(run_vault_persister(
+            ctx,
+            rx,
+            0,
+            disc_cache.clone(),
+            backoff.clone(),
+        ));
 
         // Baseline: publish the favorited secret (gen still 0) → persister saves
         // it to disk and caches it as a favorite in ctx.entries.
@@ -4753,6 +4857,10 @@ mod tests {
             disc_cache.lock().await.is_empty(),
             "security wipe must purge the mDNS discovery cache (DIR-P2-04a): a stale \
              pubkey/name/addrs/pairing PIN must not survive the wipe"
+        );
+        assert!(
+            backoff.lock().await.is_empty(),
+            "security wipe must purge per-peer reconnect backoff state (DIR-P1-02)"
         );
 
         drop(tx);
@@ -4823,6 +4931,7 @@ mod tests {
             &pending_pairs,
             &Arc::new(Mutex::new(HashMap::new())),
             &Arc::new(Mutex::new(HashMap::new())),
+            &Arc::new(Mutex::new(HashMap::new())),
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
         )
@@ -4839,7 +4948,10 @@ mod tests {
     /// and emit `Event::PeerLost`.
     #[tokio::test]
     async fn revoke_frame_removes_trust_and_emits_peer_lost() {
-        use super::{dispatch_inbound_frame, DiscoveryCache, Event, Reassembly, ResolvedPeer};
+        use super::{
+            dispatch_inbound_frame, BackoffMap, DiscoveryCache, Event, Reassembly, ResolvedPeer,
+        };
+        use crate::backoff::PeerBackoff;
         use crate::handshake::tofu_trusted_peer;
         use crate::metrics::MetricsTracker;
         use crate::transport::Transport;
@@ -4881,6 +4993,13 @@ mod tests {
                 last_seen: Instant::now(),
             },
         );
+        // DIR-P1-02: pre-seed a backoff timer for this peer too, so the
+        // test can prove Msg::Revoke purges it alongside disc_cache
+        // (mirrors DIR-P2-04a's purge-on-revoke).
+        let backoff: BackoffMap = Arc::new(Mutex::new(HashMap::new()));
+        let mut pb = PeerBackoff::new();
+        pb.on_attempt_failed(Instant::now(), &mut rand_core::OsRng);
+        backoff.lock().await.insert(peer_id, pb);
 
         dispatch_inbound_frame(
             Frame {
@@ -4897,6 +5016,7 @@ mod tests {
             &pending_pairs,
             &trusted,
             &disc_cache,
+            &backoff,
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
         )
@@ -4909,6 +5029,10 @@ mod tests {
         assert!(
             !disc_cache.lock().await.contains_key(&peer_id),
             "Msg::Revoke must purge the sender's mDNS discovery-cache entry (DIR-P2-04a)"
+        );
+        assert!(
+            !backoff.lock().await.contains_key(&peer_id),
+            "Msg::Revoke must purge the sender's backoff timer (DIR-P1-02)"
         );
         assert!(
             matches!(event_rx.try_recv(), Ok(Event::PeerLost)),

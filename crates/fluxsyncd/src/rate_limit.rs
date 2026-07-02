@@ -26,9 +26,20 @@ use std::time::{Duration, Instant};
 /// flood, but high enough to absorb a couple of legitimate retries.
 pub const BUCKET_CAPACITY: u32 = 5;
 
-/// Tokens regenerated per second. ~1 every 6s → after the burst is spent,
+/// Sustained refill interval: one token regenerated per this duration.
+/// DIR-P1-02: the reconnect backoff's at-cap jitter floor
+/// (`backoff::STEADY_STATE_FLOOR`) is derived from this constant and must
+/// stay strictly above it, so our own steady-state redials can never
+/// outpace the peer's limiter — a guard test in `backoff.rs`
+/// (`steady_floor_outpaces_limiter_refill`) fails if either constant is
+/// retuned in a way that reintroduces the storm.
+pub const REFILL_INTERVAL: Duration = Duration::from_secs(6);
+
+/// Tokens regenerated per second (derived from [`REFILL_INTERVAL`] —
+/// single source of truth). ~1 every 6s → after the burst is spent,
 /// the attacker is rate-limited to ~10 handshakes/minute per source IP.
-pub const REFILL_PER_SEC: f64 = 1.0 / 6.0;
+#[allow(clippy::cast_precision_loss)] // 6 is exactly representable
+pub const REFILL_PER_SEC: f64 = 1.0 / REFILL_INTERVAL.as_secs() as f64;
 
 /// Maximum number of distinct source IPs we track. If the table is full we
 /// evict the oldest-seen entry before inserting a new one — this prevents

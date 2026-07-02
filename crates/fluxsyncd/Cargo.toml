@@ -28,6 +28,11 @@ fluxsync-proto = { path = "../fluxsync-proto" }
 dirs = "5"
 fluxsync-crypto = { path = "../fluxsync-crypto" }
 fluxsync-core = { path = "../fluxsync-core" }
+# DIR-P1-02: reconnect backoff jitter. Already resolved transitively
+# (fluxsync-crypto's `gen_pair_pin` uses the same crate+version for the
+# pairing PIN) — this just promotes it to a direct dep so the daemon's
+# reconnect path can use the real OS CSPRNG for jitter too.
+rand_core = { version = "0.6", features = ["getrandom"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal", "fs"] }
 tokio-util = "0.7"
 serde = { workspace = true }

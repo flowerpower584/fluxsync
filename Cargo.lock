@@ -1256,6 +1256,7 @@ dependencies = [
  "keyring",
  "mdns-sd",
  "nix 0.28.0",
+ "rand_core 0.6.4",
  "sentry",
  "serde",
  "serde_json",
