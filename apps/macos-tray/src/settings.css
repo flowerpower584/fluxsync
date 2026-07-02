@@ -150,16 +150,17 @@ input[type="range"]:active::-webkit-slider-thumb {
 .mono-val { font-family: var(--fs-mono); font-size: 13px; color: var(--fs-fg); }
 .mono-val.dimmed { color: var(--fs-muted); font-size: 11px; }
 
-.v06-badge {
-  font-family: var(--fs-mono);
-  font-size: 8px;
+/* ── Offline banner ────────────────────────────────────────────── */
+.offline-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 32px;
   background: var(--fs-crit-soft);
   color: var(--fs-crit);
-  padding: 1px 4px;
-  border-radius: 2px;
-  margin-left: 6px;
-  font-weight: 600;
-  vertical-align: middle;
+  font-size: 12px;
+  font-weight: 500;
+  border-bottom: 1px solid var(--fs-border);
 }
 
 /* ── About Section ─────────────────────────────────────────────── */

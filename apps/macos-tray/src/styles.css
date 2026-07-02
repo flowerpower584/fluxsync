@@ -123,7 +123,7 @@ button:focus-visible { outline: 2px solid var(--fs-ok); outline-offset: 2px; }
 .toggle.on .knob { transform: translateX(17px); }
 .toggle.disabled, .toggle:disabled { opacity: .4; cursor: default; }
 
-/* ── Carte de connexion : self ⇄ beam ⇄ peer ───────────────────── */
+/* ── Connection card: self ⇄ beam ⇄ peer ───────────────────────── */
 .peer-section { padding: 0 12px 10px; display: flex; flex-direction: column; }
 .conn {
   border-radius: 10px;

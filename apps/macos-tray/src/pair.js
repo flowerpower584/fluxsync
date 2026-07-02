@@ -233,6 +233,32 @@ function renderPinBlock(pin, expiresAtMs) {
 const pinSlots = () => Array.from($('pin-input').querySelectorAll('input'));
 let pinAttempts = 0;
 const MAX_PIN_ATTEMPTS = 3;
+const PIN_LOCKOUT_MS = 60_000;
+const PIN_LOCKOUT_KEY = 'fs.pinLockout';
+
+// DIR-P3-05: attempt count + lockout-until timestamp live in localStorage,
+// not a module var, so leaving this screen (method-select) and coming back
+// via "Enter code" can't be used to reset a brute-force lockout. The
+// lockout still clears itself naturally once `until` is in the past.
+function loadPinLockout() {
+  try {
+    const s = JSON.parse(localStorage.getItem(PIN_LOCKOUT_KEY) || 'null');
+    if (!s || (s.until && Date.now() >= s.until)) return { attempts: 0, until: 0 };
+    return { attempts: s.attempts || 0, until: s.until || 0 };
+  } catch (_) {
+    return { attempts: 0, until: 0 };
+  }
+}
+function savePinLockout(state) {
+  try { localStorage.setItem(PIN_LOCKOUT_KEY, JSON.stringify(state)); } catch (_) {}
+}
+function clearPinLockout() {
+  try { localStorage.removeItem(PIN_LOCKOUT_KEY); } catch (_) {}
+}
+function lockoutMessage(until) {
+  const remaining = Math.max(1, Math.ceil((until - Date.now()) / 1000));
+  return `Too many bad attempts. Try again in ${remaining}s.`;
+}
 
 $('enter-code-btn').addEventListener('click', () => {
   pairMethod = 'pin';
@@ -242,13 +268,20 @@ $('enter-code-btn').addEventListener('click', () => {
 });
 
 function resetPinForm() {
-  pinAttempts = 0; // QA #3: a fresh entry into the PIN flow clears the lockout.
+  // QA #3 revisited: re-entering the PIN flow no longer clears the
+  // lockout — attempts/until are hydrated from storage (see
+  // PIN_LOCKOUT_KEY) and only expire naturally.
+  const lock = loadPinLockout();
+  pinAttempts = lock.attempts;
   pinSlots().forEach(i => { i.value = ''; });
   $('pin-submit-btn').disabled = true;
   $('pin-error').style.display = 'none';
   $('pin-error').textContent = '';
   $('pin-hint').textContent = `Both devices must be on the same network.`;
   $('pin-hint').classList.remove('danger');
+  if (lock.until && Date.now() < lock.until) {
+    showPinError(lockoutMessage(lock.until));
+  }
 }
 
 (function wirePinInputs() {
@@ -292,8 +325,10 @@ $('pin-submit-btn').addEventListener('click', submitPin);
 async function submitPin() {
   const pin = currentPin();
   if (pin.length !== 6) return;
-  if (pinAttempts >= MAX_PIN_ATTEMPTS) {
-    showPinError('Too many bad attempts. Ask the other device to show a fresh code.');
+  const lock = loadPinLockout();
+  if (lock.until && Date.now() < lock.until) {
+    pinAttempts = lock.attempts;
+    showPinError(lockoutMessage(lock.until));
     return;
   }
   $('pin-submit-btn').disabled = true;
@@ -305,8 +340,11 @@ async function submitPin() {
     // Caller picks a default name; the peer's real name comes via Hello.
     await invoke('fluxsync_pair_from_pin', { pin, name: 'peer' });
     // pairing-success listener will drive the next screen.
+    clearPinLockout();
   } catch (e) {
     pinAttempts += 1;
+    const until = pinAttempts >= MAX_PIN_ATTEMPTS ? Date.now() + PIN_LOCKOUT_MS : 0;
+    savePinLockout({ attempts: pinAttempts, until });
     const msg = (e?.message || e || '').toString();
     const noPeer = /no_peer_with_pin|no peer/i.test(msg);
     const remaining = Math.max(0, MAX_PIN_ATTEMPTS - pinAttempts);
@@ -317,7 +355,9 @@ async function submitPin() {
     $('pin-input').classList.remove('shake');
     void $('pin-input').offsetWidth; // restart animation
     $('pin-input').classList.add('shake');
-    if (noPeer) {
+    if (until) {
+      showPinError(lockoutMessage(until));
+    } else if (noPeer) {
       showPinError(remaining > 0
         ? `Code not found. ${remaining} ${remaining === 1 ? 'try' : 'tries'} left.`
         : 'Code not found. Ask the other device to show a fresh code.');

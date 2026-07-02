@@ -31,6 +31,8 @@ function showToast(message) {
     el = document.createElement('div');
     el.id = 'fs-toast';
     el.className = 'fs-toast';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
     document.body.appendChild(el);
   }
   el.textContent = message;
@@ -47,9 +49,18 @@ async function refreshState() {
       lastState = s;
       updateUI(s);
     }
+    setOfflineBanner(false);
   } catch (e) {
     console.error('Failed to refresh settings state', e);
+    setOfflineBanner(true);
   }
+}
+
+// DIR-P3-03: surface daemon-unreachable instead of swallowing it — same
+// show/clear behavior as the tray popup's "DAEMON OFFLINE" hero state.
+function setOfflineBanner(show) {
+  const el = document.getElementById('offline-banner');
+  if (el) el.style.display = show ? 'flex' : 'none';
 }
 
 function fmtUptime(secs) {
@@ -159,7 +170,9 @@ function switchTab(tabId) {
   
   // Update buttons
   document.querySelectorAll('.tab-btn').forEach(b => {
-    b.classList.toggle('active', b.getAttribute('data-tab') === tabId);
+    const active = b.getAttribute('data-tab') === tabId;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   
   // Update panes

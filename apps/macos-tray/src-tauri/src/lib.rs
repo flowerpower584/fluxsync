@@ -235,13 +235,6 @@ async fn fluxsync_pair_confirm(peer_id: String, accept: bool) -> Result<(), Stri
     .map(|_| ())
 }
 
-#[tauri::command]
-async fn fluxsync_push(text: String) -> Result<(), String> {
-    ipc::one_shot(json!({"id": 1, "op": "push", "text": text}))
-        .await
-        .map(|_| ())
-}
-
 /// Open (or focus) the dedicated pair window. The popup-side JS calls
 /// this when the user clicks the Pair CTA, so the flow doesn't depend
 /// on the right-click menu item.
@@ -302,7 +295,6 @@ pub fn run() {
             fluxsync_pair_from_pin,
             fluxsync_pair_pending,
             fluxsync_pair_confirm,
-            fluxsync_push,
             fluxsync_open_pair,
             fluxsync_open_settings,
             fluxsync_set_launch_at_login,
