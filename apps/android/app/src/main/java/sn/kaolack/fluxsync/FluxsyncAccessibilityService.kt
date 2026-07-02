@@ -65,18 +65,37 @@ class FluxsyncAccessibilityService : AccessibilityService() {
             val charging = plugged != 0
 
             if (pct == lastSentLevel && charging == lastSentCharging) return
-            lastSentLevel = pct
-            lastSentCharging = charging
+            scope.launch { pushSelfBattery(pct, charging) }
+        }
+    }
 
-            scope.launch {
-                FluxsyncManager.withHandle { h ->
-                    try {
-                        h.setSelfBattery(pct.toShort().toUByte(), charging)
-                    } catch (e: Exception) {
-                        android.util.Log.e("FluxSync", "Battery update failed: ${e.message}")
-                    }
+    /**
+     * Pushes a self-battery reading to the daemon, updating the dedup guard
+     * ONLY after a confirmed write. `withHandle` returns null during the
+     * ~1.5s daemon-boot window, so the very first (sticky) BATTERY_CHANGED
+     * would otherwise be consumed-then-lost: the guard was advanced before
+     * the failed push and the same value never retried until the battery
+     * actually changed. Retrying across the boot window guarantees the peer
+     * (and this phone's own pill) get a real reading promptly instead of the
+     * 255 "—" placeholder.
+     */
+    private suspend fun pushSelfBattery(pct: Int, charging: Boolean) {
+        repeat(10) {
+            val ok = FluxsyncManager.withHandle { h ->
+                try {
+                    h.setSelfBattery(pct.toShort().toUByte(), charging)
+                    true
+                } catch (e: Exception) {
+                    android.util.Log.e("FluxSync", "Battery update failed: ${e.message}")
+                    false
                 }
             }
+            if (ok == true) {
+                lastSentLevel = pct
+                lastSentCharging = charging
+                return
+            }
+            kotlinx.coroutines.delay(1000)
         }
     }
 

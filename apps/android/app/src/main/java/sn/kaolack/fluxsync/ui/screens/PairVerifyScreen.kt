@@ -69,6 +69,20 @@ fun PairVerifyScreen(
     // Poll pair_pending: run_initiator inserts the entry once the handshake
     // completes, which races the navigation into this screen.
     LaunchedEffect(Unit) {
+        // At screen entry a FRESH pair's handshake is still in flight, so the
+        // link is NOT up yet — peerName is empty (or "pending"). A real,
+        // non-"pending" peer name HERE means a genuine already-linked reconnect
+        // with nothing to verify: short-circuit ONCE, before polling.
+        val st0 = vm.state.value
+        if (st0 != null && st0.peerName.isNotEmpty() && st0.peerName != "pending") {
+            onConfirmed()
+            return@LaunchedEffect
+        }
+        // Then poll ONLY for the pending SAS entry. The initiator inserts it
+        // just before the link comes up, so the words PULL must NOT be
+        // pre-empted by the always-on peerName PUSH — consulting peerName inside
+        // the loop is exactly the race that used to throw the words away. Give
+        // the entry the full window to surface.
         repeat(25) {
             val json = vm.pairPending()
             if (json != null) {
@@ -82,17 +96,13 @@ fun PairVerifyScreen(
                     return@LaunchedEffect
                 }
             }
-            // Re-pair of an already-confirmed peer: the daemon runs it as a
-            // reconnect — no pending entry, no SAS gate (driver.rs
-            // `already_confirmed`). Link up + nothing pending = nothing to
-            // verify, so jump straight to success instead of failing.
-            val st = vm.state.value
-            if (st != null && st.peerName.isNotEmpty() && st.peerName != "pending") {
-                onConfirmed()
-                return@LaunchedEffect
-            }
             delay(200)
         }
+        // No SAS entry surfaced in the window. Do NOT navigate to Linked here:
+        // a fresh pair's pending entry always surfaces within this window, so
+        // "nothing surfaced" means the handshake never completed — show the
+        // reject/retry path rather than silently skipping a gate that the
+        // daemon would later reap (which would kill the link).
         failed = true
     }
 

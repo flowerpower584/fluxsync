@@ -147,16 +147,26 @@ private fun HeroCard(
     onToggle: (Boolean) -> Unit,
 ) {
     val on = displayedOn
-    val below = s.selfBattery <= s.threshold
-    val critical = s.selfBattery <= 5
+    // 255 = battery not read yet → never "low"; only a real 0-100 trips it.
+    val known = s.selfBattery in 0..100
+    val below = known && s.selfBattery <= s.threshold
+    val critical = known && s.selfBattery <= 5
     val charging = s.selfCharging
     val syncPaused = on && below && !charging
+
+    // Connection truth comes from the FSM phase, not the on-toggle: with sync
+    // enabled but no live peer the hero must say "Searching", not "Active".
+    val phase = s.phase.lowercase()
+    val linked = phase == "linked"
+    val connecting = phase in setOf("discovering", "handshaking", "reconnecting", "idle")
 
     val visuals = when {
         !on -> HeroVisuals(FsDarkBorder, FsDarkSubtle, "Off — tap the switch to start syncing.")
         critical -> HeroVisuals(FsCrit.copy(alpha = 0.35f), FsCrit, "Halted — battery critical, all sync stopped.")
         syncPaused -> HeroVisuals(FsWarn.copy(alpha = 0.35f), FsWarn, "On hold — battery below ${s.threshold}%.")
-        else -> HeroVisuals(FsHeroOkBorder, FsAccent, "Active — synchronizing")
+        linked -> HeroVisuals(FsHeroOkBorder, FsAccent, "Active — synchronizing")
+        connecting -> HeroVisuals(FsWarn.copy(alpha = 0.35f), FsWarn, "Searching for your device…")
+        else -> HeroVisuals(FsDarkBorder, FsDarkSubtle, "Standby — no device linked.")
     }
 
     // Tween so transitions between states glide rather than snap.
@@ -182,7 +192,7 @@ private fun HeroCard(
                 )
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusDot(color = animatedDot, size = 7.dp, pulse = on && !syncPaused && !critical)
+                    StatusDot(color = animatedDot, size = 7.dp, pulse = linked && !syncPaused && !critical)
                     Spacer(Modifier.width(7.dp))
                     AnimatedContent(
                         targetState = if (isStalled) "Connecting…" else visuals.sub,
@@ -196,7 +206,7 @@ private fun HeroCard(
             FluxToggle(on = on, onChange = onToggle, size = FluxToggleSize.Md)
         }
         Spacer(Modifier.height(15.dp))
-        LinkDiagram(linked = on && !critical, dimmed = syncPaused)
+        LinkDiagram(linked = linked, dimmed = syncPaused)
     }
 }
 
@@ -265,12 +275,20 @@ private fun DeviceRow(s: DaemonState) {
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         DevicePill(
             label = "This device",
-            name = android.os.Build.MODEL,
+            // Friendly name (e.g. "Samsung SM-G998B"), matching what this
+            // device advertises to the peer — not the raw cryptic Build.MODEL.
+            name = sn.kaolack.fluxsync.FluxsyncAccessibilityService.formatPeerName(
+                android.os.Build.MANUFACTURER,
+                android.os.Build.MODEL,
+            ),
             level = s.selfBattery,
             charging = s.selfCharging,
             threshold = s.threshold,
             modifier = Modifier.weight(1f),
+            // 255 = not read yet (boot race) → "—", never a fake "255%".
+            known = s.selfBattery in 0..100,
         )
+        val peerConnected = s.phase.lowercase() in setOf("linked", "paused", "halted")
         DevicePill(
             label = sn.kaolack.fluxsync.vm.platformLabel(s.peerPlatform)
                 ?.let { "Peer · $it" } ?: "Peer",
@@ -279,6 +297,8 @@ private fun DeviceRow(s: DaemonState) {
             charging = s.peerCharging,
             threshold = s.threshold,
             modifier = Modifier.weight(1f),
+            // Real % only when connected AND a reading has arrived (≤100).
+            known = peerConnected && s.peerBattery in 0..100,
         )
     }
 }
@@ -291,6 +311,7 @@ private fun DevicePill(
     charging: Boolean,
     threshold: Int,
     modifier: Modifier = Modifier,
+    known: Boolean = true,
 ) {
     val shape = RoundedCornerShape(FsRadius.Pill)
     Column(
@@ -318,9 +339,11 @@ private fun DevicePill(
         )
         Spacer(Modifier.height(9.dp))
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            BatteryGlyph(level = level, charging = charging, threshold = threshold, width = 30.dp)
+            // Until linked + first BatteryStatus arrives, peerBattery holds the
+            // 100% default — show a neutral "—" so the reading is never wrong.
+            BatteryGlyph(level = if (known) level else 0, charging = known && charging, threshold = threshold, width = 30.dp)
             Text(
-                "$level%${if (charging) " ⚡" else ""}",
+                if (known) "$level%${if (charging) " ⚡" else ""}" else "—",
                 color = FsDarkMuted,
                 fontFamily = FsMono,
                 fontSize = 10.5.sp,
