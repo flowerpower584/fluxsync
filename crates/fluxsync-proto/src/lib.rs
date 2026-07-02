@@ -56,3 +56,58 @@ pub const MAX_HELLO_NAME: usize = 256;
 /// the bound only guards against a hostile peer shipping a datagram-sized
 /// blob that would be re-broadcast over IPC on every state emit.
 pub const MAX_HELLO_PLATFORM: usize = 16;
+
+/// Hard cap on the number of entries in `Hello.caps` (DIR-P1-01). Capability
+/// negotiation is meant for a small, closed set of feature tags; the bound
+/// guards against a hostile peer shipping a huge list to bloat the decoded
+/// `Hello` / mesh peer-metadata map.
+pub const MAX_HELLO_CAPS: usize = 32;
+
+/// Hard cap on the byte length of a single `Hello.caps` entry. Real
+/// capability tags are short ASCII identifiers (e.g. `"core-1"`); the bound
+/// guards against a hostile peer shipping a datagram-sized tag string.
+pub const MAX_CAP_LEN: usize = 64;
+
+/// Capability tags this build understands. `Hello.caps` negotiation takes
+/// the intersection of the peer's caps with this list — see
+/// [`negotiate_caps`]; everything else is ignored (docs/PROTOCOL.md). Ships
+/// with a single baseline entry so the negotiation machinery has something
+/// real to exercise end-to-end before any optional feature needs its own
+/// flag.
+pub const SUPPORTED_CAPS: &[&str] = &["core-1"];
+
+/// Negotiate the working capability set with a peer: the intersection of
+/// what they sent in `Hello.caps` and what this build understands
+/// ([`SUPPORTED_CAPS`]). A tag the peer sent that we don't recognize is
+/// silently dropped — that is the whole point of capability negotiation:
+/// an unknown cap never fails the handshake, it is just not used.
+#[must_use]
+pub fn negotiate_caps(peer_caps: &[String]) -> Vec<String> {
+    peer_caps
+        .iter()
+        .filter(|c| SUPPORTED_CAPS.contains(&c.as_str()))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::negotiate_caps;
+
+    #[test]
+    fn negotiate_caps_keeps_only_known_tags() {
+        let peer = vec!["core-1".to_string(), "x-future-test".to_string()];
+        assert_eq!(negotiate_caps(&peer), vec!["core-1".to_string()]);
+    }
+
+    #[test]
+    fn negotiate_caps_empty_peer_list_is_empty() {
+        assert!(negotiate_caps(&[]).is_empty());
+    }
+
+    #[test]
+    fn negotiate_caps_all_unknown_is_empty() {
+        let peer = vec!["x-a".to_string(), "x-b".to_string()];
+        assert!(negotiate_caps(&peer).is_empty());
+    }
+}

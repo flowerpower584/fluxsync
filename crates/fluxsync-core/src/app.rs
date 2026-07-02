@@ -455,6 +455,9 @@ impl App {
             Event::PeerPlatform { platform } => {
                 self.state.peer_platform.clone_from(platform);
             }
+            Event::PeerCaps { caps } => {
+                self.state.peer_caps.clone_from(caps);
+            }
             Event::LocalClipboardChange {
                 hash,
                 kind,
@@ -557,6 +560,7 @@ impl App {
                 peer_id,
                 name,
                 platform,
+                caps,
             } => {
                 // Deliberate rebind to an already-trusted, already-session-live
                 // secondary (the daemon promoted it into the primary slot). No
@@ -566,6 +570,7 @@ impl App {
                 // (unlike a fresh re-pair, which clears under FS-046).
                 self.state.peer_name.clone_from(name);
                 self.state.peer_platform.clone_from(platform);
+                self.state.peer_caps.clone_from(caps);
                 if *peer_id != [0u8; 32] {
                     self.last_paired_peer_id = *peer_id;
                     self.state.peer_id = *peer_id;
@@ -577,6 +582,7 @@ impl App {
             Event::UntrustedPeerSeen { .. } => {
                 self.state.peer_name.clear();
                 self.state.peer_platform.clear();
+                self.state.peer_caps.clear();
                 self.state.peer_id = [0u8; 32];
                 self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
@@ -589,6 +595,7 @@ impl App {
             {
                 self.state.peer_name.clear();
                 self.state.peer_platform.clear();
+                self.state.peer_caps.clear();
                 self.state.peer_id = [0u8; 32];
                 self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
@@ -907,6 +914,7 @@ mod tests {
                 peer_id: [9; 32],
                 name: "Phone".into(),
                 platform: "android".into(),
+                caps: vec!["core-1".into()],
             },
             &wall(),
         );
@@ -915,7 +923,41 @@ mod tests {
         assert_eq!(app.state.peer_id, [9; 32]);
         assert_eq!(app.state.peer_name, "Phone");
         assert_eq!(app.state.peer_platform, "android");
+        assert_eq!(app.state.peer_caps, vec!["core-1".to_string()]);
         assert_eq!(app.state.history.len(), history_len);
+    }
+
+    /// DIR-P1-01 AC: the daemon's Hello handler already filtered out unknown
+    /// caps via `negotiate_caps` before firing this event, so only
+    /// recognized tags ever reach `App` — receiving them updates state and
+    /// never tears down the Linked session.
+    #[test]
+    fn peer_caps_event_updates_state_without_tearing_down_session() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Mac".into(),
+            },
+            &wall(),
+        );
+        let _ = app.handle(Event::HandshakeOk, &wall());
+        assert_eq!(app.phase, Phase::Linked);
+
+        let acts = app.handle(
+            Event::PeerCaps {
+                caps: vec!["core-1".to_string()],
+            },
+            &wall(),
+        );
+        assert!(acts.contains(&Action::EmitState));
+        assert_eq!(
+            app.phase,
+            Phase::Linked,
+            "an unrecognized/negotiated cap must never tear down the session"
+        );
+        assert_eq!(app.state.peer_caps, vec!["core-1".to_string()]);
     }
 
     #[test]

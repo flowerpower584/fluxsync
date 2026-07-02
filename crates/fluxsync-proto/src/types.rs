@@ -62,6 +62,15 @@ pub struct Hello {
     /// `Hello` decodable as `""`.
     #[serde(default)]
     pub platform: String,
+    /// Capability negotiation (DIR-P1-01): short tags describing protocol
+    /// features the sender understands (e.g. `"core-1"`). The receiver takes
+    /// the intersection with its own [`crate::SUPPORTED_CAPS`] via
+    /// [`crate::negotiate_caps`] — tags neither side recognizes are ignored,
+    /// so new optional behavior ships without a `PROTOCOL_VERSION` bump.
+    /// `#[serde(default)]` keeps an older peer's caps-less `Hello` decodable
+    /// as an empty list. See `docs/PROTOCOL.md`.
+    #[serde(default)]
+    pub caps: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

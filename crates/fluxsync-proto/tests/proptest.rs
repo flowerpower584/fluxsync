@@ -6,8 +6,8 @@
 
 use fluxsync_proto::{
     decode, encode, Ack, BatteryStatus, Chunk, ClipboardItem, Frame, HandshakeInit, HandshakeResp,
-    Heartbeat, Hello, Kind, Msg, Nak, MAX_HELLO_NAME, MAX_HELLO_PLATFORM, MAX_NAK_MISSING,
-    PROTOCOL_VERSION,
+    Heartbeat, Hello, Kind, Msg, Nak, MAX_CAP_LEN, MAX_HELLO_CAPS, MAX_HELLO_NAME,
+    MAX_HELLO_PLATFORM, MAX_NAK_MISSING, PROTOCOL_VERSION,
 };
 use proptest::prelude::*;
 
@@ -114,12 +114,34 @@ fn arb_bounded_ascii(max_len: usize) -> impl Strategy<Value = String> {
     ]
 }
 
+fn arb_cap() -> impl Strategy<Value = String> {
+    // Printable-ASCII only (matches the decoder's charset bound), no spaces —
+    // real cap tags look like "core-1" / "x-future-test".
+    prop::collection::vec(
+        prop_oneof![prop::char::range('a', 'z'), prop::char::range('0', '9')],
+        1..=MAX_CAP_LEN,
+    )
+    .prop_map(|chars| chars.into_iter().collect::<String>())
+}
+
+fn arb_caps() -> impl Strategy<Value = Vec<String>> {
+    prop_oneof![
+        3 => prop::collection::vec(arb_cap(), 0..=MAX_HELLO_CAPS),
+        1 => Just(vec!["x".repeat(MAX_CAP_LEN); MAX_HELLO_CAPS]),
+    ]
+}
+
 fn arb_hello() -> impl Strategy<Value = Hello> {
     (
         arb_bounded_ascii(MAX_HELLO_NAME),
         arb_bounded_ascii(MAX_HELLO_PLATFORM),
+        arb_caps(),
     )
-        .prop_map(|(name, platform)| Hello { name, platform })
+        .prop_map(|(name, platform, caps)| Hello {
+            name,
+            platform,
+            caps,
+        })
 }
 
 fn arb_nak_missing() -> impl Strategy<Value = Vec<u16>> {

@@ -283,3 +283,54 @@ Daemon refuses an unknown `op` with `{ "ok": false, "err": "unknown_op" }` and k
 
 - The byte `Frame.version` covers net frames.
 - The IPC layer carries no explicit version; CLI and daemon are released together. A version mismatch (build hashes baked in) returns `{"ok": false, "err": "version_mismatch", "expected": "0.4.2", "got": "0.4.1"}` on the very first command and the connection is closed.
+
+### 6.1 Version policy (DIR-P1-01)
+
+`PROTOCOL_VERSION` bumps **only** for incompatible framing changes — a
+different top-level `Frame`/`Msg` shape, or anything that changes how bytes
+are laid out on the wire independent of which fields any single struct
+happens to carry. It does **not** bump for adding an optional feature.
+
+Every wire struct is `#[serde(deny_unknown_fields)]`, so any struct-field
+addition is, by construction, a one-way break: a build that has never heard
+of the new field cannot decode a frame that carries it (CBOR deserialization
+fails on the unknown map key before `Frame.version` is even inspected). This
+held for `Hello.platform` and holds again for `Hello.caps` — bumping
+`PROTOCOL_VERSION` would not have made either change any more compatible,
+since old code still can't parse a key it doesn't know about.
+
+**`Hello.caps` (DIR-P1-01) is the fix.** `Hello`'s last field is now
+`caps: Vec<String>` — a list of short capability tags the sender
+understands. Both bounds below are enforced on **decode** (fail-closed
+reject) as well as on encode, so a hostile peer can't smuggle an oversized
+or malformed list past either end:
+
+- `MAX_HELLO_CAPS` = 32 entries.
+- `MAX_CAP_LEN` = 64 bytes per entry, ASCII-printable only (`0x20..=0x7E`).
+
+`fluxsync_proto::SUPPORTED_CAPS` is the registry of tags this build
+understands. On receipt of a `Hello`, `fluxsync_proto::negotiate_caps` takes
+the intersection of the peer's `caps` with that registry — every tag neither
+side recognizes is silently dropped (logged at `DEBUG`). An unrecognized cap
+is never a reason to reject the `Hello`, close the session, or otherwise
+fail — that's the entire point: capability negotiation lets an old and a new
+build (both post-this-change) talk to each other and simply agree to use
+only what they have in common.
+
+This is how the protocol evolves from here: an optional behavior gets a new
+tag appended to `SUPPORTED_CAPS` and negotiated through `Hello.caps`, not a
+`PROTOCOL_VERSION` bump and not a new struct field. `caps` is a `Vec<String>`
+— growing its *contents* with new tag strings doesn't change any struct's
+shape, so `deny_unknown_fields` never comes into play for that kind of
+change. Struct fields may still occasionally need to grow (append-only,
+`#[serde(default)]`, never reordered — field order is ABI), but that path is
+now the exception, kept for cases a plain string tag can't express, not the
+default mechanism for shipping a feature.
+
+**This `Hello.caps` change is the last flag-day, pre-1.0 wire change.** A
+build from before this change has no `caps` field in its `Hello` decoder, so
+`deny_unknown_fields` rejects a post-change peer's `Hello` outright — the two
+cannot pair. Every addition after this one is designed to avoid that: a
+build that doesn't send `caps` at all still decodes cleanly (`#[serde(
+default)]` on the field), and a build that receives caps it has never heard
+of simply ignores them instead of failing.

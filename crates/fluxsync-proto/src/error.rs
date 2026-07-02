@@ -32,6 +32,15 @@ pub enum ProtoError {
     #[error("hello platform too long: {0} bytes (max 16)")]
     HelloPlatformTooLong(usize),
 
+    #[error("too many hello caps: {0} entries (max 32)")]
+    HelloCapsTooMany(usize),
+
+    #[error("hello cap too long: {0} bytes (max 64)")]
+    HelloCapTooLong(usize),
+
+    #[error("hello cap is not ASCII printable")]
+    HelloCapNotAsciiPrintable,
+
     #[error("CBOR decode failed: {0}")]
     Cbor(String),
 

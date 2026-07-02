@@ -20,6 +20,12 @@ pub enum Event {
     PeerPlatform {
         platform: String,
     },
+    /// Negotiated capability set from `Msg::Hello.caps` (DIR-P1-01) — the
+    /// intersection of the peer's caps with what this build supports.
+    /// Unknown caps are already filtered out by the time this event fires.
+    PeerCaps {
+        caps: Vec<String>,
+    },
     PeerLost,
     HandshakeOk,
     HandshakeTimeout,
@@ -79,6 +85,7 @@ pub enum Event {
         peer_id: [u8; 32],
         name: String,
         platform: String,
+        caps: Vec<String>,
     },
     /// FluxVault: pin/unpin a history item (by its hex content hash) as a
     /// favorite. Favorites are exempt from the vault's TTL and disk cap, so a

@@ -249,6 +249,7 @@ async fn test_14_double_hello_in_session() -> Result<()> {
         msg: Msg::Hello(Hello {
             name: "A".into(),
             platform: "linux".into(),
+            caps: vec![],
         }),
     };
     let ct = s1

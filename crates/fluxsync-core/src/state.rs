@@ -27,6 +27,11 @@ pub struct State {
     /// from `Msg::Hello`. Empty until the peer's Hello arrives. Frontends key
     /// the device icon off this instead of hardcoding one.
     pub peer_platform: String,
+    /// Negotiated capability set from the peer's `Msg::Hello.caps`
+    /// (DIR-P1-01) — the intersection with what this build supports. Empty
+    /// until the peer's Hello arrives, or if it and this build share no
+    /// caps.
+    pub peer_caps: Vec<String>,
     pub peer_battery: u8,
     pub peer_charging: bool,
     /// FluxMesh Phase 3: every peer with a live mesh session, including the
@@ -102,6 +107,9 @@ pub struct PeerInfo {
     /// (the FSM-driven primary link). Exactly one entry is primary when any
     /// peer is linked.
     pub primary: bool,
+    /// Negotiated capability set from this peer's `Msg::Hello.caps`
+    /// (DIR-P1-01). Empty until its Hello arrives.
+    pub caps: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +231,7 @@ impl State {
             peer_name: String::new(),
             trusted_peer_name: None,
             peer_platform: String::new(),
+            peer_caps: Vec::new(),
             peer_battery: 255, // sentinel: unknown until first BatteryStatus → UI shows "—"
             peer_charging: false,
             peers: Vec::new(),

@@ -41,7 +41,8 @@ use fluxsync_core::{
 use fluxsync_crypto::gen_pair_pin;
 use fluxsync_crypto::{fingerprint, Identity};
 use fluxsync_proto::{
-    ClipboardItem, Frame, Kind, Msg, MAX_CHUNK_DATA, MAX_PAYLOAD, PROTOCOL_VERSION,
+    negotiate_caps, ClipboardItem, Frame, Kind, Msg, MAX_CHUNK_DATA, MAX_PAYLOAD, PROTOCOL_VERSION,
+    SUPPORTED_CAPS,
 };
 use hex;
 use std::collections::BTreeMap;
@@ -1031,6 +1032,7 @@ async fn dispatch(
                     msg: Msg::Hello(fluxsync_proto::Hello {
                         name,
                         platform: self_platform().to_string(),
+                        caps: SUPPORTED_CAPS.iter().map(|c| (*c).to_string()).collect(),
                     }),
                 };
                 if let Ok(bytes) = fluxsync_proto::encode(&frame) {
@@ -2912,9 +2914,9 @@ async fn try_primary_failover(
     let Some(id) = transport.promote_secondary().await else {
         return false;
     };
-    let (name, platform) = match peer_meta.lock().await.get(&id) {
-        Some(m) => (m.name.clone(), m.platform.clone()),
-        None => (String::new(), String::new()),
+    let (name, platform, caps) = match peer_meta.lock().await.get(&id) {
+        Some(m) => (m.name.clone(), m.platform.clone(), m.caps.clone()),
+        None => (String::new(), String::new(), Vec::new()),
     };
     tracing::warn!(
         peer = %hex::encode(id),
@@ -2924,6 +2926,7 @@ async fn try_primary_failover(
         peer_id: id,
         name,
         platform,
+        caps,
     });
     let _ = event_tx.try_send(Event::MeshPeersChanged);
     true
@@ -3749,6 +3752,17 @@ async fn dispatch_inbound_frame(
             // Handshake frames are driven by the handshake task, not here.
         }
         Msg::Hello(h) => {
+            // DIR-P1-01: negotiate the working capability set as the
+            // intersection of what the peer sent and what this build
+            // understands. Anything neither side recognizes is silently
+            // dropped — logged at DEBUG, never a reason to refuse the Hello
+            // or tear down the session.
+            let caps = negotiate_caps(&h.caps);
+            for c in &h.caps {
+                if !SUPPORTED_CAPS.contains(&c.as_str()) {
+                    tracing::debug!(peer = ?&peer_id[..6], cap = %c, "ignoring unknown Hello capability");
+                }
+            }
             // FluxMesh Phase 3: record every peer's name/platform in the mesh
             // meta map (drives the State `peers` list), republishing on change.
             {
@@ -3761,6 +3775,10 @@ async fn dispatch_inbound_frame(
                 }
                 if !h.platform.is_empty() && e.platform != h.platform {
                     e.platform.clone_from(&h.platform);
+                    changed = true;
+                }
+                if e.caps != caps {
+                    e.caps.clone_from(&caps);
                     changed = true;
                 }
                 if changed {
@@ -3783,6 +3801,7 @@ async fn dispatch_inbound_frame(
                         platform: h.platform,
                     });
                 }
+                let _ = event_tx.try_send(Event::PeerCaps { caps });
             }
         }
     }
@@ -3840,6 +3859,9 @@ type MeshSeen = Arc<Mutex<SeenSet>>;
 struct PeerMeta {
     name: String,
     platform: String,
+    /// DIR-P1-01: negotiated capability set for this peer (intersection of
+    /// their `Hello.caps` with `SUPPORTED_CAPS`).
+    caps: Vec<String>,
     battery: u8,
     charging: bool,
 }
@@ -3852,6 +3874,7 @@ impl PeerMeta {
         Self {
             name: String::new(),
             platform: String::new(),
+            caps: Vec::new(),
             battery: 255,
             charging: false,
         }
@@ -3881,6 +3904,7 @@ async fn build_peers(
                 battery: m.map_or(255, |m| m.battery), // 255 = unknown → UI "—"
                 charging: m.is_some_and(|m| m.charging),
                 primary: Some(id) == primary,
+                caps: m.map(|m| m.caps.clone()).unwrap_or_default(),
             }
         })
         .collect()

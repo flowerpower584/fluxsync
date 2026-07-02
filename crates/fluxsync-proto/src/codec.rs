@@ -1,8 +1,8 @@
 use crate::error::ProtoError;
 use crate::types::{Chunk, ClipboardItem, Frame, Msg, Nak};
 use crate::{
-    MAX_CHUNKS, MAX_CHUNK_DATA, MAX_HELLO_NAME, MAX_HELLO_PLATFORM, MAX_NAK_MISSING, MAX_PAYLOAD,
-    PROTOCOL_VERSION,
+    MAX_CAP_LEN, MAX_CHUNKS, MAX_CHUNK_DATA, MAX_HELLO_CAPS, MAX_HELLO_NAME, MAX_HELLO_PLATFORM,
+    MAX_NAK_MISSING, MAX_PAYLOAD, PROTOCOL_VERSION,
 };
 
 /// Encode a [`Frame`] to CBOR bytes.
@@ -64,8 +64,24 @@ fn validate(frame: &Frame) -> Result<(), ProtoError> {
         Msg::Hello(h) if h.platform.len() > MAX_HELLO_PLATFORM => {
             Err(ProtoError::HelloPlatformTooLong(h.platform.len()))
         }
+        Msg::Hello(h) if h.caps.len() > MAX_HELLO_CAPS => {
+            Err(ProtoError::HelloCapsTooMany(h.caps.len()))
+        }
+        Msg::Hello(h) if h.caps.iter().any(|c| c.len() > MAX_CAP_LEN) => Err(
+            ProtoError::HelloCapTooLong(h.caps.iter().map(String::len).max().unwrap_or(0)),
+        ),
+        Msg::Hello(h) if h.caps.iter().any(|c| !is_ascii_printable_cap(c)) => {
+            Err(ProtoError::HelloCapNotAsciiPrintable)
+        }
         _ => Ok(()),
     }
+}
+
+/// ASCII-printable check for a single `Hello.caps` entry: bytes `0x20..=0x7E`
+/// (space through `~`). Keeps capability tags renderable/loggable without
+/// any charset ambiguity.
+fn is_ascii_printable_cap(s: &str) -> bool {
+    s.bytes().all(|b| (0x20..=0x7E).contains(&b))
 }
 
 fn validate_nak(nak: &Nak) -> Result<(), ProtoError> {
@@ -161,6 +177,7 @@ mod tests {
         let f = frame(Msg::Hello(crate::Hello {
             name: "x".repeat(MAX_HELLO_NAME + 1),
             platform: "linux".into(),
+            caps: vec![],
         }));
         let bytes = encode(&f).unwrap_err();
         assert!(matches!(bytes, ProtoError::HelloNameTooLong(_)));
@@ -171,9 +188,74 @@ mod tests {
         let f = frame(Msg::Hello(crate::Hello {
             name: "A".into(),
             platform: "x".repeat(MAX_HELLO_PLATFORM + 1),
+            caps: vec![],
         }));
         let bytes = encode(&f).unwrap_err();
         assert!(matches!(bytes, ProtoError::HelloPlatformTooLong(_)));
+    }
+
+    #[test]
+    fn round_trip_hello_with_unknown_cap() {
+        // AC(a): an unknown cap decodes fine and survives round-trip — the
+        // codec never rejects a cap it doesn't recognize; only the daemon's
+        // negotiation step (fluxsync_proto::negotiate_caps) filters it out.
+        let f = frame(Msg::Hello(crate::Hello {
+            name: "A".into(),
+            platform: "linux".into(),
+            caps: vec!["core-1".into(), "x-future-test".into()],
+        }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn accepts_hello_caps_at_max_count_and_len() {
+        let f = frame(Msg::Hello(crate::Hello {
+            name: "A".into(),
+            platform: "linux".into(),
+            caps: vec!["x".repeat(crate::MAX_CAP_LEN); crate::MAX_HELLO_CAPS],
+        }));
+        let bytes = encode(&f).unwrap();
+        assert!(decode(&bytes).is_ok());
+    }
+
+    #[test]
+    fn rejects_too_many_hello_caps() {
+        let f = frame(Msg::Hello(crate::Hello {
+            name: "A".into(),
+            platform: "linux".into(),
+            caps: vec!["x".into(); crate::MAX_HELLO_CAPS + 1],
+        }));
+        let err = encode(&f).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoError::HelloCapsTooMany(n) if n == crate::MAX_HELLO_CAPS + 1
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_hello_cap_entry() {
+        let f = frame(Msg::Hello(crate::Hello {
+            name: "A".into(),
+            platform: "linux".into(),
+            caps: vec!["x".repeat(crate::MAX_CAP_LEN + 1)],
+        }));
+        let err = encode(&f).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoError::HelloCapTooLong(n) if n == crate::MAX_CAP_LEN + 1
+        ));
+    }
+
+    #[test]
+    fn rejects_non_ascii_printable_hello_cap() {
+        let f = frame(Msg::Hello(crate::Hello {
+            name: "A".into(),
+            platform: "linux".into(),
+            caps: vec!["bad\ncap".into()],
+        }));
+        let err = encode(&f).unwrap_err();
+        assert!(matches!(err, ProtoError::HelloCapNotAsciiPrintable));
     }
 
     #[test]

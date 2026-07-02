@@ -238,6 +238,11 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
         // Peer platform learned from Hello — push it to the UI, no phase change.
         (phase, E::PeerPlatform { .. }) => (phase, vec![A::EmitState]),
 
+        // DIR-P1-01: negotiated capability set learned from Hello — push it
+        // to the UI, no phase change. Unknown caps never reach here (already
+        // filtered by `negotiate_caps` before this event is raised).
+        (phase, E::PeerCaps { .. }) => (phase, vec![A::EmitState]),
+
         // FluxMesh Phase 3: a non-primary mesh peer changed — re-emit State so
         // the daemon rebuilds the `peers` list. No phase change, single-peer
         // State untouched.

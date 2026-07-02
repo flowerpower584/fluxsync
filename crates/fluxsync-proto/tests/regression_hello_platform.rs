@@ -23,6 +23,7 @@ fn hostile_oversized_platform_rejected_on_decode() {
         msg: Msg::Hello(Hello {
             name: "A".into(),
             platform: huge.clone(),
+            caps: vec![],
         }),
     };
 
@@ -49,6 +50,7 @@ fn boundary_16_ok_17_rejected_on_decode() {
         msg: Msg::Hello(Hello {
             name: "A".into(),
             platform: "x".repeat(MAX_HELLO_PLATFORM),
+            caps: vec![],
         }),
     };
     let ok = decode(&raw_cbor(&at_cap));
@@ -60,6 +62,7 @@ fn boundary_16_ok_17_rejected_on_decode() {
         msg: Msg::Hello(Hello {
             name: "A".into(),
             platform: "x".repeat(MAX_HELLO_PLATFORM + 1),
+            caps: vec![],
         }),
     };
     let err = decode(&raw_cbor(&over));
@@ -78,6 +81,7 @@ fn no_silent_truncation_send_path() {
         msg: Msg::Hello(Hello {
             name: "A".into(),
             platform: "x".repeat(10_000),
+            caps: vec![],
         }),
     };
     let err = encode(&frame);
