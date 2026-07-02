@@ -33,6 +33,22 @@ struct PendingPayload {
 
 const HISTORY_SOFT_CAP: usize = 50;
 
+/// Cap the live history to `HISTORY_SOFT_CAP`, but NEVER evict a pinned item.
+/// Mirrors the on-disk vault's favorite-aware prune: favorites are exempt from
+/// the cap, so a pinned item past the soft cap stays visible in the UI instead
+/// of vanishing from `state.history` (the only structure clients render) while
+/// surviving orphaned on disk. Order (newest-first) is preserved.
+fn cap_history_keeping_favorites(history: &mut Vec<HistoryItem>) {
+    let mut non_fav_kept = 0usize;
+    history.retain(|h| {
+        if h.favorite {
+            return true;
+        }
+        non_fav_kept += 1;
+        non_fav_kept <= HISTORY_SOFT_CAP
+    });
+}
+
 /// One per-peer link in the mesh. Today it carries only the FSM phase; later
 /// phases grow per-peer session metrics, role (send/receive-only), and
 /// last-seen. Keeping a phase *per link* is what lets several devices be in
@@ -268,6 +284,17 @@ impl App {
         vec![action, Action::EmitState]
     }
 
+    /// Drop every parked `Ask` item (both the display row and the held
+    /// payload). Called by the teardown paths — manual unpair, the security
+    /// wipes, and a peer-swap — because once the peer those items were waiting
+    /// on is gone there is nobody to deliver them to. Without this they leak:
+    /// repeated park+unpair cycles accumulate orphaned rows in memory and in
+    /// every client's UI forever (no code path else clears them).
+    fn drop_pending(&mut self) {
+        self.state.pending.clear();
+        self.pending_payloads.clear();
+    }
+
     // ── FluxMesh coordinator API (Phase 1 foundation) ───────────────────
     // Pure, peer-keyed primitives that the daemon adopts in Phase 2. They
     // own only per-peer phase + the mesh seen-set; they never touch the
@@ -410,6 +437,8 @@ impl App {
                     if self.last_paired_peer_id != [0u8; 32] && *peer_id != self.last_paired_peer_id
                     {
                         self.state.history.clear();
+                        self.drop_pending();
+                        self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
                     }
                     self.last_paired_peer_id = *peer_id;
                     self.state.peer_id = *peer_id;
@@ -473,7 +502,16 @@ impl App {
                 // the dedup ring. Trusting `*hash` would let a hostile
                 // peer pick which slot in the ring gets occupied,
                 // poisoning history with a chosen-collision payload.
-                let computed = DedupRing::hash(payload);
+                // CRLF-canonicalize text payloads (not binary images) so an
+                // LF/CRLF line-ending difference can't defeat dedup and
+                // ping-pong the item back to the peer.
+                let computed = if matches!(kind, Kind::Image) {
+                    DedupRing::hash(payload)
+                } else {
+                    DedupRing::hash(
+                        crate::canon_text(&String::from_utf8_lossy(payload)).as_bytes(),
+                    )
+                };
 
                 // Dedup by content hash. `observe` returns false when this
                 // hash was already seen — that covers three cases at once:
@@ -483,20 +521,36 @@ impl App {
                 if !self.dedup.observe(computed) {
                     suppress_action = true;
                 } else if !sensitive {
-                    self.push_history(HistoryItem {
-                        kind: *kind,
-                        preview: preview.to_string(),
-                        time: wall.hhmm(),
-                        source: crate::state::HistorySource::Remote,
-                        sensitive: *sensitive,
-                        lamport: *lamport,
-                        hash: hex32(hash),
-                        favorite: false,
-                    });
+                    // Record only items the firewall ADMITS. A Block or Defer
+                    // (Ask) decision must not enter history/vault before the
+                    // gate runs (apply_firewall, post-transition): otherwise
+                    // blocked content is persisted and shown to every client
+                    // despite the policy, and a not-yet-approved deferred item
+                    // is recorded before the user decides. Deferred items are
+                    // parked in `pending` by apply_firewall and written on
+                    // approval; denied/blocked ones are dropped here.
+                    let admitted = matches!(
+                        self.config
+                            .firewall
+                            .decide(*kind, *sensitive, Direction::Inbound),
+                        Decision::Pass
+                    );
+                    if admitted {
+                        self.push_history(HistoryItem {
+                            kind: *kind,
+                            preview: preview.to_string(),
+                            time: wall.hhmm(),
+                            source: crate::state::HistorySource::Remote,
+                            sensitive: *sensitive,
+                            lamport: *lamport,
+                            hash: hex32(hash),
+                            favorite: false,
+                        });
+                    }
                 }
             }
             Event::PeerLost => {
-                self.state.peer_battery = 100;
+                self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
             }
             Event::PrimaryFailover {
@@ -517,16 +571,18 @@ impl App {
                     self.state.peer_id = *peer_id;
                 }
                 // Promoted peer's charge is unknown until its next Battery frame.
-                self.state.peer_battery = 100;
+                self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
             }
             Event::UntrustedPeerSeen { .. } => {
                 self.state.peer_name.clear();
                 self.state.peer_platform.clear();
                 self.state.peer_id = [0u8; 32];
-                self.state.peer_battery = 100;
+                self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
                 self.state.history.clear();
+                self.drop_pending();
+                self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
             }
             Event::GhostTimeout
                 if !matches!(self.phase, Phase::Linked | Phase::Paused | Phase::Halted) =>
@@ -534,17 +590,23 @@ impl App {
                 self.state.peer_name.clear();
                 self.state.peer_platform.clear();
                 self.state.peer_id = [0u8; 32];
-                self.state.peer_battery = 100;
+                self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
                 self.state.history.clear();
+                self.drop_pending();
+                self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
             }
             Event::ManualUnpair => {
                 self.state.on = false;
                 self.state.peer_name.clear();
                 self.state.peer_id = [0u8; 32];
                 self.state.trusted_peer_name = None;
-                self.state.peer_battery = 100;
+                self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
+                // History is deliberately KEPT (same-device reconnect resumes
+                // it), but parked Ask items are dropped: the peer they targeted
+                // is gone, so they would otherwise leak forever.
+                self.drop_pending();
             }
             Event::SetTrustedPeer { name } => {
                 self.state.trusted_peer_name = Some(name.clone());
@@ -574,6 +636,24 @@ impl App {
         // No-op while the firewall is disabled (the default) → behaviour
         // identical to pre-firewall.
         self.apply_firewall(&event, &mut actions);
+
+        // The HandshakeOk→Linked transition emits a placeholder `SendBattery`
+        // (fsm.rs uses level=100). Overwrite every outgoing battery action with
+        // this device's real, current reading so a freshly linked peer shows the
+        // true battery immediately instead of a bogus 100% until the next poll.
+        actions.retain_mut(|a| {
+            if let Action::SendBattery { level, charging } = a {
+                *level = self.state.battery_level;
+                *charging = self.state.charging;
+                // 255 = no real reading yet (desktop without a battery, or the
+                // first seconds before the watcher runs). Drop it: the proto
+                // caps level at 100 so 255 cannot be encoded, and the peer
+                // correctly keeps its own "—" until a real value arrives via
+                // the heartbeat.
+                return *level != 255;
+            }
+            true
+        });
 
         // Battery-policy phase override (post-transition)
         // [FIX] Force Halted/Paused even in Discovering/Handshaking if battery is bad.
@@ -649,7 +729,7 @@ impl App {
         self.state.history.insert(0, item);
 
         if self.state.history.len() > HISTORY_SOFT_CAP {
-            self.state.history.truncate(HISTORY_SOFT_CAP);
+            cap_history_keeping_favorites(&mut self.state.history);
         }
     }
 
@@ -658,7 +738,7 @@ impl App {
     /// carries the restored list. `items` are newest-first; the list is
     /// capped to the in-memory soft cap.
     pub fn restore_history(&mut self, mut items: Vec<HistoryItem>) {
-        items.truncate(HISTORY_SOFT_CAP);
+        cap_history_keeping_favorites(&mut items);
         self.state.history = items;
     }
 

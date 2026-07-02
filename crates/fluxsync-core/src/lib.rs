@@ -23,7 +23,7 @@ pub mod policy;
 pub mod state;
 
 pub use app::App;
-pub use classify::{is_sensitive, kind_of};
+pub use classify::{canon_text, is_sensitive, kind_of};
 pub use clock::{Clock, LamportClock, StubWallClock, WallClock};
 pub use dedup::{ContentHash, DedupRing, SeenSet, DEDUP_CAPACITY, SEEN_CAPACITY};
 pub use error::CoreError;

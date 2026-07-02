@@ -95,7 +95,17 @@ fn aws_re() -> &'static Regex {
 
 fn hex64_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"\b[A-Fa-f0-9]{64}\b").expect("hex64 regex literal must compile"))
+    // `{64,512}` (not `{64}`): a pure run of >64 hex has word boundaries only
+    // at its two ends, so a fixed `{64}` window never lands on a trailing
+    // boundary and a 96/128-hex key (sha256||sha256, ed25519 keypair, 256-byte
+    // key) slips through. The range matches the whole boundary-delimited run
+    // for any real key length (64..=512 hex = 32..=256 bytes). The 512 upper
+    // bound is deliberate: a multi-KB pure-hex run (a hex DUMP, not a secret)
+    // has no boundary-to-boundary window of length ≤512, so it is NOT flagged —
+    // avoiding false positives on large hex-shaped data.
+    R.get_or_init(|| {
+        Regex::new(r"\b[A-Fa-f0-9]{64,512}\b").expect("hex64 regex literal must compile")
+    })
 }
 
 /// Classify a clipboard string into one of the three UI categories.
@@ -108,6 +118,17 @@ pub fn kind_of(text: &str) -> Kind {
         return Kind::Code;
     }
     Kind::Text
+}
+
+/// Canonicalize clipboard text for dedup/echo-suppression hashing only.
+/// Normalizes CRLF and lone CR to LF so the SAME logical text copied with
+/// Windows (`\r\n`) vs Unix (`\n`) line endings — or mutated to LF by a
+/// receiving app on clipboard read-back — hashes identically. Trailing
+/// `.trim()` preserves the prior whitespace-insensitive behavior. This only
+/// affects the hash key, never the bytes that go on the wire or into history.
+#[must_use]
+pub fn canon_text(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
 }
 
 /// Heuristic: does this string look like something we should never persist?

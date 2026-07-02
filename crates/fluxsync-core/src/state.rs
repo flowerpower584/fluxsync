@@ -59,6 +59,15 @@ pub struct State {
     /// the daemon keeps the bytes out of the wire, same as `history`.
     #[serde(default)]
     pub pending: Vec<PendingItem>,
+    /// Monotonic counter bumped on every *security* history wipe
+    /// (untrusted-peer-seen, ghost-timeout, FS-046 peer-swap). The daemon's
+    /// vault persister watches it: a change means "also wipe the on-disk
+    /// vault and forget cached favorites" so a favorited secret cannot be
+    /// re-appended and the encrypted file cannot outlive the in-memory wipe.
+    /// `#[serde(skip)]` keeps it out of the IPC JSON — it is an in-process
+    /// signal only, so the macOS/Android wire shape is unchanged.
+    #[serde(skip)]
+    pub vault_wipe_gen: u64,
 }
 
 /// One clipboard item parked by the firewall's `Ask` rule, surfaced to the UI
@@ -201,14 +210,20 @@ impl State {
         Self {
             phase: String::from("idle"),
             on: false,
-            battery_level: 100,
+            // 255 = "not read yet" sentinel → UI renders "—" instead of a
+            // fake 100%. Safe for policy: every `<= threshold` / `<= CRITICAL`
+            // check is false at 255, so an unread battery never forces a pause.
+            // The watcher (desktop) or set_self_battery (Android) overwrites it
+            // with a real 0-100 within a few seconds; a battery-less desktop
+            // keeps 255 and shows "—".
+            battery_level: 255,
             battery_threshold: 20,
             charging: false,
             peer_id: [0u8; 32],
             peer_name: String::new(),
             trusted_peer_name: None,
             peer_platform: String::new(),
-            peer_battery: 100, // Default to 100 so it doesn't trigger Critical threshold before the first update
+            peer_battery: 255, // sentinel: unknown until first BatteryStatus → UI shows "—"
             peer_charging: false,
             peers: Vec::new(),
             history: Vec::new(),
@@ -221,6 +236,7 @@ impl State {
             charge_override: config.charge_override,
             firewall: config.firewall.clone(),
             pending: Vec::new(),
+            vault_wipe_gen: 0,
         }
     }
 
