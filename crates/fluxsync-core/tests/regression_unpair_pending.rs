@@ -61,7 +61,7 @@ fn manual_unpair_clears_parked_ask_items() {
                 payload: format!("secret-{i}").into_bytes(),
                 preview: format!("secret-{i}"),
                 sensitive: false,
-                lamport: i as u64,
+                lamport: u64::from(i),
             },
             &wall(),
         );

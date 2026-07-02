@@ -97,7 +97,7 @@ fn favorite_survives_in_memory_cap_overflow() {
     // Flood with 60 distinct newer items (all non-favorite). Each inserts at
     // index 0, pushing the favorite well past the 50-item soft cap.
     for n in 2u8..=61 {
-        app.handle(local_change(n, n as u64 + 1), &wall());
+        app.handle(local_change(n, u64::from(n) + 1), &wall());
     }
 
     let hist = &app.snapshot().history;
