@@ -30,7 +30,7 @@ use crate::ipc::{IpcConn, IpcServer};
 use crate::logs::LogTail;
 use crate::metrics::{DisconnectReason, MetricsTracker};
 use crate::rate_limit::HandshakeRateLimiter;
-use crate::transport::{now_ms, RecvFrame, Transport};
+use crate::transport::{is_rekey_initiator, now_ms, rekey_due, RecvFrame, Transport};
 use anyhow::{anyhow, Context, Result};
 use base32::Alphabet;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -157,6 +157,9 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         test_pair,
         test_pairs,
         test_pending_pair,
+        test_peer_static_pub,
+        rekey_max_age_ms,
+        rekey_max_bytes,
         lan_only_handshakes,
         firewall,
     } = cfg;
@@ -351,12 +354,15 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         } = tp;
         transport.install_session(peer_id, session).await;
         transport.set_peer_addr(peer_addr).await;
-        // Add peer to trusted set under a placeholder pubkey so the
+        // Add peer to trusted set under a placeholder pubkey (or, if the
+        // test injected one via `test_peer_static_pub`, the real key — a
+        // DIR-P2-03 rekey test needs a genuine key so the forced rekey's
+        // Noise IK exchange can actually complete against the peer) so the
         // App's peer_name lookup paths still find an entry.
         trusted.lock().await.insert(
             peer_id,
             TrustedPeer {
-                static_pub: [0u8; 32],
+                static_pub: test_peer_static_pub.unwrap_or([0u8; 32]),
                 name: peer_name.clone(),
             },
         );
@@ -534,6 +540,31 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 tracing::warn!(error = %e, "heartbeat loop exited");
             }
             Ok(())
+        });
+    }
+
+    // DIR-P2-03: automatic session rekey watchdog.
+    {
+        let identity = identity.clone();
+        let transport = transport.clone();
+        let trusted = trusted.clone();
+        let pending_initiator_tx = pending_initiator_tx.clone();
+        let event_tx = event_tx.clone();
+        let backoff = backoff.clone();
+        let shutdown = shutdown.clone();
+        tasks.spawn(async move {
+            rekey_watchdog(
+                identity,
+                transport,
+                trusted,
+                pending_initiator_tx,
+                event_tx,
+                backoff,
+                rekey_max_age_ms,
+                rekey_max_bytes,
+                shutdown,
+            )
+            .await
         });
     }
 
@@ -3090,6 +3121,137 @@ async fn heartbeat_loop(
                         secondary_missed.remove(&peer_id);
                     }
                 }
+            }
+        }
+    }
+}
+
+/// DIR-P2-03: how often the rekey watchdog re-checks the primary session's
+/// age/bytes against the rekey thresholds. Cheap (atomic loads plus an
+/// occasional lock read) and rekeys are rare, so a short interval costs
+/// nothing while keeping test-injected (small) thresholds responsive.
+const REKEY_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// DIR-P2-03: automatic session rekey. Every [`REKEY_CHECK_INTERVAL`],
+/// checks whether the primary session has crossed `max_age_ms` or
+/// `max_bytes` (see [`crate::transport::rekey_due`]) and, if so, whether
+/// this daemon is the deterministic rekey initiator for that peer
+/// ([`crate::transport::is_rekey_initiator`] — exactly one side of a pair
+/// ever is). The other side does nothing: it just accepts the fresh
+/// handshake the same way it already accepts any reconnect, via
+/// `handshake::run_responder`'s generation-gated install.
+///
+/// Reuses the same `pending_initiator_tx` single-flight slot as ordinary
+/// reconnects so a rekey attempt can never race a concurrent
+/// discovery-triggered handshake for the same peer. A rekey-triggered
+/// re-handshake is intentional, not a failure: on success it feeds
+/// `PeerBackoff::on_handshake_ok` exactly like any other completed
+/// handshake; on failure it deliberately does **not** call
+/// `on_attempt_failed` — the peer did nothing wrong, so a transient rekey
+/// hiccup must not penalize its future reconnect pacing. The next tick
+/// simply retries (the age/bytes trigger stays true until a rekey
+/// actually lands).
+#[allow(clippy::too_many_arguments)]
+async fn rekey_watchdog(
+    identity: Identity,
+    transport: Arc<Transport>,
+    trusted: TrustedSet,
+    pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
+    event_tx: mpsc::Sender<Event>,
+    backoff: BackoffMap,
+    max_age_ms: u64,
+    max_bytes: u64,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let mut interval = tokio::time::interval(REKEY_CHECK_INTERVAL);
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return Ok(()),
+            _ = interval.tick() => {
+                if !transport.has_session().await {
+                    continue;
+                }
+                let Some(peer_id) = transport.cached_peer_id().await else { continue };
+
+                let age_ms = now_ms().saturating_sub(transport.session_established_at());
+                let bytes = transport.session_bytes();
+                if !rekey_due(age_ms, bytes, max_age_ms, max_bytes) {
+                    continue;
+                }
+                if !is_rekey_initiator(identity.peer_id(), peer_id) {
+                    // The peer is the deterministic initiator for this pair;
+                    // we just wait to accept its handshake.
+                    continue;
+                }
+
+                // Single-flight: never overlap with an organic reconnect or
+                // an earlier rekey attempt still finishing.
+                let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                {
+                    let mut g = pending_initiator_tx.lock().await;
+                    if g.is_some() {
+                        continue;
+                    }
+                    *g = Some(tx);
+                }
+
+                let Some(peer_addr) = transport.current_peer_addr().await else {
+                    *pending_initiator_tx.lock().await = None;
+                    continue;
+                };
+                let static_pub = trusted.lock().await.get(&peer_id).map(|p| p.static_pub);
+                let Some(static_pub) = static_pub else {
+                    *pending_initiator_tx.lock().await = None;
+                    continue;
+                };
+                let expected_generation = transport.primary_session_generation();
+
+                tracing::info!(
+                    peer = %hex::encode(&peer_id[..6]),
+                    age_ms,
+                    bytes,
+                    "DIR-P2-03: starting planned session rekey"
+                );
+
+                let identity = identity.clone();
+                let transport = transport.clone();
+                let rekey_metrics = transport.metrics.clone();
+                let event_tx = event_tx.clone();
+                let backoff = backoff.clone();
+                let pending_initiator_tx = pending_initiator_tx.clone();
+                tokio::spawn(async move {
+                    let result = handshake::run_rekey_initiator(
+                        identity,
+                        static_pub,
+                        peer_addr,
+                        transport,
+                        rx,
+                        event_tx,
+                        peer_id,
+                        expected_generation,
+                    )
+                    .await;
+                    match result {
+                        Ok(()) => {
+                            backoff
+                                .lock()
+                                .await
+                                .entry(peer_id)
+                                .or_insert_with(PeerBackoff::new)
+                                .on_handshake_ok();
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "DIR-P2-03: planned rekey attempt failed; will retry \
+                                 (not counted against reconnect backoff)"
+                            );
+                            rekey_metrics.lock().await.on_handshake_fail();
+                        }
+                    }
+                    *pending_initiator_tx.lock().await = None;
+                });
             }
         }
     }

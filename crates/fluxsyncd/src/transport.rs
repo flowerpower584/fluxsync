@@ -48,6 +48,40 @@ pub fn roam_allowed(now_ms: u64, last_roam_ms: u64) -> bool {
     now_ms.saturating_sub(last_roam_ms) >= ROAM_MIN_INTERVAL_MS
 }
 
+/// DIR-P2-03: a session older than this is due for a planned rekey.
+pub const REKEY_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// DIR-P2-03: a session that has carried this much encrypted payload
+/// (both directions combined) is due for a planned rekey.
+pub const REKEY_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// True once either rekey threshold has been crossed. Pure so the trigger
+/// logic (age vs. bytes) is unit-testable without a running daemon; the
+/// caller supplies `max_age_ms` / `max_bytes` so tests (and, in principle,
+/// a future config knob) can override [`REKEY_MAX_AGE_MS`] /
+/// [`REKEY_MAX_BYTES`].
+#[must_use]
+pub fn rekey_due(age_ms: u64, bytes: u64, max_age_ms: u64, max_bytes: u64) -> bool {
+    age_ms >= max_age_ms || bytes >= max_bytes
+}
+
+/// DIR-P2-03: deterministic tie-break for which side performs a planned
+/// rekey — the peer with the numerically smaller `peer_id` (BLAKE3 of its
+/// static Noise key) initiates, the other side just accepts the fresh
+/// handshake like it already does for any reconnect. Both daemons compute
+/// this independently from `Identity::peer_id()` and the linked peer's id,
+/// so the two sides agree without any extra wire coordination.
+///
+/// Keyed on `peer_id` rather than the raw `static_pub` (unlike the
+/// discovery/proactive-probe tie-breaks in `driver.rs`) because the
+/// transport layer never retains a linked peer's static key after the
+/// handshake completes — `peer_id` is the only peer-identifying value
+/// available at rekey-check time.
+#[must_use]
+pub fn is_rekey_initiator(self_peer_id: [u8; 32], peer_id: [u8; 32]) -> bool {
+    self_peer_id < peer_id
+}
+
 /// Per-peer connection state. FluxMesh Phase 2: today a `Transport`
 /// holds exactly one `PeerConn`; step 2B-2 turns this into a
 /// `BTreeMap<PeerId, Arc<PeerConn>>`. Each field keeps its own lock so
@@ -73,6 +107,11 @@ pub struct PeerConn {
     /// cannot continuously redirect outbound traffic (FS-034).
     last_roam_ms: AtomicU64,
     session_established_at_ms: AtomicU64,
+    /// DIR-P2-03: sum of encrypted-frame bytes (both directions) since the
+    /// current session was installed. Reset to 0 on every install; read by
+    /// the rekey watchdog alongside `session_established_at_ms` to decide
+    /// whether the session is due for a planned re-handshake.
+    bytes_since_established: AtomicU64,
 }
 
 impl PeerConn {
@@ -87,6 +126,7 @@ impl PeerConn {
             last_rx_ms: AtomicU64::new(now_ms()),
             last_roam_ms: AtomicU64::new(0),
             session_established_at_ms: AtomicU64::new(0),
+            bytes_since_established: AtomicU64::new(0),
         }
     }
 }
@@ -247,6 +287,7 @@ impl Transport {
         target
             .session_established_at_ms
             .store(now_ms(), Ordering::SeqCst);
+        target.bytes_since_established.store(0, Ordering::SeqCst);
         self.session_notify.notify_one();
     }
 
@@ -274,8 +315,56 @@ impl Transport {
         target
             .session_established_at_ms
             .store(now_ms(), Ordering::SeqCst);
+        target.bytes_since_established.store(0, Ordering::SeqCst);
         self.session_notify.notify_one();
         true
+    }
+
+    /// DIR-P2-03: like [`Self::install_session`] but only commits if the
+    /// **primary** slot's `session_generation` is still exactly
+    /// `expected_generation` at commit time — i.e. nothing else (a
+    /// concurrent drop, a primary failover, or a racing duplicate
+    /// handshake reply) touched the primary session since the caller
+    /// read that generation.
+    ///
+    /// Scoped to the primary slot only, unlike `try_install_session` /
+    /// `install_session` (which route via `acquire_conn` to primary or
+    /// `extra`): a planned rekey always targets whichever peer currently
+    /// drives the single FSM, so there is no routing ambiguity to resolve.
+    /// This is the mechanism that lets a rekey **replace** a still-live
+    /// session — `try_install_session`'s CAS only ever succeeds against an
+    /// empty slot, which a live session by definition is not.
+    pub async fn install_primary_session_if_generation(
+        &self,
+        id: [u8; 32],
+        session: Session,
+        expected_generation: u64,
+    ) -> bool {
+        let mut g = self.conn.session.lock().await;
+        if self.conn.session_generation.load(Ordering::SeqCst) != expected_generation {
+            return false;
+        }
+        *g = Some(session);
+        drop(g);
+        *self.conn.last_peer_id.lock().await = Some(id);
+        self.conn.session_generation.fetch_add(1, Ordering::SeqCst);
+        self.conn
+            .session_established_at_ms
+            .store(now_ms(), Ordering::SeqCst);
+        self.conn.bytes_since_established.store(0, Ordering::SeqCst);
+        self.session_notify.notify_one();
+        true
+    }
+
+    /// Current `session_generation` of the primary slot. Read by the
+    /// rekey watchdog / rekey initiator before starting a (slow) Noise
+    /// exchange, then passed back to
+    /// [`Self::install_primary_session_if_generation`] as the expected
+    /// value so a concurrent change aborts the install instead of
+    /// clobbering it.
+    #[must_use]
+    pub fn primary_session_generation(&self) -> u64 {
+        self.conn.session_generation.load(Ordering::SeqCst)
     }
 
     pub async fn drop_session(&self) {
@@ -326,6 +415,14 @@ impl Transport {
     #[must_use]
     pub fn session_established_at(&self) -> u64 {
         self.conn.session_established_at_ms.load(Ordering::SeqCst)
+    }
+
+    /// DIR-P2-03: encrypted-frame bytes (both directions) carried by the
+    /// primary session since it was installed. Reset to 0 on every
+    /// install (fresh pairing, reconnect, or rekey).
+    #[must_use]
+    pub fn session_bytes(&self) -> u64 {
+        self.conn.bytes_since_established.load(Ordering::Relaxed)
     }
 
     /// Send a typed datagram to the given address, prefixing the body
@@ -381,6 +478,10 @@ impl Transport {
             let s = g.as_mut().ok_or_else(|| anyhow!("no session"))?;
             s.encrypt(plaintext)?
         };
+        // DIR-P2-03: count the full wire frame (nonce + ciphertext + tag)
+        // toward this session's rekey byte budget.
+        conn.bytes_since_established
+            .fetch_add(ct.len() as u64, Ordering::Relaxed);
         let mut buf = Vec::with_capacity(ct.len() + 1);
         buf.push(TYPE_ENCRYPTED);
         buf.extend_from_slice(&ct);
@@ -495,6 +596,9 @@ impl Transport {
         self.conn
             .session_established_at_ms
             .store(now_ms(), Ordering::SeqCst);
+        // DIR-P2-03: mirrors the age reset above — the promoted session is
+        // treated as fresh from this slot's point of view, same as age.
+        self.conn.bytes_since_established.store(0, Ordering::SeqCst);
         self.session_notify.notify_one();
         Some(id)
     }
@@ -547,6 +651,12 @@ impl Transport {
                     };
                     // not this peer's datagram; try the next session
                     let Ok(pt) = result else { continue };
+
+                    // DIR-P2-03: count the full wire frame toward this
+                    // session's rekey byte budget — only for a datagram
+                    // that actually decrypted under this peer's session.
+                    c.bytes_since_established
+                        .fetch_add(body.len() as u64, Ordering::Relaxed);
 
                     // ROAMING: decryption success proves the packet is authentic,
                     // but a LAN attacker can replay/relay authentic ciphertext to
@@ -617,7 +727,75 @@ impl Transport {
 
 #[cfg(test)]
 mod tests {
-    use super::{roam_allowed, ROAM_MIN_INTERVAL_MS};
+    use super::{
+        is_rekey_initiator, rekey_due, roam_allowed, ROAM_MIN_INTERVAL_MS, REKEY_MAX_AGE_MS,
+        REKEY_MAX_BYTES,
+    };
+
+    #[test]
+    fn dir_p2_03_rekey_thresholds_are_24h_and_1gib() {
+        assert_eq!(REKEY_MAX_AGE_MS, 24 * 60 * 60 * 1000);
+        assert_eq!(REKEY_MAX_BYTES, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn dir_p2_03_rekey_due_age_trigger() {
+        // Age alone crosses the threshold; bytes stay well under.
+        assert!(rekey_due(REKEY_MAX_AGE_MS, 0, REKEY_MAX_AGE_MS, REKEY_MAX_BYTES));
+        assert!(rekey_due(
+            REKEY_MAX_AGE_MS + 1,
+            0,
+            REKEY_MAX_AGE_MS,
+            REKEY_MAX_BYTES
+        ));
+        assert!(!rekey_due(
+            REKEY_MAX_AGE_MS - 1,
+            0,
+            REKEY_MAX_AGE_MS,
+            REKEY_MAX_BYTES
+        ));
+    }
+
+    #[test]
+    fn dir_p2_03_rekey_due_bytes_trigger() {
+        // Bytes alone crosses the threshold; age stays well under.
+        assert!(rekey_due(0, REKEY_MAX_BYTES, REKEY_MAX_AGE_MS, REKEY_MAX_BYTES));
+        assert!(rekey_due(
+            0,
+            REKEY_MAX_BYTES + 1,
+            REKEY_MAX_AGE_MS,
+            REKEY_MAX_BYTES
+        ));
+        assert!(!rekey_due(
+            0,
+            REKEY_MAX_BYTES - 1,
+            REKEY_MAX_AGE_MS,
+            REKEY_MAX_BYTES
+        ));
+    }
+
+    #[test]
+    fn dir_p2_03_rekey_due_neither_trigger_stays_false() {
+        assert!(!rekey_due(0, 0, REKEY_MAX_AGE_MS, REKEY_MAX_BYTES));
+        assert!(!rekey_due(
+            REKEY_MAX_AGE_MS / 2,
+            REKEY_MAX_BYTES / 2,
+            REKEY_MAX_AGE_MS,
+            REKEY_MAX_BYTES
+        ));
+    }
+
+    /// DIR-P2-03: exactly one side of a pair is ever the rekey initiator,
+    /// determined purely from the two `peer_id`s — no wire coordination.
+    #[test]
+    fn dir_p2_03_is_rekey_initiator_exactly_one_side() {
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        assert!(is_rekey_initiator(a, b));
+        assert!(!is_rekey_initiator(b, a));
+        // Never both, never neither.
+        assert_ne!(is_rekey_initiator(a, b), is_rekey_initiator(b, a));
+    }
 
     #[test]
     fn fs034_roam_rate_limit() {
@@ -725,5 +903,57 @@ mod tests {
 
         // No secondaries remain.
         assert_eq!(transport.promote_secondary().await, None);
+    }
+
+    /// DIR-P2-03: `install_primary_session_if_generation` is the mechanism a
+    /// planned rekey uses to replace a still-live session. Proves the two
+    /// halves of its contract: (1) it commits and advances
+    /// `primary_session_generation` when the expected generation still
+    /// matches, and (2) it is a no-op CAS failure — the live session is left
+    /// untouched — when a stale/duplicate caller races in with an outdated
+    /// expectation.
+    #[tokio::test]
+    async fn dir_p2_03_install_primary_session_if_generation_is_a_cas() {
+        use super::Transport;
+        use fluxsync_crypto::{test_util::pair_for_test, Identity};
+        use std::sync::Arc;
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.unwrap();
+        let transport = Arc::new(transport);
+
+        let me = Identity::generate();
+        let peer_id = [3u8; 32];
+
+        // Fresh pairing: generation starts at 0, install bumps it to 1.
+        let (sess_a, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        assert_eq!(transport.primary_session_generation(), 0);
+        transport.install_session(peer_id, sess_a).await;
+        assert_eq!(transport.primary_session_generation(), 1);
+
+        // A rekey attempt that read generation 1 and finishes cleanly: CAS
+        // succeeds, generation advances to 2, byte counter resets.
+        let (sess_b, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        assert!(
+            transport
+                .install_primary_session_if_generation(peer_id, sess_b, 1)
+                .await
+        );
+        assert_eq!(transport.primary_session_generation(), 2);
+        assert_eq!(transport.session_bytes(), 0);
+
+        // A second, stale attempt (e.g. a duplicate HandshakeInit reply)
+        // that still believes the generation is 1 must lose the race: the
+        // live session (now generation 2) is left untouched.
+        let (sess_c, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        assert!(
+            !transport
+                .install_primary_session_if_generation(peer_id, sess_c, 1)
+                .await
+        );
+        assert_eq!(
+            transport.primary_session_generation(),
+            2,
+            "a lost CAS must not advance the generation"
+        );
     }
 }

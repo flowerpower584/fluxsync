@@ -189,6 +189,62 @@ pub async fn run_initiator(
     Ok(())
 }
 
+/// DIR-P2-03: planned session rekey. Runs the same Noise IK exchange as
+/// [`run_initiator`] against a peer that is already trusted *and* already
+/// linked, but — unlike `run_initiator`, which only ever fills an empty
+/// session slot — this **replaces** the live session once the new one is
+/// fully established (make-before-break: the old session keeps serving
+/// heartbeats/clipboard traffic for the entire ~5s handshake round trip;
+/// only the final atomic install swaps the keys).
+///
+/// `expected_generation` is `Transport::primary_session_generation()`
+/// snapshotted by the caller right before this call starts; the install at
+/// the end only commits if it is still current (see
+/// [`Transport::install_primary_session_if_generation`]), so a concurrent
+/// drop/failover/duplicate-reply loses cleanly instead of corrupting the
+/// link.
+///
+/// No `PendingSet` entry is created and no SAS re-verification is
+/// triggered: `peer_static_pub` came from the already-confirmed
+/// `TrustedSet`, so re-gating the user on every rekey would defeat the
+/// point of an invisible background rotation.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_rekey_initiator(
+    identity: Identity,
+    peer_static_pub: [u8; 32],
+    peer_addr: SocketAddr,
+    transport: Arc<Transport>,
+    mut incoming: mpsc::UnboundedReceiver<Vec<u8>>,
+    event_tx: mpsc::Sender<Event>,
+    peer_id: [u8; 32],
+    expected_generation: u64,
+) -> Result<()> {
+    let (initiator, msg1) = Initiator::start(&identity, &peer_static_pub)?;
+    transport
+        .send_typed(TYPE_HANDSHAKE_INIT, &msg1, peer_addr)
+        .await?;
+
+    let msg2 = tokio::time::timeout(std::time::Duration::from_secs(5), incoming.recv())
+        .await
+        .map_err(|_| anyhow!("rekey handshake timeout (no resp in 5s)"))?
+        .ok_or_else(|| anyhow!("rekey handshake channel closed"))?;
+
+    let session = initiator.finish(&msg2)?;
+    if !transport
+        .install_primary_session_if_generation(peer_id, session, expected_generation)
+        .await
+    {
+        // Something else (a concurrent drop, a primary failover, or a
+        // duplicate/late reply racing this one) already changed the
+        // primary session — discard the new one rather than clobber it.
+        tracing::debug!("rekey initiator: session changed mid-handshake; discarding new session");
+        return Ok(());
+    }
+    transport.set_peer_info(peer_id, peer_addr).await;
+    let _ = event_tx.try_send(Event::HandshakeOk);
+    Ok(())
+}
+
 /// Run the responder side once. Reads msg1 from `init_msg`, sends msg2
 /// back to `from`, installs the session.
 ///
@@ -221,6 +277,32 @@ pub async fn run_responder(
         .map(std::string::ToString::to_string);
 
     let peer_id = peer_id_for(&remote_static);
+
+    // DIR-P2-03: snapshot as early as possible, before any of the
+    // (fast but non-trivial) trust/TOFU work below, so the CAS at commit
+    // time below catches a concurrent change (a duplicate HandshakeInit
+    // racing this one, a drop, or a primary failover) that happens while
+    // this call runs. `Some(_)` only when `peer_id` is the primary's
+    // current (or most recently linked) peer — i.e. this is a
+    // reconnect/rekey of the live single-FSM link, never a fresh pairing
+    // or a secondary mesh peer (those keep the original `try_install_session`
+    // empty-slot-only CAS via the `None` arm below).
+    // `replacing_live_session` additionally distinguishes "the primary's
+    // session is still live right now" (a true rekey/replace — the UX
+    // must stay invisible, see below) from "the primary's last peer is
+    // reconnecting into an empty slot after a real drop" (an ordinary
+    // reconnect, where the existing Discovering→Handshaking→Linked UI
+    // flap is correct and unchanged).
+    let (rekey_generation, replacing_live_session) =
+        if transport.cached_peer_id().await == Some(peer_id) {
+            (
+                Some(transport.primary_session_generation()),
+                transport.has_session().await,
+            )
+        } else {
+            (None, false)
+        };
+
     let mut newly_tofu = false;
     let entry = {
         let mut trusted_guard = trusted.lock().await;
@@ -336,18 +418,43 @@ pub async fn run_responder(
     // just committed to. If install loses, drop msg2 too — peer will
     // either retry handshake or, if it already linked through another
     // path, ignore our late reply.
-    if !transport.try_install_session(peer_id, session).await {
-        tracing::debug!("responder: session already installed; not sending msg2");
+    //
+    // DIR-P2-03: `rekey_generation` (`Some` only for the primary's
+    // current/last peer, see above) routes through the generation-gated
+    // CAS so a legitimate rekey — or a duplicate HandshakeInit for an
+    // in-flight one — can replace a still-live session. Every other case
+    // (fresh pairing, a secondary mesh peer) is unaffected: it keeps the
+    // original empty-slot-only CAS.
+    let installed = match rekey_generation {
+        Some(expected) => {
+            transport
+                .install_primary_session_if_generation(peer_id, session, expected)
+                .await
+        }
+        None => transport.try_install_session(peer_id, session).await,
+    };
+    if !installed {
+        tracing::debug!("responder: session install lost a concurrent race; not sending msg2");
         return Ok(());
     }
     transport.set_peer_info(peer_id, from).await;
     transport
         .send_typed(TYPE_HANDSHAKE_RESP, &msg2, from)
         .await?;
-    let _ = event_tx.try_send(Event::PeerSeen {
-        peer_id,
-        name: entry.name,
-    });
+    // DIR-P2-03: skip `PeerSeen` when this install just replaced a still-live
+    // session — the peer's identity was already confirmed and never stopped
+    // being Linked, so re-firing it would surface a redundant "Peer identity
+    // confirmed" log/EmitState for what must stay an invisible rotation.
+    // `HandshakeOk` still fires unconditionally: in `Phase::Linked` it is a
+    // no-op in the FSM (see `fsm::transition`'s fallback arm) but keeps
+    // `MetricsTracker::on_handshake_ok` bookkeeping consistent, same as any
+    // other completed handshake.
+    if !replacing_live_session {
+        let _ = event_tx.try_send(Event::PeerSeen {
+            peer_id,
+            name: entry.name,
+        });
+    }
     let _ = event_tx.try_send(Event::HandshakeOk);
     Ok(())
 }

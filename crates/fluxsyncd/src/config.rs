@@ -50,6 +50,23 @@ pub struct DaemonConfig {
     /// `PairConfirm` without running the real handshake. Production
     /// binaries always set this to `None`.
     pub test_pending_pair: Option<TestPendingPair>,
+    /// Test injection: the real Noise static pubkey to trust `test_pair`'s
+    /// peer under, instead of the `[0u8; 32]` placeholder the driver uses
+    /// by default. `test_pair`/`test_pairs` skip the handshake entirely, so
+    /// the trusted-set entry they seed normally carries no real key — fine
+    /// for tests that never re-handshake, but a DIR-P2-03 rekey test needs
+    /// a genuine `static_pub` so the forced rekey's Noise IK exchange can
+    /// actually complete against the peer daemon. Production binaries
+    /// always leave this `None` (trust is always learned from a real
+    /// handshake there).
+    pub test_peer_static_pub: Option<[u8; 32]>,
+    /// DIR-P2-03: override for [`crate::transport::REKEY_MAX_AGE_MS`].
+    /// Production binaries leave this at the real 24h default; tests set a
+    /// tiny value so a forced rekey fires within the test's timeout.
+    pub rekey_max_age_ms: u64,
+    /// DIR-P2-03: override for [`crate::transport::REKEY_MAX_BYTES`]. See
+    /// `rekey_max_age_ms`.
+    pub rekey_max_bytes: u64,
     /// FS-059 + H2 (Phase 3 audit): reject EVERY UDP datagram whose
     /// source IP is not on a private / link-local / loopback range.
     /// Default `true` because the product is LAN clipboard sync —
@@ -92,6 +109,9 @@ impl DaemonConfig {
             test_pair: None,
             test_pairs: Vec::new(),
             test_pending_pair: None,
+            test_peer_static_pub: None,
+            rekey_max_age_ms: crate::transport::REKEY_MAX_AGE_MS,
+            rekey_max_bytes: crate::transport::REKEY_MAX_BYTES,
             lan_only_handshakes: true,
             firewall: FirewallPolicy::default(),
         }
