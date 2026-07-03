@@ -15,6 +15,10 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- DIR-P3-07: required to launch ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS.
+         Google Play bans apps that request this from the store, but FluxSync
+         is sideload-only and never distributed through Play. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <uses-feature
         android:name="android.hardware.camera"

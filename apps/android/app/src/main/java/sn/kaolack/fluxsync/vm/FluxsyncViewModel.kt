@@ -41,6 +41,24 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
     private val _isAccessibilityEnabled = MutableStateFlow(false)
     val isAccessibilityEnabled: StateFlow<Boolean> = _isAccessibilityEnabled.asStateFlow()
 
+    /**
+     * DIR-P3-07: true when the a11y service is toggled ON in Settings but
+     * hasn't heartbeated recently — an OEM kill that Settings doesn't
+     * reflect. Distinct from [isAccessibilityEnabled], which only tracks the
+     * Settings toggle itself.
+     */
+    private val _serviceStale = MutableStateFlow(false)
+    val serviceStale: StateFlow<Boolean> = _serviceStale.asStateFlow()
+
+    /**
+     * DIR-P3-07: whether this app is currently exempt from battery
+     * optimization. Refreshed on the same `onResume` hook as
+     * [isAccessibilityEnabled] so the Settings screen reflects a grant made
+     * in the system dialog without a dedicated poll.
+     */
+    private val _ignoringBatteryOptimizations = MutableStateFlow(false)
+    val ignoringBatteryOptimizations: StateFlow<Boolean> = _ignoringBatteryOptimizations.asStateFlow()
+
     init {
         checkAccessibility()
         viewModelScope.launch {
@@ -161,7 +179,15 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
 
     fun checkAccessibility() {
         val app = getApplication<Application>()
-        _isAccessibilityEnabled.value = isAccessibilityServiceEnabled(app, FluxsyncAccessibilityService::class.java)
+        val enabled = isAccessibilityServiceEnabled(app, FluxsyncAccessibilityService::class.java)
+        _isAccessibilityEnabled.value = enabled
+        _serviceStale.value = sn.kaolack.fluxsync.utils.ServiceHealthUtils.isServiceDead(
+            enabledInSettings = enabled,
+            lastHeartbeatMs = FluxsyncAccessibilityService.lastHeartbeatMs,
+            nowMs = System.currentTimeMillis(),
+        )
+        _ignoringBatteryOptimizations.value =
+            sn.kaolack.fluxsync.utils.BatteryOptimizationUtils.isIgnoringBatteryOptimizations(app)
     }
 
     private fun isAccessibilityServiceEnabled(context: android.content.Context, service: Class<out android.accessibilityservice.AccessibilityService>): Boolean {

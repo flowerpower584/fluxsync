@@ -1,19 +1,34 @@
 package sn.kaolack.fluxsync.ui
 
+import android.content.Intent
+import android.provider.Settings
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -23,6 +38,12 @@ import sn.kaolack.fluxsync.ui.screens.LinkedScreen
 import sn.kaolack.fluxsync.ui.screens.PairingDashboardScreen
 import sn.kaolack.fluxsync.ui.screens.PairScanScreen
 import sn.kaolack.fluxsync.ui.screens.PairVerifyScreen
+import sn.kaolack.fluxsync.ui.theme.FsAccent
+import sn.kaolack.fluxsync.ui.theme.FsDarkFg
+import sn.kaolack.fluxsync.ui.theme.FsDarkMuted
+import sn.kaolack.fluxsync.ui.theme.FsDarkSurface
+import sn.kaolack.fluxsync.ui.theme.FsWarnSoft
+import sn.kaolack.fluxsync.utils.BatteryOptimizationUtils
 import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
 object Routes {
@@ -37,6 +58,9 @@ object Routes {
     const val LOGS = "logs"
     const val FIREWALL = "firewall"
     const val SETTINGS = "settings"
+
+    // DIR-P3-07: nested under the Settings tab's inner NavHost.
+    const val OEM_GUIDANCE = "oem_guidance"
 }
 
 /**
@@ -49,10 +73,24 @@ object Routes {
 @Composable
 fun FluxsyncApp(vm: FluxsyncViewModel) {
     val nav: NavHostController = rememberNavController()
+    val context = LocalContext.current
     val state by vm.state.collectAsStateWithLifecycle()
     val booted by vm.booted.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
     val isAccessibilityEnabled by vm.isAccessibilityEnabled.collectAsStateWithLifecycle()
+    val serviceStale by vm.serviceStale.collectAsStateWithLifecycle()
+
+    // DIR-P3-07: offered once on the first successful pairing (see the
+    // PAIR_VERIFY/PAIR_DASHBOARD success handlers below), gated so an
+    // already-exempt or previously-dismissed device never sees it again.
+    var showBatteryPrompt by remember { mutableStateOf(false) }
+    fun maybeOfferBatteryPrompt() {
+        val ignoring = BatteryOptimizationUtils.isIgnoringBatteryOptimizations(context)
+        val dismissed = BatteryOptimizationUtils.isDismissed(context)
+        if (BatteryOptimizationUtils.shouldOfferExemptionPrompt(ignoring, dismissed)) {
+            showBatteryPrompt = true
+        }
+    }
 
     if (!isAccessibilityEnabled) {
         sn.kaolack.fluxsync.ui.screens.AccessibilityBlockingScreen()
@@ -112,6 +150,7 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
                 onBack = { /* Stay here */ },
                 onScan = { nav.navigate(Routes.PAIR_SCAN) },
                 onSuccess = {
+                    maybeOfferBatteryPrompt()
                     nav.navigate(Routes.LINKED) {
                         popUpTo(Routes.PAIR_DASHBOARD) { inclusive = true }
                     }
@@ -131,6 +170,7 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
             PairVerifyScreen(
                 vm = vm,
                 onConfirmed = {
+                    maybeOfferBatteryPrompt()
                     nav.navigate(Routes.LINKED) {
                         popUpTo(Routes.PAIR_DASHBOARD) { inclusive = true }
                     }
@@ -155,5 +195,84 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
             hostState = snackbarHostState,
             modifier = Modifier.align(Alignment.BottomCenter),
         )
+        // DIR-P3-07: Settings says the a11y service is ON but it hasn't
+        // heartbeated — an OEM kill Settings doesn't reflect. Overlaid at
+        // the top so it's visible from any tab; tapping deep-links to the
+        // accessibility settings screen to re-bind.
+        if (serviceStale) {
+            ServiceStaleBanner(
+                onTap = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
+        }
     }
+
+    if (showBatteryPrompt) {
+        BatteryExemptionDialog(
+            onEnable = {
+                context.startActivity(BatteryOptimizationUtils.exemptionIntent(context.packageName))
+                showBatteryPrompt = false
+            },
+            onDismiss = {
+                BatteryOptimizationUtils.setDismissed(context)
+                showBatteryPrompt = false
+            },
+        )
+    }
+}
+
+/**
+ * DIR-P3-07: "clipboard service enabled but not running" banner —
+ * self-check runs once per `MainActivity.onResume`, no polling loop.
+ */
+@Composable
+private fun ServiceStaleBanner(onTap: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .background(FsWarnSoft)
+            .statusBarsPadding()
+            .clickable(onClick = onTap)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            "Clipboard service enabled but not running — tap to re-bind",
+            color = FsDarkFg,
+            style = MaterialTheme.typography.labelSmall,
+        )
+    }
+}
+
+/**
+ * DIR-P3-07: offered once after the first successful pairing. "Not now"
+ * persists the dismissal (see [BatteryOptimizationUtils.setDismissed]) —
+ * the same choice stays reachable manually from Settings afterwards.
+ */
+@Composable
+private fun BatteryExemptionDialog(onEnable: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = FsDarkSurface,
+        title = { Text("Keep FluxSync running?", color = FsDarkFg) },
+        text = {
+            Text(
+                "Android may pause background sync to save battery. Exempting FluxSync " +
+                    "keeps clipboard sync alive even when the app isn't open. You can change " +
+                    "this later in Settings.",
+                color = FsDarkMuted,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onEnable) {
+                Text("ENABLE", color = FsAccent)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("NOT NOW", color = FsDarkMuted)
+            }
+        },
+    )
 }

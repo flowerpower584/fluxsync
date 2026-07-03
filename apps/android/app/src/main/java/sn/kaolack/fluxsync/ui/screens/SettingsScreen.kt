@@ -2,6 +2,7 @@ package sn.kaolack.fluxsync.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -33,6 +34,7 @@ import sn.kaolack.fluxsync.ui.components.FluxToggle
 import sn.kaolack.fluxsync.ui.components.FluxToggleSize
 import sn.kaolack.fluxsync.ui.components.SectionLabel
 import sn.kaolack.fluxsync.ui.theme.*
+import sn.kaolack.fluxsync.utils.BatteryOptimizationUtils
 import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
 /**
@@ -40,13 +42,17 @@ import sn.kaolack.fluxsync.vm.FluxsyncViewModel
  * Comprehensive configuration for battery limits, security, and network discovery.
  */
 @Composable
-fun SettingsScreen(vm: FluxsyncViewModel) {
+fun SettingsScreen(vm: FluxsyncViewModel, onOpenOemGuidance: () -> Unit = {}) {
     val state by vm.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val s = state ?: return
 
     var showUnpairConfirm by remember { mutableStateOf(false) }
+    // DIR-P3-07: refreshed by the same MainActivity.onResume hook that
+    // drives `checkAccessibility()` — covers the "granted it, came back
+    // from Settings" case without a dedicated poll.
+    val ignoringBatteryOpt by vm.ignoringBatteryOptimizations.collectAsStateWithLifecycle()
 
     fun openUrl(url: String) {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
@@ -81,6 +87,41 @@ fun SettingsScreen(vm: FluxsyncViewModel) {
                     hint = themeAppearanceHint(isSystemInDarkTheme()),
                     right = { Text("DARK", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) },
                     isLast = true
+                )
+            }
+        }
+
+        item {
+            // DIR-P3-07: always reachable manually here regardless of
+            // whether the one-time post-pairing prompt was dismissed.
+            val requestBatteryExemption: (() -> Unit)? = if (ignoringBatteryOpt) {
+                null
+            } else {
+                { context.startActivity(BatteryOptimizationUtils.exemptionIntent(context.packageName)) }
+            }
+            SettingsGroup(title = "Background reliability") {
+                SettingsItem(
+                    label = "Battery optimization",
+                    hint = if (ignoringBatteryOpt) {
+                        "Exempt — background sync won't be throttled"
+                    } else {
+                        "Android may pause sync when the app isn't open"
+                    },
+                    right = {
+                        Text(
+                            if (ignoringBatteryOpt) "EXEMPT" else "FIX ›",
+                            color = if (ignoringBatteryOpt) FsOk else FsWarn,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                    onClick = requestBatteryExemption,
+                )
+                SettingsItem(
+                    label = "Manufacturer guidance",
+                    hint = "How ${Build.MANUFACTURER} handles background apps",
+                    right = { Text("VIEW ›", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) },
+                    isLast = true,
+                    onClick = onOpenOemGuidance,
                 )
             }
         }

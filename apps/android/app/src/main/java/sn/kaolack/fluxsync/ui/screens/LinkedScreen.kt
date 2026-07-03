@@ -84,7 +84,13 @@ fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
             composable(Routes.DEVICES) { DevicesScreen(vm, onAddDevice = onNavigateToPairing) }
             composable(Routes.LOGS) { LogsScreen(vm) }
             composable(Routes.FIREWALL) { FirewallScreen(vm) }
-            composable(Routes.SETTINGS) { SettingsScreen(vm) }
+            composable(Routes.SETTINGS) {
+                SettingsScreen(vm, onOpenOemGuidance = { innerNav.navigate(Routes.OEM_GUIDANCE) })
+            }
+            // DIR-P3-07: manufacturer-specific "don't kill my app" guidance.
+            composable(Routes.OEM_GUIDANCE) {
+                OemGuidanceScreen(onBack = { innerNav.popBackStack() })
+            }
         }
     }
 }

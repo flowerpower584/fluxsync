@@ -300,6 +300,10 @@ class FluxsyncAccessibilityService : AccessibilityService() {
         }
         pollingJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
+                // DIR-P3-07: heartbeat for MainActivity's self-check banner —
+                // reuses this already-running loop instead of adding a new
+                // timer. See ServiceHealthUtils.isServiceDead.
+                lastHeartbeatMs = System.currentTimeMillis()
                 var linked = false
                 try {
                     // Snapshot under the handle lock, then release it BEFORE the
@@ -650,6 +654,17 @@ class FluxsyncAccessibilityService : AccessibilityService() {
 
         /** FS-013: upper bound for the blocking daemon stop in onDestroy. */
         private const val STOP_TIMEOUT_MS = 2000L
+
+        /**
+         * DIR-P3-07: last time the poll loop ran, i.e. proof the service is
+         * actually alive (not just toggled on in Settings). Written every
+         * tick from [startPolling]; read from
+         * `FluxsyncViewModel.checkAccessibility` via
+         * `ServiceHealthUtils.isServiceDead`. `0L` until the first tick of
+         * this process incarnation.
+         */
+        @Volatile
+        var lastHeartbeatMs: Long = 0L
 
         /**
          * FS-013: run a blocking daemon stop under a hard deadline so
