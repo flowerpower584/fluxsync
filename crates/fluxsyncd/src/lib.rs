@@ -19,7 +19,9 @@ pub mod ipc;
 pub mod keystore;
 pub mod logs;
 pub mod metrics;
+pub mod outbox;
 pub mod rate_limit;
+pub mod seq_store;
 pub mod transport;
 pub mod wall;
 

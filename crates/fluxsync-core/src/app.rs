@@ -365,6 +365,15 @@ impl App {
         actions
     }
 
+    /// Restore the outgoing `EventId` counter to a value persisted across a
+    /// restart (see `fluxsyncd::seq_store`). Core stays sync/IO-free: the
+    /// daemon reads the on-disk horizon and passes the plain number in here
+    /// rather than this crate touching any file itself. Only meaningful
+    /// before the first [`App::next_local_event_id`] call of this process.
+    pub fn set_local_seq(&mut self, seq: u64) {
+        self.local_seq = seq;
+    }
+
     /// Allocate the next `EventId` for an item this device originates.
     pub fn next_local_event_id(&mut self) -> EventId {
         let seq = self.local_seq;

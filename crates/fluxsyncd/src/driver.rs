@@ -35,6 +35,7 @@ use anyhow::{anyhow, Context, Result};
 use base32::Alphabet;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::history_store::{self, VaultEntry};
+use crate::seq_store::SeqStore;
 use fluxsync_core::{
     dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, DeviceId, Event, EventId,
     HistoryItem, LogEntry, LogLevel, PeerInfo, SeenSet, State, WallClock,
@@ -197,6 +198,22 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         // `EventId.origin` on every locally-copied item.
         fluxsync_core::DeviceId::from(identity.peer_id()),
     );
+
+    // ── Restore the persisted outgoing event-seq horizon ──────────
+    // `App.local_seq` (stamped as `EventId.seq` on every locally-originated
+    // item, see `next_local_event_id`) used to reset to 0 on every restart,
+    // so a peer's mesh anti-loop `SeenSet` could wrongly treat freshly
+    // re-issued low seqs as replays of items it had already recorded. See
+    // `seq_store.rs` for the reserve-ahead persistence scheme. No keystore
+    // dir (test mode) means no restored seq and no persistence — `app`
+    // simply keeps its fresh `local_seq == 0`, same as before this fix.
+    let mut seq_store: Option<SeqStore> = if let Some(dir) = keystore_dir.as_ref() {
+        let (initial_seq, store) = SeqStore::load(dir);
+        app.set_local_seq(initial_seq);
+        Some(store)
+    } else {
+        None
+    };
 
     // ── FluxVault: rehydrate persisted history ────────────────────
     // Decrypt the on-disk history (if any) and seed it into the App
@@ -744,7 +761,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 if !actions.is_empty() {
                     tracing::debug!(?event, ?actions, phase=?app.snapshot().phase, "FSM transition");
                 }
-                dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta).await;
+                dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta, &mut seq_store).await;
             }
             Some(driver_cmd) = cmd_rx.recv() => {
                 match driver_cmd {
@@ -763,7 +780,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &*wall_clock,
                         );
                         let actions = gate_outbound(actions, &transport, &pending_pairs).await;
-                        dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta).await;
+                        dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta, &mut seq_store).await;
                     }
                     run_cmd @ DriverCmd::Run { .. } => {
                         handle_driver_cmd(
@@ -792,6 +809,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &backoff,
                             &mdns_ctx,
                             &shutdown,
+                            &mut seq_store,
                         ).await;
                     }
                 }
@@ -871,6 +889,7 @@ async fn dispatch(
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
     peer_meta: &PeerMetaMap,
+    seq_store: &mut Option<SeqStore>,
 ) {
     for action in actions {
         tracing::debug!(?action, "dispatching action");
@@ -928,6 +947,19 @@ async fn dispatch(
                 let event_id = app.next_local_event_id();
                 let origin = event_id.origin.into_bytes();
                 let event_seq = event_id.seq;
+
+                // Persist the reserve-ahead horizon past this seq (cheap
+                // no-op unless the counter just reached it) so a restart
+                // never re-issues a seq a peer's SeenSet has already
+                // recorded. See `seq_store.rs`.
+                if let Some(store) = seq_store.as_mut() {
+                    if let Err(e) = store.advance(event_seq + 1) {
+                        tracing::warn!(
+                            error = %e,
+                            "seq_store: failed to persist advanced outgoing-seq horizon"
+                        );
+                    }
+                }
 
                 // Build every datagram for this item up front, encoded. The
                 // same bytes are kept in the inflight table so the retransmit
@@ -1186,6 +1218,7 @@ async fn ensure_online(
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
     peer_meta: &PeerMetaMap,
+    seq_store: &mut Option<SeqStore>,
 ) {
     if app.snapshot().on {
         return;
@@ -1204,6 +1237,7 @@ async fn ensure_online(
         metrics,
         inflight,
         peer_meta,
+        seq_store,
     )
     .await;
 }
@@ -1239,6 +1273,7 @@ async fn handle_driver_cmd(
     backoff: &BackoffMap,
     mdns_ctx: &MdnsCtx,
     shutdown: &CancellationToken,
+    seq_store: &mut Option<SeqStore>,
 ) {
     let DriverCmd::Run { op, reply, req_id } = cmd else {
         return;
@@ -1276,6 +1311,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1304,6 +1340,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1328,6 +1365,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1380,6 +1418,7 @@ async fn handle_driver_cmd(
                     metrics,
                     inflight,
                     peer_meta,
+                    seq_store,
                 )
                 .await;
                 CmdResponse::ok(req_id, None)
@@ -1428,6 +1467,7 @@ async fn handle_driver_cmd(
                             metrics,
                             inflight,
                             peer_meta,
+                            seq_store,
                         )
                         .await;
                         CmdResponse::ok(req_id, None)
@@ -1499,6 +1539,7 @@ async fn handle_driver_cmd(
                     metrics,
                     inflight,
                     peer_meta,
+                    seq_store,
                 )
                 .await;
                 CmdResponse::ok(req_id, None)
@@ -1531,6 +1572,7 @@ async fn handle_driver_cmd(
                     metrics,
                     inflight,
                     peer_meta,
+                    seq_store,
                 )
                 .await;
                 CmdResponse::ok(req_id, None)
@@ -1562,6 +1604,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1633,6 +1676,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1657,6 +1701,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1676,6 +1721,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -1760,6 +1806,7 @@ async fn handle_driver_cmd(
                     metrics,
                     inflight,
                     peer_meta,
+                    seq_store,
                 )
                 .await;
             }
@@ -1857,6 +1904,7 @@ async fn handle_driver_cmd(
                     metrics,
                     inflight,
                     peer_meta,
+                    seq_store,
                 )
                 .await;
             }
@@ -1942,6 +1990,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
             // PR2: surface the PIN + epoch-ms expiry to the UI so the
@@ -2067,6 +2116,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
             // URI carries one or more address hints; if any parsed, kick
@@ -2179,6 +2229,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
 
@@ -2304,6 +2355,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                seq_store,
             )
             .await;
             start_initiator(
@@ -4065,6 +4117,11 @@ async fn dispatch_inbound_frame(
                 }
                 let _ = event_tx.try_send(Event::PeerCaps { caps });
             }
+        }
+        Msg::ResyncOffer(_) | Msg::ResyncPull(_) => {
+            // Resync-on-reconnect handler is wired in a later slice; ignore
+            // for now so the match stays exhaustive.
+            tracing::debug!("resync message ignored (handler wired in a later slice)");
         }
     }
 }
