@@ -39,6 +39,15 @@ struct Args {
     /// Enable DEBUG-level logging.
     #[arg(long)]
     verbose: bool,
+
+    /// Disable mDNS entirely: no service advertisement (so this daemon is
+    /// not discoverable) and no browsing (so it will not discover peers
+    /// either). Useful on networks with multicast filtering, or to rely
+    /// solely on a previously-paired peer's persisted address for redial.
+    /// Mirrors `DaemonConfig::disable_mdns`, previously settable only by
+    /// the in-process test harness.
+    #[arg(long)]
+    disable_mdns: bool,
 }
 
 #[tokio::main]
@@ -82,6 +91,7 @@ async fn main() -> Result<()> {
 
     let mut cfg = DaemonConfig::new(identity, args.udp_port, ipc_path.clone());
     cfg.udp_bind = args.udp_bind;
+    cfg.disable_mdns = args.disable_mdns;
     cfg.keystore_dir = Some(keystore_dir.clone());
     if let Some(name) = args.peer_name {
         cfg.peer_name_self = name;
@@ -98,13 +108,12 @@ async fn main() -> Result<()> {
                     if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
                         cfg.trusted_peer_keys.push(arr);
 
-                        // v0.1.1 Intelligence: if we have a last known address,
-                        // seed the transport's roaming history so we can probe it immediately.
-                        if let Some(addr_str) = &sp.last_addr {
-                            if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
-                                cfg.last_peer_addr = Some(addr);
-                            }
-                        }
+                        // Seeding the transport's per-peer redial address
+                        // from `sp.last_addr` happens in `driver::run` itself
+                        // (it independently reloads `peers.json` via
+                        // `load_trusted_peers` to build the trusted-peer
+                        // set, so it can seed every peer's address there,
+                        // not just the last one processed by this loop).
 
                         tracing::info!(
                             peer = %sp.name,

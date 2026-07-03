@@ -113,6 +113,14 @@ pub struct StoredPeer {
     pub peer_id_hex: String,
     pub static_pub_hex: String,
     pub name: String,
+    /// Last known remote `SocketAddr` this peer linked from, as a string
+    /// (`Display`-formatted, e.g. `"192.168.1.5:41889"`). Used as a
+    /// unicast redial hint at boot so re-linking to an already-paired
+    /// peer does not depend entirely on mDNS rediscovery. `#[serde(default)]`
+    /// because a `peers.json` written by a pre-existing binary (before this
+    /// field existed) lacks the key entirely — it must load as `None`, not
+    /// fail to parse.
+    #[serde(default)]
     pub last_addr: Option<String>,
 }
 
@@ -1123,6 +1131,66 @@ mod tests {
             },
         );
         assert_eq!(peers.len(), 2, "a distinct peer_id must be a new entry");
+    }
+
+    /// `StoredPeer` roundtrips through raw `serde_json` (not just via the
+    /// `save_peers`/`load_peers` file helpers) for both the `Some` and
+    /// `None` shapes of `last_addr`.
+    #[test]
+    fn stored_peer_serde_roundtrip_some_and_none() {
+        let with_addr = StoredPeer {
+            peer_id_hex: "aa".repeat(32),
+            static_pub_hex: "bb".repeat(32),
+            name: "Pixel 8".to_owned(),
+            last_addr: Some("192.168.1.5:41889".to_owned()),
+        };
+        let json = serde_json::to_string(&with_addr).expect("serialize Some(addr)");
+        let back: StoredPeer = serde_json::from_str(&json).expect("deserialize Some(addr)");
+        assert_eq!(back.last_addr.as_deref(), Some("192.168.1.5:41889"));
+        assert_eq!(back.name, "Pixel 8");
+
+        let without_addr = peer("iPad");
+        let json = serde_json::to_string(&without_addr).expect("serialize None");
+        let back: StoredPeer = serde_json::from_str(&json).expect("deserialize None");
+        assert_eq!(back.last_addr, None);
+    }
+
+    /// Downgrade-compat (old-file / new-binary direction): a `peers.json`
+    /// entry written before `last_addr` existed has no such key at all.
+    /// `#[serde(default)]` on the field must make this deserialize to
+    /// `None` rather than erroring "missing field last_addr".
+    #[test]
+    fn stored_peer_deserializes_old_format_missing_addr_field() {
+        let old_json = format!(
+            r#"{{"peer_id_hex":"{}","static_pub_hex":"{}","name":"Old Peer"}}"#,
+            "aa".repeat(32),
+            "bb".repeat(32)
+        );
+        let parsed: StoredPeer = serde_json::from_str(&old_json)
+            .expect("old-format JSON (no last_addr key) must still parse");
+        assert_eq!(parsed.last_addr, None);
+        assert_eq!(parsed.name, "Old Peer");
+    }
+
+    /// Downgrade-compat (new-file / old-binary direction, empirical check):
+    /// neither `StoredPeer` nor its container `PeersFile` derives
+    /// `#[serde(deny_unknown_fields)]` anywhere in the chain (unlike the
+    /// wire-protocol types in `fluxsync-proto`, which do), so a JSON blob
+    /// carrying a field this struct doesn't know about must be silently
+    /// ignored rather than a hard deserialize error. This is what makes an
+    /// OLD binary able to read a `peers.json` written by a NEWER one that
+    /// added a field after `last_addr`.
+    #[test]
+    fn stored_peer_deserialize_tolerates_unknown_fields() {
+        let json_with_extra_field = format!(
+            r#"{{"peer_id_hex":"{}","static_pub_hex":"{}","name":"New Peer","last_addr":null,"some_future_field":42}}"#,
+            "aa".repeat(32),
+            "bb".repeat(32)
+        );
+        let parsed: StoredPeer = serde_json::from_str(&json_with_extra_field)
+            .expect("unknown fields must be ignored, not hard-error");
+        assert_eq!(parsed.last_addr, None);
+        assert_eq!(parsed.name, "New Peer");
     }
 
     /// FS-053: a legacy 32-byte `identity.bin` round-trips through

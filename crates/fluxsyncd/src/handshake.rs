@@ -124,6 +124,11 @@ pub async fn run_initiator(
     // `None` for reconnects to an already-confirmed peer, which must not be
     // re-gated. Mirrors the responder's `newly_tofu`-only pending insert.
     pending: Option<PendingSet>,
+    // last_addr persistence + redial: looked up to build the
+    // `StoredPeer` write below; `None` `keystore_dir` (test harnesses with
+    // no on-disk persistence) makes the write a no-op.
+    trusted: TrustedSet,
+    keystore_dir: Option<std::path::PathBuf>,
 ) -> Result<()> {
     let (initiator, msg1) = Initiator::start(&identity, &peer_static_pub)?;
     transport
@@ -151,6 +156,7 @@ pub async fn run_initiator(
         return Ok(());
     }
     transport.set_peer_info(peer_id, peer_addr).await;
+    crate::driver::persist_last_addr(keystore_dir.as_deref(), &transport, &trusted, peer_id, peer_addr).await;
 
     // FS-052: insert the pending entry BEFORE announcing the link so the
     // outbound gate engages immediately. Mirrors the responder's insert
@@ -218,6 +224,10 @@ pub async fn run_rekey_initiator(
     event_tx: mpsc::Sender<Event>,
     peer_id: [u8; 32],
     expected_generation: u64,
+    // last_addr persistence + redial: see `run_initiator`'s
+    // matching params.
+    trusted: TrustedSet,
+    keystore_dir: Option<std::path::PathBuf>,
 ) -> Result<()> {
     let (initiator, msg1) = Initiator::start(&identity, &peer_static_pub)?;
     transport
@@ -241,6 +251,7 @@ pub async fn run_rekey_initiator(
         return Ok(());
     }
     transport.set_peer_info(peer_id, peer_addr).await;
+    crate::driver::persist_last_addr(keystore_dir.as_deref(), &transport, &trusted, peer_id, peer_addr).await;
     let _ = event_tx.try_send(Event::HandshakeOk);
     Ok(())
 }
@@ -438,6 +449,11 @@ pub async fn run_responder(
         return Ok(());
     }
     transport.set_peer_info(peer_id, from).await;
+    // last_addr persistence + redial: covers both the TOFU
+    // and already-trusted branches above in one place, since both funnel
+    // through this same post-install point.
+    crate::driver::persist_last_addr(keystore_dir.as_deref(), &transport, &trusted, peer_id, from)
+        .await;
     transport
         .send_typed(TYPE_HANDSHAKE_RESP, &msg2, from)
         .await?;

@@ -38,7 +38,6 @@ pub struct DaemonConfig {
     /// Used by the "State-Aware Boot" logic: if the daemon finds
     /// existing peers in `peers.json`, it starts syncing automatically.
     pub start_on: bool,
-    pub last_peer_addr: Option<SocketAddr>,
     pub test_pair: Option<TestPair>,
     /// Test injection: ADDITIONAL pre-paired peers beyond `test_pair`, used
     /// by the FluxMesh 3-node test to boot a daemon already linked to several
@@ -105,7 +104,6 @@ impl DaemonConfig {
             wall_clock: Arc::new(ChronoWallClock),
             disable_mdns: false,
             start_on: false,
-            last_peer_addr: None,
             test_pair: None,
             test_pairs: Vec::new(),
             test_pending_pair: None,

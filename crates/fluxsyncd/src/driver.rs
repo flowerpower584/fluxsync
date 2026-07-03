@@ -155,7 +155,6 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         disable_mdns,
         disable_clipboard,
         start_on,
-        last_peer_addr: _,
         test_pair,
         test_pairs,
         test_pending_pair,
@@ -262,13 +261,24 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // FS-039: persistent pairing. Reload the trusted set from
     // `peers.json` so a paired peer survives a daemon restart.
     let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
+    // Persisted redial hints (`last_addr` redial), collected
+    // alongside the trust reload below and applied to `transport` once it
+    // is bound (see the seed loop after `Transport::bind`). Relocated here
+    // (rather than reviving `main.rs`'s old per-peer parse into a single
+    // `DaemonConfig` field) because `run()` already independently reloads
+    // `peers.json` via `load_trusted_peers` to build `trusted` — this is
+    // the natural single place to also learn every peer's last address.
+    let mut last_known_addrs: Vec<([u8; 32], SocketAddr)> = Vec::new();
     if let Some(dir) = keystore_dir.as_ref() {
         let loaded = load_trusted_peers(dir);
         let count = loaded.len();
         {
             let mut g = trusted.lock().await;
-            for (peer_id, peer) in loaded {
+            for (peer_id, peer, last_addr) in loaded {
                 g.insert(peer_id, peer);
+                if let Some(addr) = last_addr {
+                    last_known_addrs.push((peer_id, addr));
+                }
             }
         }
         tracing::info!(count, "loaded trusted peers from keystore");
@@ -445,8 +455,18 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         );
     }
 
-    if let Some(addr) = cfg.last_peer_addr {
-        transport.set_peer_addr(addr).await;
+    // Seed the transport's per-peer reconnect cache from each trusted
+    // peer's persisted `last_addr` (collected above, alongside the trust
+    // reload). `set_peer_info` records both the address AND the peer id
+    // together, which is what lets the always-on proactive-probe redial
+    // (see `discovery_dispatcher`) recognize "no session yet, but we know
+    // who and where to try" immediately at boot — with zero mDNS
+    // involvement. If more than one trusted peer has a persisted address,
+    // the last one processed here wins the shared "primary" redial slot;
+    // this matches the rest of the driver's single-primary-peer reconnect
+    // model (see `Transport::cached_peer_addr`/`cached_peer_id`).
+    for (peer_id, addr) in last_known_addrs {
+        transport.set_peer_info(peer_id, addr).await;
     }
 
     // Inform App about trusted peers for UI hints.
@@ -590,6 +610,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let event_tx = event_tx.clone();
         let backoff = backoff.clone();
         let shutdown = shutdown.clone();
+        let kd = keystore_dir.clone();
         tasks.spawn(async move {
             rekey_watchdog(
                 identity,
@@ -600,17 +621,32 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 backoff,
                 rekey_max_age_ms,
                 rekey_max_bytes,
+                kd,
                 shutdown,
             )
             .await
         });
     }
 
-    // mDNS discovery (skipped in test mode or when disabled).
+    // mDNS discovery. The `discovery_dispatcher` task below is ALWAYS
+    // spawned, regardless of `disable_mdns` or test mode: it also drives
+    // the mDNS-independent proactive-probe redial (persisted `last_addr`
+    // seeded above + roaming history), which must keep working with mDNS
+    // fully off (`--disable-mdns` silences both directions,
+    // but redial-by-persisted-address must not depend on mDNS at all).
+    // Only the actual `discovery::start` call — binding a real
+    // `ServiceDaemon`, registering (making us discoverable), and browsing
+    // (making us discover others) — is gated: that is the "both
+    // directions of mDNS" this flag controls. When gated off, `disc_tx`
+    // is dropped immediately without ever being handed to a live mDNS
+    // daemon, so `discovery_dispatcher`'s `disc_rx.recv()` branch cleanly
+    // resolves to `None` (channel closed) forever after — `select!`
+    // treats a non-matching `Some(x) = ...` pattern as "not ready" and
+    // simply re-polls on the next loop iteration, so this never busy-loops.
     let mut _mdns_daemon = None;
     let we_are_test_mode = transport.has_session().await;
+    let (disc_tx, disc_rx) = mpsc::channel::<DiscoveryEvent>(DISCOVERY_CHANNEL_CAP);
     if !disable_mdns && !we_are_test_mode {
-        let (disc_tx, disc_rx) = mpsc::channel::<DiscoveryEvent>(DISCOVERY_CHANNEL_CAP);
         // mDNS must advertise (and egress on) the real LAN interface, not
         // 0.0.0.0. On multi-interface hosts (macOS awdl0/utunN) an
         // unspecified bind_ip makes mdns-sd announce on every interface and
@@ -643,26 +679,31 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                     bind_ip,
                     udp_port,
                 });
-                let identity = identity.clone();
-                let trusted = trusted.clone();
-                let transport = transport.clone();
-                let pending = pending_initiator_tx.clone();
-                let event_tx = event_tx.clone();
-                let shutdown = shutdown.clone();
-                let disc_cache = disc_cache.clone();
-                let backoff = backoff.clone();
-                tasks.spawn(async move {
-                    discovery_dispatcher(
-                        disc_rx, identity, trusted, transport, pending, event_tx, disc_cache,
-                        backoff, shutdown,
-                    )
-                    .await
-                });
             }
             Err(e) => {
                 tracing::warn!(error = %e, "mDNS unavailable; pairing requires --addr in pair-accept");
             }
         }
+    } else {
+        drop(disc_tx);
+    }
+    {
+        let identity = identity.clone();
+        let trusted = trusted.clone();
+        let transport = transport.clone();
+        let pending = pending_initiator_tx.clone();
+        let event_tx = event_tx.clone();
+        let shutdown = shutdown.clone();
+        let disc_cache = disc_cache.clone();
+        let backoff = backoff.clone();
+        let kd = keystore_dir.clone();
+        tasks.spawn(async move {
+            discovery_dispatcher(
+                disc_rx, identity, trusted, transport, pending, event_tx, disc_cache, backoff,
+                kd, shutdown,
+            )
+            .await
+        });
     }
 
     // Clipboard watcher (read side). Polls the OS clipboard every
@@ -2186,6 +2227,8 @@ async fn handle_driver_cmd(
                     // the initiator's verify screen gets its 6 words.
                     Some(pending_pairs.clone()),
                     backoff.clone(),
+                    trusted.clone(),
+                    keystore_dir.cloned(),
                 )
                 .await;
             }
@@ -2301,6 +2344,8 @@ async fn handle_driver_cmd(
                                 Some(pending_pairs.clone())
                             },
                             backoff.clone(),
+                            trusted.clone(),
+                            keystore_dir.cloned(),
                         )
                         .await;
                     }
@@ -2422,6 +2467,8 @@ async fn handle_driver_cmd(
                     Some(pending_pairs.clone())
                 },
                 backoff.clone(),
+                trusted.clone(),
+                keystore_dir.cloned(),
             )
             .await;
             CmdResponse::ok(req_id, None)
@@ -2726,15 +2773,24 @@ async fn transport_recv_loop(
                         // every frame. `peer_addr` updates on roam; comparing
                         // against `last_persisted_addr` collapses the steady-state
                         // heartbeat/clipboard stream to zero disk writes.
+                        //
+                        // last_addr persistence + redial: this is
+                        // the "peer address change" surface the transport exposes
+                        // — use the single-entry atomic upsert (`persist_last_addr`)
+                        // so this peer's `last_addr` is updated in place. The
+                        // previous implementation called `save_current_peers`
+                        // here, which rebuilds every `StoredPeer` purely from the
+                        // in-memory `TrustedPeer` (no address field) and so
+                        // unconditionally wrote `last_addr: None` for every
+                        // trusted peer on every roam — silently erasing the very
+                        // redial hint this call site exists to persist.
                         if last_persisted_addr != Some(from) {
                             if let Some(dir) = &keystore_dir {
                                 let current_p = transport.current_peer_addr().await;
                                 if current_p == Some(from) {
-                                    if let Err(e) = save_current_peers(dir, &trusted, &transport).await {
-                                        tracing::warn!(error = %e, "failed to persist roaming update");
-                                    } else {
-                                        last_persisted_addr = Some(from);
-                                    }
+                                    persist_last_addr(Some(dir), &transport, &trusted, peer_id, from)
+                                        .await;
+                                    last_persisted_addr = Some(from);
                                 }
                             }
                         }
@@ -3348,6 +3404,7 @@ async fn rekey_watchdog(
     backoff: BackoffMap,
     max_age_ms: u64,
     max_bytes: u64,
+    keystore_dir: Option<PathBuf>,
     shutdown: CancellationToken,
 ) -> Result<()> {
     let mut interval = tokio::time::interval(REKEY_CHECK_INTERVAL);
@@ -3407,6 +3464,8 @@ async fn rekey_watchdog(
                 let event_tx = event_tx.clone();
                 let backoff = backoff.clone();
                 let pending_initiator_tx = pending_initiator_tx.clone();
+                let trusted_for_rekey = trusted.clone();
+                let kd = keystore_dir.clone();
                 tokio::spawn(async move {
                     let result = handshake::run_rekey_initiator(
                         identity,
@@ -3417,6 +3476,8 @@ async fn rekey_watchdog(
                         event_tx,
                         peer_id,
                         expected_generation,
+                        trusted_for_rekey,
+                        kd,
                     )
                     .await;
                     match result {
@@ -3444,8 +3505,11 @@ async fn rekey_watchdog(
     }
 }
 
-/// Load the trusted-peer set from `peers.json` (FS-039); malformed entries are skipped with a warning.
-fn load_trusted_peers(dir: &Path) -> Vec<([u8; 32], TrustedPeer)> {
+/// Load the trusted-peer set from `peers.json` (FS-039); malformed entries
+/// are skipped with a warning. Also returns each entry's persisted
+/// last-known remote address (`last_addr` redial), best-effort parsed —
+/// missing or unparseable yields `None` rather than failing the whole boot.
+fn load_trusted_peers(dir: &Path) -> Vec<([u8; 32], TrustedPeer, Option<SocketAddr>)> {
     let stored = match crate::keystore::load_peers(dir) {
         Ok(s) => s,
         Err(e) => {
@@ -3474,12 +3538,20 @@ fn load_trusted_peers(dir: &Path) -> Vec<([u8; 32], TrustedPeer)> {
             continue;
         }
         let peer_id = handshake::peer_id_for(&static_pub);
+        let last_addr = p.last_addr.as_deref().and_then(|s| match s.parse::<SocketAddr>() {
+            Ok(a) => Some(a),
+            Err(e) => {
+                tracing::warn!(error = %e, peer = %p.peer_id_hex, addr = %s, "skipping unparseable last_addr");
+                None
+            }
+        });
         out.push((
             peer_id,
             TrustedPeer {
                 static_pub,
                 name: p.name,
             },
+            last_addr,
         ));
     }
     // H3: enforce the cap at load too. If a malicious or pre-fix
@@ -3499,20 +3571,40 @@ fn load_trusted_peers(dir: &Path) -> Vec<([u8; 32], TrustedPeer)> {
     out
 }
 
-/// Persist the current trusted-peer set to `peers.json` (FS-039).
+/// Persist the current trusted-peer set to `peers.json` (FS-039). Used by
+/// callers that rewrite the WHOLE set from the in-memory `TrustedSet`
+/// (Unpair, Revoke, `PairConfirm --reject`) rather than upserting one entry
+/// (contrast [`upsert_peer_persist`], used by the pair-insert paths, and
+/// [`persist_last_addr`], used on every completed handshake).
+///
+/// last_addr persistence: `TrustedPeer` carries no address
+/// field, so a naive rebuild would silently overwrite every surviving
+/// peer's `last_addr` with `None` on each of these operations. Preserve it
+/// by reading the existing on-disk record for each peer_id that survives
+/// the rewrite and carrying its `last_addr` forward; only a genuinely new
+/// entry (not found on disk) gets `None`.
 async fn save_current_peers(
     dir: &Path,
     trusted: &TrustedSet,
     _transport: &Transport,
 ) -> Result<()> {
+    let existing_addrs: HashMap<String, Option<String>> = crate::keystore::load_peers(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p.peer_id_hex, p.last_addr))
+        .collect();
     let stored: Vec<crate::keystore::StoredPeer> = {
         let g = trusted.lock().await;
         g.iter()
-            .map(|(peer_id, peer)| crate::keystore::StoredPeer {
-                peer_id_hex: hex::encode(peer_id),
-                static_pub_hex: hex::encode(peer.static_pub),
-                name: peer.name.clone(),
-                last_addr: None,
+            .map(|(peer_id, peer)| {
+                let peer_id_hex = hex::encode(peer_id);
+                let last_addr = existing_addrs.get(&peer_id_hex).cloned().flatten();
+                crate::keystore::StoredPeer {
+                    peer_id_hex,
+                    static_pub_hex: hex::encode(peer.static_pub),
+                    name: peer.name.clone(),
+                    last_addr,
+                }
             })
             .collect()
     };
@@ -3609,6 +3701,53 @@ pub(crate) async fn upsert_peer_persist(
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow!("upsert_peer_persist exhausted retries")))
+}
+
+/// Persist `peer_id`'s current remote address into its on-disk `StoredPeer`
+/// record (last_addr persistence + redial). This is the
+/// single chokepoint called from every path that completes a Noise
+/// handshake — fresh pairing (TOFU), an ordinary reconnect, and a planned
+/// rekey, both initiator and responder roles (see
+/// `handshake::run_initiator`, `handshake::run_rekey_initiator`, and
+/// `handshake::run_responder`) — so `peers.json`'s `last_addr` always
+/// reflects the most recently confirmed address. That, combined with
+/// `run()`'s boot-time seed of `Transport` from `load_trusted_peers`, is
+/// what lets a rebooted daemon redial an already-paired peer with zero
+/// mDNS involvement.
+///
+/// No-op when `keystore_dir` is `None` (in-process test harnesses with no
+/// on-disk persistence) or when `peer_id` is not (yet) in `trusted` — the
+/// latter should not happen for a handshake that just completed, but a
+/// stale invariant here must degrade to "skip the write", never panic.
+pub(crate) async fn persist_last_addr(
+    keystore_dir: Option<&Path>,
+    transport: &Transport,
+    trusted: &TrustedSet,
+    peer_id: [u8; 32],
+    addr: SocketAddr,
+) {
+    let Some(dir) = keystore_dir else { return };
+    let entry = { trusted.lock().await.get(&peer_id).cloned() };
+    let Some(entry) = entry else {
+        tracing::debug!(
+            peer = %hex::encode(&peer_id[..6]),
+            "persist_last_addr: peer not in trusted set yet; skipping"
+        );
+        return;
+    };
+    let stored = crate::keystore::StoredPeer {
+        peer_id_hex: hex::encode(peer_id),
+        static_pub_hex: hex::encode(entry.static_pub),
+        name: entry.name,
+        last_addr: Some(addr.to_string()),
+    };
+    if let Err(e) = upsert_peer_persist(dir, transport, stored).await {
+        tracing::warn!(
+            error = %e,
+            peer = %hex::encode(&peer_id[..6]),
+            "failed to persist last_addr after handshake"
+        );
+    }
 }
 
 /// Send an item Ack straight to the source peer. FluxMesh 2C-b: acks are a
@@ -4525,6 +4664,7 @@ async fn discovery_dispatcher(
     event_tx: mpsc::Sender<Event>,
     disc_cache: DiscoveryCache,
     backoff: BackoffMap,
+    keystore_dir: Option<PathBuf>,
     shutdown: CancellationToken,
 ) -> Result<()> {
     // DIR-P1-02: polled at the initial-backoff granularity (see
@@ -4533,7 +4673,23 @@ async fn discovery_dispatcher(
     // this often is cheap (in-memory lock reads only, no I/O unless a
     // dial is actually due) and matches the clipboard watcher's own
     // 200ms poll elsewhere in this file.
-    let mut interval = tokio::time::interval(Duration::from_millis(200));
+    //
+    // last_addr redial: the first tick is deliberately delayed (rather
+    // than firing immediately, `tokio::time::interval`'s default) so a
+    // fresh boot gives any imminent EXPLICIT reconnect command (PairAccept
+    // / PairFromUri / PairFromPin — e.g. a CLI-driven manual redial issued
+    // right after the IPC socket comes up) first claim on the single
+    // in-flight initiator slot (`pending_initiator_tx`), rather than
+    // racing it. Purely a fairness/ordering nicety: if nothing else claims
+    // the slot, this blind proactive redial still engages a few seconds
+    // later, which is negligible against the reconnect timescales already
+    // in play (heartbeat timeout alone is ~9s). Does not affect the
+    // separate, event-driven `DiscoveryEvent::Resolved` redial path below,
+    // which reacts immediately regardless of this timer.
+    let mut interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        Duration::from_millis(200),
+    );
     loop {
         tokio::select! {
             biased;
@@ -4568,8 +4724,27 @@ async fn discovery_dispatcher(
                             if !ready {
                                 continue;
                             }
-                            let history = transport.roaming_history_snapshot().await;
-                            for h_addr in history {
+                            // Redial candidate set (last_addr persistence +
+                            // redial): the transport's roaming history —
+                            // seeded at boot from the persisted `last_addr`
+                            // (see `run()`'s seed loop) and updated on every
+                            // confirmed handshake/roam — UNION any
+                            // still-fresh mDNS discovery-cache hint for this
+                            // peer, deduplicated by address. When mDNS is
+                            // disabled `disc_cache` simply stays empty, so
+                            // this reduces to the roaming-history-only set.
+                            let mut candidates = transport.roaming_history_snapshot().await;
+                            {
+                                let cache = disc_cache.lock().await;
+                                if let Some(hint) = cache.get(&id) {
+                                    if Instant::now().duration_since(hint.last_seen) < DISCOVERY_CACHE_TTL
+                                        && !candidates.contains(&hint.addr)
+                                    {
+                                        candidates.push(hint.addr);
+                                    }
+                                }
+                            }
+                            for h_addr in candidates {
                                 let id_clone = identity.clone();
                                 let static_pub = peer.static_pub;
                                 let peer_id_clone = id;
@@ -4578,6 +4753,8 @@ async fn discovery_dispatcher(
                                 let pending_tx = pending_initiator_tx.clone();
                                 let event_tx_clone = event_tx.clone();
                                 let backoff_clone = backoff.clone();
+                                let trusted_clone = trusted.clone();
+                                let kd = keystore_dir.clone();
 
                                 // [REMEDIATION] Proactive Probe Tie-break: only one side initiates.
                                 if id_clone.public_key() >= static_pub {
@@ -4602,6 +4779,8 @@ async fn discovery_dispatcher(
                                         event_tx_clone,
                                         None,
                                         backoff_clone,
+                                        trusted_clone,
+                                        kd,
                                     ).await;
                                 });
                             }
@@ -4700,6 +4879,8 @@ async fn discovery_dispatcher(
                             event_tx.clone(),
                             None,
                             backoff.clone(),
+                            trusted.clone(),
+                            keystore_dir.clone(),
                         ).await;
                     }
                     DiscoveryEvent::Removed { .. } => {
@@ -4733,6 +4914,8 @@ async fn start_initiator(
     event_tx: mpsc::Sender<Event>,
     pending: Option<PendingSet>,
     backoff: BackoffMap,
+    trusted: TrustedSet,
+    keystore_dir: Option<PathBuf>,
 ) {
     if addrs.is_empty() {
         return;
@@ -4772,6 +4955,8 @@ async fn start_initiator(
                 peer_id,
                 name.clone(),
                 pending.clone(),
+                trusted.clone(),
+                keystore_dir.clone(),
             )
             .await;
             match result {
@@ -5211,7 +5396,7 @@ mod tests {
                 peer_id_hex: hex::encode(peer_id),
                 static_pub_hex: hex::encode(static_pub),
                 name: "Galaxy S21".to_owned(),
-                last_addr: None,
+                last_addr: Some("10.0.0.7:41889".to_owned()),
             }],
         )
         .expect("persist peer to peers.json");
@@ -5219,10 +5404,15 @@ mod tests {
         let loaded = load_trusted_peers(dir.path());
 
         assert_eq!(loaded.len(), 1, "the persisted peer must reload");
-        let (id, peer) = &loaded[0];
+        let (id, peer, last_addr) = &loaded[0];
         assert_eq!(*id, peer_id, "peer_id must round-trip");
         assert_eq!(peer.static_pub, static_pub, "static_pub must round-trip");
         assert_eq!(peer.name, "Galaxy S21", "name must round-trip");
+        assert_eq!(
+            *last_addr,
+            Some("10.0.0.7:41889".parse().unwrap()),
+            "last_addr must parse and round-trip"
+        );
     }
 
     /// FS-026: the write side records `clipboard_dedup_hash(preview)` and

@@ -390,14 +390,24 @@ async fn confirm_pending(d: &Daemon, dur: Duration) {
 /// Returns `a`'s base32 static pubkey so a scenario can later drive an
 /// explicit reconnect-by-address (a repeat `PairAccept { addr }` on the
 /// already-confirmed peer — driver.rs's documented manual-reconnect
-/// path, which skips the pending gate). A scenario that restarts a
-/// daemon NEEDS this: every production `StoredPeer` write in driver.rs
-/// persists `last_addr: None`, so a freshly rebooted daemon has no
-/// unicast redial hint and automatic re-link depends entirely on mDNS —
-/// which is unreliable on macOS loopback (the in-process integration
-/// tests set `disable_mdns` for exactly that reason, and the real CLI
-/// binary has no such flag). Both facts are reported as gaps/requested
-/// hooks in docs/CHAOS.md rather than papered over with a flaky wait.
+/// path, which skips the pending gate).
+///
+/// UPDATE: `driver.rs` now persists each peer's `last_addr` on every
+/// completed handshake (`persist_last_addr`, reused by the initiator,
+/// rekey-initiator, and responder paths) and seeds `Transport` from it at
+/// boot, so a rebooted daemon on the SAME address/port (the real
+/// `fluxsyncd` binary's default — a fixed UDP port across restarts) now
+/// redials automatically with zero mDNS involvement; see
+/// `crates/fluxsyncd/tests/relink_via_persisted_last_addr.rs` for the
+/// deterministic in-process proof. `KILL9_RESTART` / `PORT_SQUAT` below
+/// still drive the reconnect explicitly rather than relying on that
+/// automatic path, because this harness restarts each daemon on a FRESH
+/// ephemeral port (deliberately, to dodge subprocess port-reuse timing on
+/// a real OS socket) — a real production restart on the default fixed
+/// port would not have that discontinuity. Automatic mDNS rediscovery is
+/// still unreliable on macOS loopback (the in-process integration tests
+/// set `disable_mdns` for exactly that reason, and the real CLI binary
+/// now has a matching `--disable-mdns` flag — see docs/CHAOS.md).
 async fn pair_daemons(a: &Daemon, b: &Daemon) -> String {
     let (_a_id, a_pub) = pair_show(a).await;
     let a_addr: SocketAddr = format!("127.0.0.1:{}", a.udp_port).parse().expect("addr");
@@ -539,12 +549,19 @@ async fn kill9_restart_resumes_without_duplicate_items() {
     // Reconnect is driven explicitly over IPC (repeat PairAccept with the
     // known loopback addr — the manual-reconnect path; `already_confirmed`
     // in driver.rs skips the pending gate for a trusted, non-pending
-    // peer). AUTOMATIC post-crash rediscovery is deliberately NOT
-    // asserted: peers.json's `last_addr` is always persisted as None, so
-    // a rebooted daemon has no unicast redial hint, and mDNS on macOS
-    // loopback is too unreliable to gate a deterministic harness on
-    // (validated empirically: the mDNS-dependent wait re-linked in run 1
-    // and timed out in run 2). Reported as a product gap in docs/CHAOS.md.
+    // peer). AUTOMATIC post-crash rediscovery is deliberately NOT asserted
+    // HERE: `peers.json`'s `last_addr` is now persisted for real (see
+    // `pair_daemons`'s doc comment above), but this harness restarts `b2`
+    // on a fresh ephemeral port rather than the real binary's default
+    // fixed port, so the persisted address from before the crash is
+    // already stale by construction — a deliberate harness property (dodge
+    // subprocess port-reuse timing), not a product gap. Automatic redial
+    // on an unchanged address/port is covered deterministically by
+    // `crates/fluxsyncd/tests/relink_via_persisted_last_addr.rs` instead.
+    // mDNS on macOS loopback is separately too unreliable to gate a
+    // deterministic harness on (validated empirically: the mDNS-dependent
+    // wait re-linked in run 1 and timed out in run 2) — that gap is
+    // unrelated to last_addr and still reported in docs/CHAOS.md.
     let a_addr: SocketAddr = format!("127.0.0.1:{port_a}").parse().expect("addr");
     pair_accept(&b2, a_pub, "a", a_addr).await;
 
@@ -840,14 +857,19 @@ async fn port_squat_clean_recovery_after_bind_failure() {
         "a2: ipc not up after squat released"
     );
 
-    // Same rationale as KILL9_RESTART: a restarted daemon has no unicast
-    // redial hint (last_addr is persisted as None) and `b`'s reconnect
-    // dispatcher only dials discovery-cache hints, so automatic re-link
-    // rides on mDNS — observed flaky on macOS loopback (this exact wait
-    // passed in two runs and timed out in a third). Drive the reconnect
-    // explicitly over IPC: `b` re-dials `a` at its known loopback addr
-    // (already-confirmed peer, so no pending gate). The gap is reported
-    // in docs/CHAOS.md, not papered over.
+    // `peers.json`'s `last_addr` is now persisted for real (see
+    // `pair_daemons`'s doc comment above) and `a2` here rebinds to the
+    // SAME `port_a` it squatted on before, so — unlike the ephemeral-port
+    // restarts in KILL9_RESTART/PORT_SQUAT's `b2` — the persisted address
+    // for `a` stays valid across this exact restart and `b`'s always-on
+    // proactive-probe redial (`discovery_dispatcher` in driver.rs) could
+    // in principle relink automatically. Still driven explicitly over IPC
+    // here to keep this assertion decoupled from mDNS's separate,
+    // observed-flaky-on-macOS-loopback timing (this exact wait passed in
+    // two runs and timed out in a third when it depended on mDNS) rather
+    // than re-deriving a new timing assumption for this harness. `b`
+    // re-dials `a` at its known loopback addr (already-confirmed peer, so
+    // no pending gate). See docs/CHAOS.md for the still-open mDNS gap.
     let a_addr: SocketAddr = format!("127.0.0.1:{port_a}").parse().expect("addr");
     pair_accept(&b, a_pub, "a", a_addr).await;
 

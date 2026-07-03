@@ -52,29 +52,36 @@ never log scraping.
 
 ## Known gaps this harness surfaces, not papers over
 
-### 1. No unicast redial hint after a restart
+### 1. No unicast redial hint after a restart — CLOSED
 
-Every production `StoredPeer` write in `driver.rs` persists
-`last_addr: None` — even though `main.rs` *reads* `last_addr` at boot and
-would seed the transport's roaming history from it. Net effect: a daemon
-that crashes and restarts has no address to redial its trusted peer at,
-and re-linking depends entirely on mDNS rediscovery. On macOS loopback,
-mDNS is unreliable enough that the harness observed both outcomes across
-two otherwise-identical runs (re-linked in ~10s in one, no link after 30s
-in the next).
+**Closed.** Every completed handshake (initiator, rekey-initiator, and
+responder — both fresh pairing and an ordinary reconnect) now persists the
+peer's current remote address into its `StoredPeer.last_addr` via a single
+reused helper (`persist_last_addr` in `driver.rs`), and `driver::run`
+seeds `Transport`'s per-peer redial cache from every trusted peer's
+persisted address at boot. An always-on background task
+(`discovery_dispatcher`'s proactive-probe arm) redials that address —
+merged with any live mDNS discovery-cache hint, deduplicated by address —
+whenever there is no live session, regardless of whether mDNS is enabled.
+See `crates/fluxsyncd/tests/relink_via_persisted_last_addr.rs` for the
+deterministic in-process proof: two daemons pair, restart one with the
+SAME identity/keystore/UDP port and mDNS disabled on both sides, and it
+relinks with zero explicit `PairAccept` and zero mDNS involvement.
 
-`KILL9_RESTART` and `PORT_SQUAT` therefore drive the reconnect
+`KILL9_RESTART` and `PORT_SQUAT` in this harness still drive the reconnect
 explicitly over IPC (a repeat `PairAccept { addr }` on the
-already-confirmed peer — the manual-reconnect path, no pending gate) and
-assert everything else (persistence, rehydration, session recovery,
-dedup) deterministically. The surviving peer's reconnect dispatcher only
-dials discovery-cache hints, so with mDNS silent it has nothing to dial
-either — both directions of automatic re-link are blocked on the same
-gap.
-The fix that would let the harness assert *automatic* crash recovery:
-persist the peer's last-seen socket address on link (the read side in
-`main.rs` already exists and is currently dead code). Flagged under
-"requested hooks" below.
+already-confirmed peer — the manual-reconnect path, no pending gate)
+rather than relying on the automatic path, because both scenarios restart
+the affected daemon on a FRESH ephemeral port (deliberate, to dodge
+subprocess port-reuse timing on a real OS socket) — a discontinuity the
+real binary's default fixed UDP port does not have. See the updated
+comments on `pair_daemons` and inside `KILL9_RESTART`/`PORT_SQUAT` for the
+per-scenario rationale. mDNS itself is a separate, still-open reliability
+concern, unrelated to `last_addr`: unreliable enough on macOS loopback
+that the harness observed both outcomes across two otherwise-identical
+runs (re-linked in ~10s in one, no link after 30s in the next) when a
+wait depended on it alone. Not pursued further here — the harness works
+around it (this section) rather than trying to fix mDNS's own reliability.
 
 ### 2. Closed (v0.6.x): resync-on-reconnect
 
@@ -151,12 +158,11 @@ on `driver.rs`:
 
 - **Resync-on-reconnect** — shipped, see "Closed (v0.6.x)" (known gap 2
   above); no longer a requested hook.
-- **Persist `last_addr` on link** (known gap 1 above) — the biggest
-  remaining one. The `main.rs` read
-  side already exists; populating it in driver.rs's `StoredPeer` writes
-  would make crash-restart re-link deterministic without mDNS, and would
-  let `KILL9_RESTART` assert fully automatic recovery instead of driving
-  the reconnect over IPC.
+- **Persist `last_addr` on link** — shipped, see "1. No unicast redial
+  hint after a restart — CLOSED" above; no longer a requested hook.
+  `KILL9_RESTART` / `PORT_SQUAT` still drive their reconnect over IPC, but
+  for a harness-specific reason (fresh ephemeral port per restart), not
+  because the mechanism is missing — see those scenarios' updated comments.
 - A `--disable-mdns` flag (or env var) on the real binary, mirroring
   `DaemonConfig::disable_mdns`: would make subprocess-level tests fully
   hermetic (today every harness daemon registers + browses real mDNS on
