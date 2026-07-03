@@ -35,6 +35,27 @@ let pairMethod = null; // 'qr' | 'pin' | null
 let pendingPeerId = null; // hex peer_id captured for pair_confirm
 let pinCountdownTimer = null;
 
+// TOFU placeholder the daemon projects into `peer_name` between handshake
+// completion and the `Msg::Hello` that carries the peer's real device name
+// (see `fluxsyncd::handshake::TOFU_PLACEHOLDER_NAME`). Never a real identity.
+const TOFU_PLACEHOLDER = 'New Peer';
+
+const PLATFORM_LABELS = {
+  macos: 'your Mac', windows: 'your PC', linux: 'your Linux device',
+  android: 'your Android phone', ios: 'your iPhone',
+};
+
+// Best display name for the peer we just paired with: a real Hello-carried
+// name beats a platform-derived phrase, which beats a bare "your device".
+// Never surfaces the TOFU placeholder or the "pending" sentinel — those are
+// mid-handshake bookkeeping values, not something a user should see.
+function friendlyPeerName(peerName, peerPlatform) {
+  const name = (peerName || '').trim();
+  if (name && name !== 'pending' && name !== TOFU_PLACEHOLDER) return name;
+  const platform = (peerPlatform || '').toLowerCase();
+  return PLATFORM_LABELS[platform] || 'your device';
+}
+
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => {
     s.classList.toggle('active', s.dataset.screen === name);
@@ -135,14 +156,47 @@ async function watchForPair() {
   });
 }
 
-function showPaired(peerName) {
-  $('paired-name').textContent = peerName || 'peer';
+function showPaired(peerName, peerPlatform) {
+  $('paired-name').textContent = friendlyPeerName(peerName, peerPlatform);
   $('paired-id').textContent = '';
   showScreen('paired');
   setTimeout(() => {
     try { getCurrentWindow().close(); } catch (_) {}
   }, 2200);
 }
+
+// Bug A: right after `pair_confirm`, the peer's real name may not have
+// landed yet (it arrives via `Msg::Hello`, asynchronously) — `showPaired`
+// above may only have a platform-derived guess. Re-render if a better name
+// shows up in a subsequent `state-update`.
+//
+// Bug B: this window is a single pre-declared WebView that gets hidden, not
+// destroyed, on close (see the Rust `CloseRequested` handler) — its DOM
+// survives across re-opens. Without this watchdog, re-opening the window
+// long after a real pairing (or after an unpair) replays whatever screen was
+// left on screen, e.g. a stale "Successfully paired" from hours earlier.
+// Gate strictly on the CURRENT screen being 'paired': this must never divert
+// an in-progress QR/PIN/verify flow, only correct/expire a terminal one.
+(async function watchPairedScreenAgainstState() {
+  await listen('state-update', (event) => {
+    const pairedScreen = document.querySelector('.screen[data-screen="paired"]');
+    if (!pairedScreen || !pairedScreen.classList.contains('active')) return;
+    const data = event.payload || {};
+    const peerName = data.peer_name || '';
+    const peerPlatform = data.peer_platform || '';
+    if (!peerName) {
+      // The peer this screen celebrated is gone (unpair, revoke, ghost
+      // timeout…) — an incidental state transition must not leave a false
+      // success screen on display. Route back to idle.
+      resetState();
+      showScreen('entry');
+      return;
+    }
+    const better = friendlyPeerName(peerName, peerPlatform);
+    const nameEl = $('paired-name');
+    if (nameEl && nameEl.textContent !== better) nameEl.textContent = better;
+  });
+})();
 
 async function generateQr() {
   const card = $('qr-card');
@@ -403,14 +457,17 @@ async function enterVerifyScreen(peerDisplayName) {
     try {
       const st = await invoke('fluxsync_status');
       const peerName = (st && st.data && st.data.peer_name) || '';
+      const peerPlatform = (st && st.data && st.data.peer_platform) || '';
       const phase = (st && st.data && st.data.phase) || '';
       // A real reconnect of an already-confirmed peer is LINKED with no
       // pending SAS — that alone is "paired". But a non-pending event while
       // merely discovering is a SPURIOUS 'pairing-success' from a half-open
       // / stale link: it must NOT fake success and swallow the QR the user
       // came to show. Stay on the QR (or entry) so pairing can actually run.
-      if (phase === 'linked' && peerName && peerName !== 'pending') {
-        showPaired(peerName);
+      // Also exclude the TOFU placeholder name: it means the handshake just
+      // completed and Hello hasn't landed yet, not a settled reconnect.
+      if (phase === 'linked' && peerName && peerName !== 'pending' && peerName !== TOFU_PLACEHOLDER) {
+        showPaired(peerName, peerPlatform);
         return;
       }
       showScreen(pairMethod === 'qr' ? 'show' : 'entry');
@@ -470,7 +527,18 @@ async function resolveVerify(accept) {
   try {
     await invoke('fluxsync_pair_confirm', { peerId: pendingPeerId, accept });
     if (accept) {
-      showPaired('your device');
+      // The real name arrives via `Msg::Hello`, asynchronously — by the time
+      // the user matched 6 SAS words it has very likely already landed in
+      // State. Fetch fresh rather than trust anything captured earlier in
+      // this flow (verify-screen entry only has the TOFU placeholder).
+      let peerName = '';
+      let peerPlatform = '';
+      try {
+        const st = await invoke('fluxsync_status');
+        peerName = (st && st.data && st.data.peer_name) || '';
+        peerPlatform = (st && st.data && st.data.peer_platform) || '';
+      } catch (_) {}
+      showPaired(peerName, peerPlatform);
     } else {
       resetState();
       showScreen('entry');
@@ -514,6 +582,10 @@ function setupUnpairButton() {
     try {
       await invoke('fluxsync_unpair');
       btn.textContent = 'Unpaired ✓';
+      // Never let a stale peer_id from the just-unpaired peer be reused by
+      // a subsequent pair_confirm (this screen is about to watch for a
+      // brand new pairing attempt).
+      pendingPeerId = null;
       await watchForPair();
       await generateQr();
     } catch (e) {

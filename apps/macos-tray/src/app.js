@@ -31,18 +31,6 @@ let unlistenState = null;
   if (selfMeta) selfMeta.textContent = osName + ' · this device';
 })();
 
-// DIR-P3-05: "Show in Dock" is a frontend-local pref cached in
-// localStorage; the OS is never told about it except when the Settings
-// toggle fires. Reconcile on every startup so a stale cache (e.g. the
-// daemon restarted, or the value was set before a crash) can't drift
-// from what the OS actually has. macOS-only — the command is a no-op
-// elsewhere, but skip the IPC round-trip entirely on other platforms.
-(function syncShowInDock() {
-  if (document.body.dataset.os !== 'macos') return;
-  const dock = localStorage.getItem('fs.showInDock') === '1';
-  invoke('fluxsync_set_show_in_dock', { value: dock }).catch(() => {});
-})();
-
 // ── Authoritative sync state (avoids DOM-as-source-of-truth race) ──
 let syncOn = false;
 let isToggling = false;

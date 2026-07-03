@@ -81,23 +81,6 @@ fn fluxsync_get_launch_at_login(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn fluxsync_set_show_in_dock(app: tauri::AppHandle, value: bool) {
-    // Dock visibility is a macOS-only concept. On Windows/Linux taskbar
-    // visibility is fixed by `skipTaskbar` in `tauri.conf.json`.
-    #[cfg(target_os = "macos")]
-    {
-        use tauri::ActivationPolicy;
-        let _ = app.set_activation_policy(if value {
-            ActivationPolicy::Regular
-        } else {
-            ActivationPolicy::Accessory
-        });
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (&app, value);
-}
-
-#[tauri::command]
 async fn fluxsync_unpair() -> Result<(), String> {
     ipc::one_shot(json!({"id": 1, "op": "unpair"}))
         .await
@@ -269,17 +252,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         // Window-close policy. The main "menu" window is the app's primary
-        // window (dock app): clicking its close button quits FluxSync. The
-        // auxiliary "settings"/"pair" windows just hide so they can be
-        // reopened (they are pre-declared once at boot).
+        // window: FluxSync is menu-bar-only (no Dock icon), so its close
+        // button never quits. The auxiliary "settings"/"pair" windows just
+        // hide so they can be reopened (they are pre-declared once at boot).
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // Dock app: the close button never quits. The primary
-                // "menu" window parks off-screen (hide_menu keeps the
-                // WKWebView painted so re-show is instant, not white); the
-                // auxiliary windows just hide. Quit via Cmd-Q or the tray
-                // menu. Clicking the Dock icon re-shows the menu window
-                // (see RunEvent::Reopen in run()).
+                // The close button never quits. The primary "menu" window
+                // hides via `hide_menu` (NSApp hide keeps the WKWebView
+                // painted so re-show is instant, not white); the auxiliary
+                // windows just hide. Quit via Cmd-Q or the tray menu.
                 if window.label() == "menu" {
                     hide_menu(window.app_handle());
                 } else {
@@ -312,7 +293,6 @@ pub fn run() {
             fluxsync_open_settings,
             fluxsync_set_launch_at_login,
             fluxsync_get_launch_at_login,
-            fluxsync_set_show_in_dock,
             fluxsync_unpair,
             fluxsync_revoke_peer,
             fluxsync_set_firewall,
@@ -321,19 +301,18 @@ pub fn run() {
             fluxsync_open_url,
         ])
         .setup(|app| {
-            // Regular dock app: the main "menu" window is a normal
-            // decorated window (see tauri.conf.json) that shows on launch
-            // and lives in the Dock. The "Show in Dock" setting can flip
-            // to Accessory at runtime for users who want a menu-bar-only
-            // presence (see `fluxsync_set_show_in_dock`).
-            //
-            // Force Regular explicitly: depending on how the bundle is
-            // launched (LaunchAgent autostart, stale Accessory state) the
-            // Dock icon can otherwise go missing. This guarantees it shows.
+            // Menu-bar-only app: FluxSync never shows a Dock icon. Force
+            // Accessory explicitly at boot — depending on how the bundle is
+            // launched (LaunchAgent autostart, stale activation-policy
+            // state) the OS can otherwise default to Regular. This is not
+            // a user preference; it's a fixed product decision (2026-07-03).
+            // The bundled release .app also sets `LSUIElement` in its
+            // `Info.plist` (see `src-tauri/Info.plist`) so this holds even
+            // before Tauri's own setup runs.
             #[cfg(target_os = "macos")]
             {
                 use tauri::ActivationPolicy;
-                let _ = app.handle().set_activation_policy(ActivationPolicy::Regular);
+                let _ = app.handle().set_activation_policy(ActivationPolicy::Accessory);
             }
 
             // Make the tray app self-sufficient: probe the daemon's
@@ -413,17 +392,30 @@ pub fn run() {
                         // fresh transition (fixes "can't scan after reset").
                         // Emitting on every name *change* caused the premature
                         // "Successfully paired" with no scan.
+                        //
+                        // TOFU_PLACEHOLDER: the daemon projects `peer_name` as
+                        // the literal "New Peer" placeholder (see
+                        // `fluxsyncd::handshake::TOFU_PLACEHOLDER_NAME`) the
+                        // instant the handshake completes — before the peer's
+                        // `Msg::Hello` lands with its real device name. That
+                        // placeholder is NOT a confirmed identity, so it must
+                        // not get "locked in" as the final paired name: keep
+                        // it in the same bucket as empty/"pending" so the
+                        // follow-up transition (placeholder → real name) is
+                        // still treated as fresh and re-fires with the
+                        // correct name once Hello lands.
+                        const TOFU_PLACEHOLDER: &str = "New Peer";
                         {
                             let mut guard = ln.lock().unwrap();
                             if name.is_empty() {
                                 // Unpaired / session reset → re-arm.
                                 *guard = None;
-                            } else if name == "pending" {
+                            } else if name == "pending" || name == TOFU_PLACEHOLDER {
                                 *guard = Some(name.clone());
                             } else {
                                 let was_unpaired = match &*guard {
                                     None => true,
-                                    Some(p) => p.is_empty() || p == "pending",
+                                    Some(p) => p.is_empty() || p == "pending" || p == TOFU_PLACEHOLDER,
                                 };
                                 *guard = Some(name.clone());
                                 if was_unpaired {
@@ -582,9 +574,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
-            // macOS: clicking the Dock icon while the menu window is parked
-            // off-screen (or the app has no visible window) fires Reopen.
-            // Bring the menu window back on-screen, centred and focused.
+            // macOS: relaunching FluxSync while it's already running (e.g.
+            // via Finder/Spotlight/`open -a`) while the menu window is
+            // hidden fires Reopen even though there's no Dock icon to
+            // click. Bring the menu window back on-screen, centred and
+            // focused.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = &_event {
                 show_menu(_app);
@@ -604,9 +598,9 @@ const MENU_H: f64 = 540.0;
 
 // macOS only: tracks whether the menu window is logically shown, so the
 // tray-icon click can toggle it. We use a real `hide()` (not off-screen
-// parking): a Dock app must have ZERO visible windows when dismissed,
-// otherwise clicking the Dock icon won't fire `RunEvent::Reopen` and the
-// window can never be brought back.
+// parking): with zero visible windows, `RunEvent::Reopen` (tray relaunch,
+// see above) can bring the window back; an off-screen-parked window would
+// still count as visible and skip that path.
 #[cfg(target_os = "macos")]
 static MENU_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
@@ -636,8 +630,8 @@ fn show_menu(app: &tauri::AppHandle) {
 
 /// Dismiss the menu cleanly. macOS: `NSApp hide` keeps the WKWebView
 /// composited (no white repaint on re-show) and leaves zero visible
-/// windows, so the tray click / Dock icon re-shows via `show_menu` /
-/// `RunEvent::Reopen`. Unlike the old off-screen park, this is a real
+/// windows, so the tray click re-shows via `show_menu` (or a relaunch via
+/// `RunEvent::Reopen`). Unlike the old off-screen park, this is a real
 /// hide — the red close button actually tucks the app to the menu bar.
 fn hide_menu(app: &tauri::AppHandle) {
     #[cfg(target_os = "macos")]

@@ -645,6 +645,13 @@ impl App {
             Event::ManualUnpair => {
                 self.state.on = false;
                 self.state.peer_name.clear();
+                // Bug: peer_platform/peer_caps used to survive an unpair
+                // (unlike the UntrustedPeerSeen/GhostTimeout siblings below,
+                // which already clear them). A stale "android"/"ios" lingered
+                // in State after unpairing, which a client could misread as
+                // still having a peer.
+                self.state.peer_platform.clear();
+                self.state.peer_caps.clear();
                 self.state.peer_id = [0u8; 32];
                 self.state.trusted_peer_name = None;
                 self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"

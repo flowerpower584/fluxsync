@@ -71,6 +71,9 @@
     ],
     "category": "Utility",
     "shortDescription": "Universal clipboard, local-first, peer-to-peer.",
-    "longDescription": "FluxSync mirrors your clipboard between paired devices on the same Wi-Fi. End-to-end encrypted with Noise IK + ChaCha20-Poly1305. No servers, no accounts."
+    "longDescription": "FluxSync mirrors your clipboard between paired devices on the same Wi-Fi. End-to-end encrypted with Noise IK + ChaCha20-Poly1305. No servers, no accounts.",
+    "macOS": {
+      "infoPlist": "Info.plist"
+    }
   }
 }

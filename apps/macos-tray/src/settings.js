@@ -12,10 +12,6 @@ const { listen } = window.__TAURI__.event;
   const deviceLabel = { windows: 'PC', macos: 'Mac', linux: 'Linux' }[os] || 'device';
   const sub = document.getElementById('general-subtitle');
   if (sub) sub.textContent = `How FluxSync behaves on this ${deviceLabel}.`;
-  if (os !== 'macos') {
-    const row = document.getElementById('row-show-in-dock');
-    if (row) row.style.display = 'none';
-  }
 })();
 
 let currentTab = 'general';
@@ -89,12 +85,6 @@ function updateUI(s) {
 
   // Daemon-backed toggle: charge_override now lives on State.
   document.getElementById('opt-resume-on-charge').classList.toggle('on', !!s.charge_override);
-
-  // Show in Dock stays a frontend-local pref (the daemon doesn't track
-  // it); localStorage hydrates the visual state across reloads. Launch
-  // at login is real OS autostart — queried separately, not cached here.
-  const dock = localStorage.getItem('fs.showInDock') === '1';
-  document.getElementById('opt-show-in-dock').classList.toggle('on', dock);
 
   // Telemetry pane — pulls everything from `s.metrics` if present.
   const m = s.metrics || null;
@@ -256,20 +246,6 @@ document.getElementById('opt-launch-at-login').addEventListener('click', async (
     await invoke('fluxsync_set_launch_at_login', { value: isNowOn });
   } catch (err) {
     btn.classList.toggle('on', !isNowOn);
-    showToast(`Couldn't update preference: ${err}`);
-  }
-});
-
-document.getElementById('opt-show-in-dock').addEventListener('click', async () => {
-  const btn = document.getElementById('opt-show-in-dock');
-  const isNowOn = !btn.classList.contains('on');
-  btn.classList.toggle('on', isNowOn);
-  localStorage.setItem('fs.showInDock', isNowOn ? '1' : '0');
-  try {
-    await invoke('fluxsync_set_show_in_dock', { value: isNowOn });
-  } catch (err) {
-    btn.classList.toggle('on', !isNowOn);
-    localStorage.setItem('fs.showInDock', !isNowOn ? '1' : '0');
     showToast(`Couldn't update preference: ${err}`);
   }
 });
