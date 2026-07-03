@@ -147,6 +147,11 @@ pub struct ConnectionMetrics {
     /// (`Action::WriteClipboard`) after arriving from a peer.
     #[serde(default)]
     pub items_received: u64,
+    /// resync-1: items actually re-sent while serving a peer's
+    /// `Msg::ResyncPull` (one per item found in our outbox and re-sent, not
+    /// per requested hash — a hash we don't hold is silently skipped).
+    #[serde(default)]
+    pub items_resynced: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

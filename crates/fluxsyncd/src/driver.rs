@@ -35,6 +35,7 @@ use anyhow::{anyhow, Context, Result};
 use base32::Alphabet;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use crate::history_store::{self, VaultEntry};
+use crate::outbox::{Entry as OutboxEntry, Outbox};
 use crate::seq_store::SeqStore;
 use fluxsync_core::{
     dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, DeviceId, Event, EventId,
@@ -43,8 +44,8 @@ use fluxsync_core::{
 use fluxsync_crypto::gen_pair_pin;
 use fluxsync_crypto::{fingerprint, Identity};
 use fluxsync_proto::{
-    negotiate_caps, ClipboardItem, Frame, Kind, Msg, MAX_CHUNK_DATA, MAX_PAYLOAD, PROTOCOL_VERSION,
-    SUPPORTED_CAPS,
+    negotiate_caps, ClipboardItem, Frame, Kind, Msg, ResyncOffer, ResyncPull, MAX_CHUNK_DATA,
+    MAX_PAYLOAD, MAX_RESYNC_HASHES, PROTOCOL_VERSION, SUPPORTED_CAPS,
 };
 use hex;
 use std::collections::BTreeMap;
@@ -371,6 +372,12 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // Written by the recv loop (every peer's Hello/Battery), read at EmitState.
     let peer_meta: PeerMetaMap = Arc::new(Mutex::new(BTreeMap::new()));
 
+    // Resync-on-reconnect (resync-1): recent non-sensitive outbound/inbound
+    // items, kept just long enough to re-offer to a peer that reconnects
+    // after missing them. Written on SendItem and on first-sight reception,
+    // read to build a ResyncOffer and to serve a ResyncPull.
+    let outbox: SharedOutbox = Arc::new(Mutex::new(Outbox::new()));
+
     // ── Test path: install session + jump to Linked ────────────────
     if let Some(tp) = test_pair {
         let TestPair {
@@ -496,6 +503,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let peer_meta_for_recv = peer_meta.clone();
         let disc_cache_for_recv = disc_cache.clone();
         let backoff_for_recv = backoff.clone();
+        let outbox_for_recv = outbox.clone();
+        let state_rx_for_recv = state_watch_tx.subscribe();
         tasks.spawn(async move {
             transport_recv_loop(
                 transport,
@@ -514,6 +523,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 disc_cache_for_recv,
                 backoff_for_recv,
                 lan_only_handshakes,
+                outbox_for_recv,
+                state_rx_for_recv,
             )
             .await
         });
@@ -761,7 +772,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 if !actions.is_empty() {
                     tracing::debug!(?event, ?actions, phase=?app.snapshot().phase, "FSM transition");
                 }
-                dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta, &mut seq_store).await;
+                dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta, &outbox, &mut seq_store).await;
             }
             Some(driver_cmd) = cmd_rx.recv() => {
                 match driver_cmd {
@@ -780,7 +791,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &*wall_clock,
                         );
                         let actions = gate_outbound(actions, &transport, &pending_pairs).await;
-                        dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta, &mut seq_store).await;
+                        dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta, &outbox, &mut seq_store).await;
                     }
                     run_cmd @ DriverCmd::Run { .. } => {
                         handle_driver_cmd(
@@ -809,6 +820,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &backoff,
                             &mdns_ctx,
                             &shutdown,
+                            &outbox,
                             &mut seq_store,
                         ).await;
                     }
@@ -889,6 +901,7 @@ async fn dispatch(
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
     peer_meta: &PeerMetaMap,
+    outbox: &SharedOutbox,
     seq_store: &mut Option<SeqStore>,
 ) {
     for action in actions {
@@ -977,6 +990,22 @@ async fn dispatch(
                 if frames.is_empty() {
                     tracing::error!("SendItem: nothing to send (encode failed)");
                 } else {
+                    // Resync-on-reconnect (resync-1): keep a resend copy so a
+                    // peer that reconnects later can be offered this item.
+                    // Sensitive items must never enter the outbox (see
+                    // `crate::outbox`'s security invariant).
+                    if !sensitive {
+                        outbox.lock().await.insert(
+                            hash,
+                            OutboxEntry {
+                                payload: payload.clone(),
+                                kind,
+                                origin,
+                                seq: event_seq,
+                                created: Instant::now(),
+                            },
+                        );
+                    }
                     // FluxMesh 2C-b: fan the item out to every linked peer.
                     let targets = transport.linked_peer_ids().await;
                     if targets.is_empty() {
@@ -1218,6 +1247,7 @@ async fn ensure_online(
     metrics: &Arc<Mutex<MetricsTracker>>,
     inflight: &InflightMap,
     peer_meta: &PeerMetaMap,
+    outbox: &SharedOutbox,
     seq_store: &mut Option<SeqStore>,
 ) {
     if app.snapshot().on {
@@ -1237,6 +1267,7 @@ async fn ensure_online(
         metrics,
         inflight,
         peer_meta,
+        outbox,
         seq_store,
     )
     .await;
@@ -1273,6 +1304,7 @@ async fn handle_driver_cmd(
     backoff: &BackoffMap,
     mdns_ctx: &MdnsCtx,
     shutdown: &CancellationToken,
+    outbox: &SharedOutbox,
     seq_store: &mut Option<SeqStore>,
 ) {
     let DriverCmd::Run { op, reply, req_id } = cmd else {
@@ -1311,6 +1343,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -1340,6 +1373,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -1365,6 +1399,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -1418,6 +1453,7 @@ async fn handle_driver_cmd(
                     metrics,
                     inflight,
                     peer_meta,
+                    outbox,
                     seq_store,
                 )
                 .await;
@@ -1467,6 +1503,7 @@ async fn handle_driver_cmd(
                             metrics,
                             inflight,
                             peer_meta,
+                            outbox,
                             seq_store,
                         )
                         .await;
@@ -1539,6 +1576,7 @@ async fn handle_driver_cmd(
                     metrics,
                     inflight,
                     peer_meta,
+                    outbox,
                     seq_store,
                 )
                 .await;
@@ -1572,6 +1610,7 @@ async fn handle_driver_cmd(
                     metrics,
                     inflight,
                     peer_meta,
+                    outbox,
                     seq_store,
                 )
                 .await;
@@ -1604,6 +1643,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -1676,6 +1716,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -1701,6 +1742,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -1721,6 +1763,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -1806,6 +1849,7 @@ async fn handle_driver_cmd(
                     metrics,
                     inflight,
                     peer_meta,
+                    outbox,
                     seq_store,
                 )
                 .await;
@@ -1904,6 +1948,7 @@ async fn handle_driver_cmd(
                     metrics,
                     inflight,
                     peer_meta,
+                    outbox,
                     seq_store,
                 )
                 .await;
@@ -1990,6 +2035,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -2116,6 +2162,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -2229,6 +2276,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -2355,6 +2403,7 @@ async fn handle_driver_cmd(
                 metrics,
                 inflight,
                 peer_meta,
+                outbox,
                 seq_store,
             )
             .await;
@@ -2422,6 +2471,8 @@ async fn transport_recv_loop(
     disc_cache: DiscoveryCache,
     backoff: BackoffMap,
     lan_only_handshakes: bool,
+    outbox: SharedOutbox,
+    state_rx: watch::Receiver<State>,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
     let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
@@ -2670,7 +2721,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &backoff, &peer_meta, keystore_dir.as_ref()).await,
+                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &backoff, &peer_meta, keystore_dir.as_ref(), &outbox, &state_rx).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -3715,12 +3766,29 @@ async fn complete_reassembled_item(
     sensitive: bool,
     lamport: u64,
     payload: Vec<u8>,
+    outbox: &SharedOutbox,
 ) {
     ack_source(transport, source, hash).await;
     let eid = EventId::new(DeviceId::from(origin), event_seq);
     if !mesh_seen.lock().await.observe(eid) {
         // Already seen this item on the mesh — don't re-apply or re-loop it.
         return;
+    }
+    // Resync-on-reconnect (resync-1): first sight of this item — keep a
+    // resend copy under its original (origin, seq) so it can later be
+    // offered to a peer that reconnects after missing it. Sensitive items
+    // must never enter the outbox (see `crate::outbox`'s security invariant).
+    if !sensitive {
+        outbox.lock().await.insert(
+            hash,
+            OutboxEntry {
+                payload: payload.clone(),
+                kind,
+                origin,
+                seq: event_seq,
+                created: Instant::now(),
+            },
+        );
     }
     let frames = build_item_frames(lamport, hash, kind, &payload, sensitive, origin, event_seq);
     forward_frames(transport, inflight, source, origin, hash, frames).await;
@@ -3733,6 +3801,53 @@ async fn complete_reassembled_item(
         sensitive,
         lamport,
     });
+}
+
+/// resync-1: build a `ResyncOffer` from our own outbox's held hashes
+/// (already newest-first per `Outbox::hashes`), hex-encoding each for the
+/// wire. Factored out of the `Msg::Hello` handler so it's unit-testable
+/// without a live `Outbox`/transport.
+fn build_resync_offer(outbox_hashes: &[[u8; 32]]) -> ResyncOffer {
+    ResyncOffer {
+        hashes: outbox_hashes.iter().map(hex::encode).collect(),
+    }
+}
+
+/// resync-1: which hashes a peer offered that we do not already hold,
+/// preserving the offer's order and capped at `MAX_RESYNC_HASHES` (already
+/// guaranteed by the codec on `offered`, but kept defensive here too since
+/// this helper has no codec of its own to rely on). "Held" means present in
+/// our clipboard history OR our own outbox.
+fn missing_resync_hashes(
+    offered: &[String],
+    history_hashes: &[String],
+    outbox_hashes: &[String],
+) -> Vec<String> {
+    offered
+        .iter()
+        .filter(|h| !history_hashes.iter().any(|x| x == *h) && !outbox_hashes.iter().any(|x| x == *h))
+        .take(MAX_RESYNC_HASHES)
+        .cloned()
+        .collect()
+}
+
+/// resync-1 defense in depth: the codec already validates a `ResyncOffer` /
+/// `ResyncPull`'s shape and bounds, but a message must also come from a
+/// currently linked peer that negotiated the `resync-1` capability with US
+/// specifically — not just any peer that happens to claim it.
+async fn resync_authorized(
+    transport: &Arc<Transport>,
+    peer_meta: &PeerMetaMap,
+    peer_id: [u8; 32],
+) -> bool {
+    if !transport.linked_peer_ids().await.contains(&peer_id) {
+        return false;
+    }
+    peer_meta
+        .lock()
+        .await
+        .get(&peer_id)
+        .is_some_and(|m| m.caps.iter().any(|c| c == "resync-1"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3751,6 +3866,8 @@ async fn dispatch_inbound_frame(
     backoff: &BackoffMap,
     peer_meta: &PeerMetaMap,
     keystore_dir: Option<&std::path::PathBuf>,
+    outbox: &SharedOutbox,
+    state_rx: &watch::Receiver<State>,
 ) {
     // FS-052 strict gate (VULN-002 fix): if the active session's peer
     // landed via TOFU and has not been verbally confirmed yet, drop all
@@ -3818,7 +3935,7 @@ async fn dispatch_inbound_frame(
 
                     complete_reassembled_item(
                         transport, inflight, mesh_seen, event_tx, peer_id, origin, event_seq,
-                        item.hash, kind, sensitive, lamport, full_payload,
+                        item.hash, kind, sensitive, lamport, full_payload, outbox,
                     )
                     .await;
                 }
@@ -3831,6 +3948,23 @@ async fn dispatch_inbound_frame(
                 let eid = EventId::new(DeviceId::from(item.origin), item.event_seq);
                 let first_sight = mesh_seen.lock().await.observe(eid);
                 if first_sight {
+                    // Resync-on-reconnect (resync-1): keep a resend copy of
+                    // this first-sight item too — most clipboard items are
+                    // small enough to arrive as a single `ClipboardItem`
+                    // frame and never touch `complete_reassembled_item`
+                    // (that path only runs for chunked/reassembled items).
+                    if !item.sensitive {
+                        outbox.lock().await.insert(
+                            item.hash,
+                            OutboxEntry {
+                                payload: item.payload.clone(),
+                                kind: item.kind,
+                                origin: item.origin,
+                                seq: item.event_seq,
+                                created: Instant::now(),
+                            },
+                        );
+                    }
                     if let Ok(bytes) = fluxsync_proto::encode(&Frame {
                         version: PROTOCOL_VERSION,
                         msg: Msg::ClipboardItem(item.clone()),
@@ -3906,7 +4040,7 @@ async fn dispatch_inbound_frame(
 
                 complete_reassembled_item(
                     transport, inflight, mesh_seen, event_tx, peer_id, origin, event_seq,
-                    c.item_id, kind, sensitive, lamport, full_payload,
+                    c.item_id, kind, sensitive, lamport, full_payload, outbox,
                 )
                 .await;
             }
@@ -4099,6 +4233,27 @@ async fn dispatch_inbound_frame(
                     let _ = event_tx.try_send(Event::MeshPeersChanged);
                 }
             }
+            // resync-1: offer our outbox to this peer once negotiated. Hello
+            // arrives exactly once per session establishment (rekey never
+            // re-sends it), so this can't spam a peer with repeated offers.
+            if caps.iter().any(|c| c == "resync-1") {
+                let hashes = outbox.lock().await.hashes();
+                if !hashes.is_empty() {
+                    let offer = build_resync_offer(&hashes);
+                    tracing::info!(
+                        peer = ?&peer_id[..6],
+                        count = offer.hashes.len(),
+                        "resync-1: sending ResyncOffer"
+                    );
+                    let frame = Frame {
+                        version: PROTOCOL_VERSION,
+                        msg: Msg::ResyncOffer(offer),
+                    };
+                    if let Ok(bytes) = fluxsync_proto::encode(&frame) {
+                        let _ = transport.send_encrypted_to(peer_id, &bytes).await;
+                    }
+                }
+            }
             // peer_id is whoever's session decrypted this Hello — always the
             // real id, no all-zero sentinel that would bypass the FSM
             // peer-mismatch check. FluxMesh 2C-b: only the primary peer's
@@ -4118,10 +4273,96 @@ async fn dispatch_inbound_frame(
                 let _ = event_tx.try_send(Event::PeerCaps { caps });
             }
         }
-        Msg::ResyncOffer(_) | Msg::ResyncPull(_) => {
-            // Resync-on-reconnect handler is wired in a later slice; ignore
-            // for now so the match stays exhaustive.
-            tracing::debug!("resync message ignored (handler wired in a later slice)");
+        Msg::ResyncOffer(offer) => {
+            if !resync_authorized(transport, peer_meta, peer_id).await {
+                tracing::debug!(
+                    peer = ?&peer_id[..6],
+                    "resync-1: ignoring ResyncOffer (peer not linked or cap not negotiated)"
+                );
+                return;
+            }
+            let history_hashes: Vec<String> = state_rx
+                .borrow()
+                .history
+                .iter()
+                .map(|h| h.hash.clone())
+                .collect();
+            let outbox_hashes: Vec<String> =
+                outbox.lock().await.hashes().iter().map(hex::encode).collect();
+            let missing = missing_resync_hashes(&offer.hashes, &history_hashes, &outbox_hashes);
+            if !missing.is_empty() {
+                tracing::info!(
+                    peer = ?&peer_id[..6],
+                    count = missing.len(),
+                    "resync-1: sending ResyncPull"
+                );
+                let frame = Frame {
+                    version: PROTOCOL_VERSION,
+                    msg: Msg::ResyncPull(ResyncPull { hashes: missing }),
+                };
+                if let Ok(bytes) = fluxsync_proto::encode(&frame) {
+                    let _ = transport.send_encrypted_to(peer_id, &bytes).await;
+                }
+            }
+        }
+        Msg::ResyncPull(pull) => {
+            if !resync_authorized(transport, peer_meta, peer_id).await {
+                tracing::debug!(
+                    peer = ?&peer_id[..6],
+                    "resync-1: ignoring ResyncPull (peer not linked or cap not negotiated)"
+                );
+                return;
+            }
+            tracing::info!(
+                peer = ?&peer_id[..6],
+                count = pull.hashes.len(),
+                "resync-1: received ResyncPull"
+            );
+            let mut served = 0usize;
+            for hex_hash in pull.hashes.iter().take(MAX_RESYNC_HASHES) {
+                let Ok(hash) = decode_hex32(hex_hash) else {
+                    tracing::debug!(peer = ?&peer_id[..6], "resync-1: malformed hash in ResyncPull, skipping");
+                    continue;
+                };
+                let Some(entry) = outbox.lock().await.get(hash).cloned() else {
+                    // Not (or no longer) held — silently skip, no error.
+                    continue;
+                };
+                // Lamport 0: `Entry` doesn't retain the original tick, and 0
+                // is a safe no-op for the receiver's `LamportClock::observe`
+                // (it only ever advances the clock forward via `max`).
+                let frames =
+                    build_item_frames(0, hash, entry.kind, &entry.payload, false, entry.origin, entry.seq);
+                if frames.is_empty() {
+                    continue;
+                }
+                let multi = frames.len() > 1;
+                for (i, bytes) in frames.iter().enumerate() {
+                    let _ = transport.send_encrypted_to(peer_id, bytes).await;
+                    if multi && (i + 1) % 16 == 0 {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                }
+                inflight.lock().await.insert(
+                    hash,
+                    Inflight {
+                        frames,
+                        attempts: 0,
+                        last_sent: Instant::now(),
+                        first_sent: Instant::now(),
+                        pending_peers: std::iter::once(peer_id).collect(),
+                    },
+                );
+                metrics.lock().await.on_item_resynced();
+                served += 1;
+            }
+            if served > 0 {
+                tracing::info!(
+                    peer = ?&peer_id[..6],
+                    count = served,
+                    "resync-1: served ResyncPull"
+                );
+            }
         }
     }
 }
@@ -4161,6 +4402,11 @@ struct Inflight {
 
 /// Map of clipboard items sent but not yet acked, keyed by item hash.
 type InflightMap = Arc<Mutex<HashMap<[u8; 32], Inflight>>>;
+
+/// Resync-on-reconnect (resync-1): shared resend buffer of recent
+/// non-sensitive items, written on send/first-sight-receive and read to
+/// build a `ResyncOffer` / serve a `ResyncPull`. See `crate::outbox`.
+type SharedOutbox = Arc<Mutex<Outbox>>;
 
 /// FluxMesh 2C-b: shared mesh anti-loop guard. Keyed on `EventId`
 /// (origin + sequence), it records every item already relayed/applied at
@@ -5201,6 +5447,10 @@ mod tests {
         let inflight = Arc::new(Mutex::new(HashMap::new()));
         let metrics = Arc::new(Mutex::new(MetricsTracker::new()));
         let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
+        let outbox = Arc::new(Mutex::new(super::Outbox::new()));
+        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
+            &fluxsync_core::Config::default(),
+        ));
 
         let frame = Frame {
             version: PROTOCOL_VERSION,
@@ -5221,6 +5471,8 @@ mod tests {
             &Arc::new(Mutex::new(HashMap::new())),
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
+            &outbox,
+            &state_rx,
         )
         .await;
 
@@ -5287,6 +5539,10 @@ mod tests {
         let mut pb = PeerBackoff::new();
         pb.on_attempt_failed(Instant::now(), &mut rand_core::OsRng);
         backoff.lock().await.insert(peer_id, pb);
+        let outbox = Arc::new(Mutex::new(super::Outbox::new()));
+        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
+            &fluxsync_core::Config::default(),
+        ));
 
         dispatch_inbound_frame(
             Frame {
@@ -5306,6 +5562,8 @@ mod tests {
             &backoff,
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
+            &outbox,
+            &state_rx,
         )
         .await;
 
@@ -5325,5 +5583,216 @@ mod tests {
             matches!(event_rx.try_recv(), Ok(Event::PeerLost)),
             "Msg::Revoke must emit Event::PeerLost"
         );
+    }
+
+    // ── resync-1 ─────────────────────────────────────────────────
+
+    /// resync-1: hashes we don't hold are returned in the offer's original
+    /// order, with held hashes (history or outbox) filtered out.
+    #[test]
+    fn missing_resync_hashes_filters_held_and_preserves_order() {
+        use super::missing_resync_hashes;
+        let offered = vec![
+            "aa".to_string(),
+            "bb".to_string(),
+            "cc".to_string(),
+            "dd".to_string(),
+        ];
+        let history = vec!["bb".to_string()];
+        let outbox_hashes = vec!["dd".to_string()];
+        let missing = missing_resync_hashes(&offered, &history, &outbox_hashes);
+        assert_eq!(missing, vec!["aa".to_string(), "cc".to_string()]);
+    }
+
+    /// resync-1: nothing missing when every offered hash is already held.
+    #[test]
+    fn missing_resync_hashes_empty_when_all_held() {
+        use super::missing_resync_hashes;
+        let offered = vec!["aa".to_string(), "bb".to_string()];
+        let history = vec!["aa".to_string()];
+        let outbox_hashes = vec!["bb".to_string()];
+        assert!(missing_resync_hashes(&offered, &history, &outbox_hashes).is_empty());
+    }
+
+    /// resync-1: defensive cap — even if a caller hands in more than
+    /// `MAX_RESYNC_HASHES` offered hashes, the result never exceeds it.
+    #[test]
+    fn missing_resync_hashes_caps_at_max_resync_hashes() {
+        use super::{missing_resync_hashes, MAX_RESYNC_HASHES};
+        let offered: Vec<String> = (0..(MAX_RESYNC_HASHES + 5))
+            .map(|i| format!("{i:064x}"))
+            .collect();
+        let missing = missing_resync_hashes(&offered, &[], &[]);
+        assert_eq!(missing.len(), MAX_RESYNC_HASHES);
+        assert_eq!(missing[0], offered[0], "must keep the offer's original order");
+    }
+
+    /// resync-1: a `ResyncOffer` hex-encodes each outbox hash, preserving
+    /// `Outbox::hashes`' (newest-first) order.
+    #[test]
+    fn build_resync_offer_hex_encodes_in_given_order() {
+        use super::build_resync_offer;
+        let h1 = [0x11u8; 32];
+        let h2 = [0x22u8; 32];
+        let offer = build_resync_offer(&[h1, h2]);
+        assert_eq!(offer.hashes, vec![hex::encode(h1), hex::encode(h2)]);
+    }
+
+    /// resync-1: an empty outbox produces an empty offer (the `Msg::Hello`
+    /// handler is expected to skip sending one in that case).
+    #[test]
+    fn build_resync_offer_empty_outbox_yields_empty_offer() {
+        use super::build_resync_offer;
+        assert!(build_resync_offer(&[]).hashes.is_empty());
+    }
+
+    /// resync-1 security invariant: a sensitive item must never enter the
+    /// outbox on first-sight reception, while a non-sensitive one does —
+    /// mirrors the same gate `app.rs` already applies before history
+    /// insertion (see `crate::outbox`'s module doc).
+    #[tokio::test]
+    async fn complete_reassembled_item_gates_outbox_on_sensitivity() {
+        use super::{complete_reassembled_item, Outbox};
+        use crate::transport::Transport;
+        use fluxsync_core::SeenSet;
+        use fluxsync_proto::Kind;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind loopback transport");
+        let transport = Arc::new(transport);
+        let inflight = Arc::new(Mutex::new(HashMap::new()));
+        let mesh_seen = Arc::new(Mutex::new(SeenSet::default()));
+        let (event_tx, _event_rx) = mpsc::channel(1024);
+        let outbox = Arc::new(Mutex::new(Outbox::new()));
+
+        let sensitive_hash = [0xAAu8; 32];
+        complete_reassembled_item(
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            [1u8; 32],
+            [2u8; 32],
+            1,
+            sensitive_hash,
+            Kind::Text,
+            true,
+            0,
+            b"secret".to_vec(),
+            &outbox,
+        )
+        .await;
+        assert!(
+            outbox.lock().await.get(sensitive_hash).is_none(),
+            "sensitive item must not enter the outbox"
+        );
+
+        let plain_hash = [0xBBu8; 32];
+        complete_reassembled_item(
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            [1u8; 32],
+            [2u8; 32],
+            2,
+            plain_hash,
+            Kind::Text,
+            false,
+            0,
+            b"hello".to_vec(),
+            &outbox,
+        )
+        .await;
+        assert!(
+            outbox.lock().await.get(plain_hash).is_some(),
+            "non-sensitive item must enter the outbox"
+        );
+    }
+
+    /// resync-1: the common case — a small clipboard item arrives as a
+    /// single `ClipboardItem` frame (payload non-empty) and never touches
+    /// `complete_reassembled_item`, which only runs for chunked/reassembled
+    /// transfers. This path must independently populate the outbox on
+    /// first sight, gated on sensitivity the same way.
+    #[tokio::test]
+    async fn dispatch_inbound_frame_single_frame_item_populates_outbox_when_not_sensitive() {
+        use super::{dispatch_inbound_frame, Outbox, Reassembly};
+        use crate::metrics::MetricsTracker;
+        use crate::transport::Transport;
+        use fluxsync_core::SeenSet;
+        use fluxsync_proto::{ClipboardItem, Frame, Kind, Msg, PROTOCOL_VERSION};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind loopback transport");
+        let transport = Arc::new(transport);
+        let peer_id = [9u8; 32];
+        let mesh_seen = Arc::new(Mutex::new(SeenSet::default()));
+        let (event_tx, _event_rx) = mpsc::channel(1024);
+        let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let metrics = Arc::new(Mutex::new(MetricsTracker::new()));
+        let inflight = Arc::new(Mutex::new(HashMap::new()));
+        let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
+        let trusted: crate::handshake::TrustedSet = Arc::new(Mutex::new(HashMap::new()));
+        let disc_cache = Arc::new(Mutex::new(HashMap::new()));
+        let backoff = Arc::new(Mutex::new(HashMap::new()));
+        let peer_meta = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let outbox = Arc::new(Mutex::new(Outbox::new()));
+        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
+            &fluxsync_core::Config::default(),
+        ));
+
+        let hash = [0x77u8; 32];
+        let item = ClipboardItem {
+            lamport: 1,
+            hash,
+            kind: Kind::Text,
+            payload: b"hello resync".to_vec(),
+            sensitive: false,
+            wall_time_ms: 0,
+            origin: [3u8; 32],
+            event_seq: 5,
+        };
+        dispatch_inbound_frame(
+            Frame {
+                version: PROTOCOL_VERSION,
+                msg: Msg::ClipboardItem(item),
+            },
+            peer_id,
+            &mesh_seen,
+            &event_tx,
+            &transport,
+            &reassembly,
+            &metrics,
+            &inflight,
+            &pending_pairs,
+            &trusted,
+            &disc_cache,
+            &backoff,
+            &peer_meta,
+            None,
+            &outbox,
+            &state_rx,
+        )
+        .await;
+
+        let entry = outbox
+            .lock()
+            .await
+            .get(hash)
+            .cloned()
+            .expect("non-sensitive single-frame item must populate the outbox");
+        assert_eq!(entry.origin, [3u8; 32]);
+        assert_eq!(entry.seq, 5);
+        assert_eq!(entry.payload, b"hello resync");
     }
 }

@@ -215,13 +215,17 @@ pub fn render_status(v: &Value) {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let dups = m.get("dedup_drops").and_then(Value::as_u64).unwrap_or(0);
+        let resynced = m
+            .get("items_resynced")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let reconnects = m.get("reconnects").and_then(Value::as_u64).unwrap_or(0);
         let hs_failed = m
             .get("handshakes_failed")
             .and_then(Value::as_u64)
             .unwrap_or(0);
         println!(
-            "  {} sent {sent} · recv {received} · dups {dups} · reconnects {reconnects} · hs-fail {hs_failed}",
+            "  {} sent {sent} · recv {received} · dups {dups} · resynced {resynced} · reconnects {reconnects} · hs-fail {hs_failed}",
             "counters".dimmed()
         );
     }
@@ -453,6 +457,7 @@ mod tests {
                     "uptime_session_secs": 42,
                     "items_sent": 7,
                     "items_received": 5,
+                    "items_resynced": 1,
                 },
             },
         })
@@ -479,6 +484,7 @@ mod tests {
         for key in [
             "items_sent",
             "items_received",
+            "items_resynced",
             "dedup_drops",
             "reconnects",
             "handshakes_failed",

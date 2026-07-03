@@ -33,6 +33,7 @@ impl MetricsTracker {
                 uptime_session_secs: 0,
                 items_sent: 0,
                 items_received: 0,
+                items_resynced: 0,
             },
             session_start: None,
             last_heartbeat_sent: None,
@@ -111,6 +112,13 @@ impl MetricsTracker {
         self.metrics.items_received += 1;
     }
 
+    /// resync-1: an item was actually re-sent while serving a peer's
+    /// `Msg::ResyncPull` (called once per item found in our outbox, not once
+    /// per requested hash).
+    pub fn on_item_resynced(&mut self) {
+        self.metrics.items_resynced += 1;
+    }
+
     pub fn on_disconnect(&mut self, reason: DisconnectReason) {
         self.metrics.last_disconnect_reason = Some(reason);
         self.session_start = None;
@@ -130,6 +138,7 @@ mod tests {
         m.on_item_sent();
         m.on_item_sent();
         m.on_item_received();
+        m.on_item_resynced();
         m.on_dedup_drop();
         m.on_handshake_fail();
         m.on_handshake_fail();
@@ -138,6 +147,7 @@ mod tests {
         let s = m.snapshot();
         assert_eq!(s.items_sent, 2);
         assert_eq!(s.items_received, 1);
+        assert_eq!(s.items_resynced, 1);
         assert_eq!(s.dedup_drops, 1);
         assert_eq!(s.handshakes_failed, 3);
         assert_eq!(s.reconnects, 0);
