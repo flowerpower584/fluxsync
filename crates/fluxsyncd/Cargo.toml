@@ -33,7 +33,9 @@ fluxsync-core = { path = "../fluxsync-core" }
 # pairing PIN) — this just promotes it to a direct dep so the daemon's
 # reconnect path can use the real OS CSPRNG for jitter too.
 rand_core = { version = "0.6", features = ["getrandom"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal", "fs"] }
+# "process" added for DIR-P1-03's chaos harness (tests/chaos_harness.rs),
+# which spawns real `fluxsyncd` subprocesses via `tokio::process::Command`.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal", "fs", "process"] }
 tokio-util = "0.7"
 serde = { workspace = true }
 serde_json = "1"
@@ -56,7 +58,10 @@ sentry = { version = "0.48.1", default-features = false, features = ["backtrace"
 zeroize = "1.8"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", features = ["fs", "hostname"] }
+# "signal" (SIGSTOP/SIGCONT/SIGKILL) and "process" (Pid) added for
+# DIR-P1-03's chaos harness (tests/chaos_harness.rs), which drives real
+# `fluxsyncd` subprocesses through process-level fault injection.
+nix = { version = "0.28", features = ["fs", "hostname", "signal", "process"] }
 
 # macOS-only — `keystore.rs` calls the legacy `SecAccessCreate` /
 # `kSecAttrAccess` API directly to attach a self-only ACL to the identity

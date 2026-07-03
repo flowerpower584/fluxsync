@@ -1,0 +1,71 @@
+name: chaos
+
+# DIR-P1-03 (gate G2): the scripted chaos harness against real fluxsyncd
+# subprocesses (crates/fluxsyncd/tests/chaos_harness.rs, run via
+# scripts/chaos.sh). Wall-clock heavy — real sleeps, real backoff waits,
+# a real 10-cycle freeze/thaw sequence — so this stays off the push/PR
+# path (see ci.yml for the fast gate) and runs on a schedule + manual
+# dispatch instead.
+#
+# Only the CI-stable subset runs here: KILL9_RESTART, PORT_SQUAT,
+# SLOW_START. SIGSTOP_WAKE and FLAP are local-only (run them with
+# `scripts/chaos.sh sigstop_wake` / `scripts/chaos.sh flap`):
+#
+#   - FLAP drives 10 rapid SIGSTOP/SIGCONT cycles with tight ~2s running
+#     gaps between them. A shared, throttled GitHub-hosted runner's CPU
+#     steal time can eat that gap, changing what the scenario actually
+#     exercises run to run — the local-only run is the trustworthy one.
+#   - SIGSTOP_WAKE draws its stop duration uniformly from 15-60s, and
+#     driver.rs currently has no resync-on-reconnect: an unacked item is
+#     dropped for good after ~14s (MAX_RETRANSMIT * RETRANSMIT_INTERVAL —
+#     see the chaos_harness.rs module doc and docs/CHAOS.md). Most draws
+#     in that range hit the known gap rather than the interesting
+#     "recovered cleanly" path, so it doesn't earn its wall-clock budget
+#     as a scheduled CI job today; it's still real and worth running
+#     locally.
+#
+# docs/CHAOS.md has the full writeup, including what gate G2 still needs
+# beyond this harness (real Wi-Fi flap, IP change, VPN — needs hardware).
+
+on:
+  schedule:
+    # 04:00 UTC every Monday.
+    - cron: '0 4 * * 1'
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  chaos:
+    name: chaos (ubuntu-latest, CI-stable subset)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: Swatinem/rust-cache@v2
+      # libdbus-1-dev/pkg-config: same as ci.yml's clippy job (keyring's
+      # secret-service backend). xvfb: fluxsyncd's clipboard watcher is
+      # always compiled in and always on when driven through the real
+      # CLI binary (there is no --disable-clipboard flag; only the
+      # in-process test API can turn it off, which this harness
+      # deliberately doesn't use — see chaos_harness.rs's module doc on
+      # why it pairs over real IPC instead of DaemonConfig::test_pair).
+      # Give arboard's X11 backend a real (virtual) display so a headless
+      # runner doesn't hit an unexercised code path.
+      - name: system deps (dbus + a virtual X server for arboard)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config xvfb
+      - name: build fluxsyncd once (chaos harness spawns this binary)
+        run: cargo build -p fluxsyncd --bin fluxsyncd
+      - name: chaos harness (CI-stable subset)
+        run: |
+          xvfb-run -a scripts/chaos.sh \
+            kill9_restart_resumes_without_duplicate_items \
+            port_squat_clean_recovery_after_bind_failure \
+            slow_start_discovery_and_pair_regardless_of_order
