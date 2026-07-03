@@ -169,7 +169,12 @@ class FluxsyncAccessibilityService : AccessibilityService() {
             if (uri.authority == "$packageName.fileprovider") return
             scope.launch {
                 val png = readClipboardImageAsPng(uri) ?: return@launch
-                FluxsyncManager.withHandle { it.pushItem("image", png) }
+                // DIR-P2-05 boundary: an image captured from the OS clipboard
+                // here is never marked sensitive — there is no image-content
+                // classifier (unlike text's server-side classifier), so a
+                // screenshotted secret is only protected when pushed
+                // explicitly with `sensitive = true` (not this capture path).
+                FluxsyncManager.withHandle { it.pushItem("image", png, false) }
                     ?: android.util.Log.w("FluxSync", "Image push failed: handle null")
             }
             return

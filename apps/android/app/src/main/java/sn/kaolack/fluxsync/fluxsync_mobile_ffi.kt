@@ -724,7 +724,7 @@ external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_poll_logs(`ptr`
 ): RustBuffer.ByValue
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_poll_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_item(`ptr`: Long,`kind`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_item(`ptr`: Long,`kind`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,`sensitive`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_text(`ptr`: Long,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -896,7 +896,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_poll_state() != 63397.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_item() != 38274.toShort()) {
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_item() != 17752.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_text() != 51988.toShort()) {
@@ -1431,8 +1431,16 @@ public interface FluxsyncHandleInterface {
      * Inject a typed clipboard item. `kind` is `"text"` or `"image"`;
      * `bytes` is the raw payload (UTF-8 for text, PNG for image). Image
      * bytes ride to the daemon as base64 since the IPC channel is NDJSON.
+     *
+     * DIR-P2-05: `sensitive` marks an `"image"` push as sensitive — same
+     * treatment as a detected-secret text item (still syncs to the peer,
+     * excluded from history/vault/outbox on both ends). There is no
+     * image-content classifier, so this flag is the only way an image
+     * gets marked. Ignored for `"text"`, which already runs the real
+     * classifier server-side. Defaults to `false` so existing Kotlin call
+     * sites that predate this parameter keep compiling unchanged.
      */
-    fun `pushItem`(`kind`: kotlin.String, `bytes`: kotlin.ByteArray)
+    fun `pushItem`(`kind`: kotlin.String, `bytes`: kotlin.ByteArray, `sensitive`: kotlin.Boolean = false)
     
     /**
      * Inject a clipboard item. Same code path as `fluxctl push`.
@@ -1787,14 +1795,22 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
      * Inject a typed clipboard item. `kind` is `"text"` or `"image"`;
      * `bytes` is the raw payload (UTF-8 for text, PNG for image). Image
      * bytes ride to the daemon as base64 since the IPC channel is NDJSON.
+     *
+     * DIR-P2-05: `sensitive` marks an `"image"` push as sensitive — same
+     * treatment as a detected-secret text item (still syncs to the peer,
+     * excluded from history/vault/outbox on both ends). There is no
+     * image-content classifier, so this flag is the only way an image
+     * gets marked. Ignored for `"text"`, which already runs the real
+     * classifier server-side. Defaults to `false` so existing Kotlin call
+     * sites that predate this parameter keep compiling unchanged.
      */
-    @Throws(FluxException::class)override fun `pushItem`(`kind`: kotlin.String, `bytes`: kotlin.ByteArray)
+    @Throws(FluxException::class)override fun `pushItem`(`kind`: kotlin.String, `bytes`: kotlin.ByteArray, `sensitive`: kotlin.Boolean)
         = 
     callWithHandle {
     uniffiRustCallWithError(FluxException) { _status ->
     UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_item(
         it,
-        FfiConverterString.lower(`kind`),FfiConverterByteArray.lower(`bytes`),_status)
+        FfiConverterString.lower(`kind`),FfiConverterByteArray.lower(`bytes`),FfiConverterBoolean.lower(`sensitive`),_status)
 }
     }
     

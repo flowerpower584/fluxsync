@@ -111,7 +111,13 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
 
     fun pushText(text: String) = ffi("Send clipboard") { it.pushText(text) }
 
-    fun pushImage(png: ByteArray) = ffi("Send image") { it.pushItem("image", png) }
+    // DIR-P2-05: `sensitive` defaults to false so the existing share-sheet
+    // call site (MainActivity) keeps compiling unchanged; there is no
+    // image-content classifier, so a caller that wants the same
+    // history/vault/outbox exclusion a sensitive text item gets must pass
+    // `sensitive = true` explicitly.
+    fun pushImage(png: ByteArray, sensitive: Boolean = false) =
+        ffi("Send image") { it.pushItem("image", png, sensitive) }
 
     fun setBatteryThreshold(threshold: UByte) =
         ffi("Set battery threshold") { it.setBatteryThreshold(threshold.toShort().toUByte()) }

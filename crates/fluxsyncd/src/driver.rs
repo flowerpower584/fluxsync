@@ -826,6 +826,15 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                                 kind: Kind::Image,
                                 payload: png,
                                 preview,
+                                // DIR-P2-05 boundary: an image copied to the OS
+                                // clipboard and picked up by this watcher (as
+                                // opposed to an explicit `fluxctl push-image
+                                // --sensitive` / mobile FFI push) is never
+                                // marked sensitive — unlike text's
+                                // `is_sensitive`, there is no image-content
+                                // classifier, so a screenshotted secret is
+                                // only protected when the caller explicitly
+                                // flags it via the IPC push path.
                                 sensitive: false,
                                 lamport,
                             },
@@ -1503,9 +1512,13 @@ async fn handle_driver_cmd(
                 CmdResponse::ok(req_id, None)
             }
         }
-        CmdOp::PushImage { data } => {
+        CmdOp::PushImage { data, sensitive } => {
             use fluxsync_core::Clock;
-            tracing::info!(b64_len = data.len(), "IPC: push_image requested from local");
+            tracing::info!(
+                b64_len = data.len(),
+                sensitive,
+                "IPC: push_image requested from local"
+            );
             match B64.decode(data.as_bytes()) {
                 Ok(png) if png.len() > MAX_PAYLOAD => CmdResponse::err(
                     req_id,
@@ -1525,7 +1538,11 @@ async fn handle_driver_cmd(
                                 kind: Kind::Image,
                                 payload: png,
                                 preview,
-                                sensitive: false,
+                                // DIR-P2-05: the caller (fluxctl `--sensitive`,
+                                // or the mobile FFI) decides — there is no
+                                // image-content classifier, so this is the
+                                // only place an image can be marked sensitive.
+                                sensitive,
                                 lamport,
                             },
                             &**wall,
@@ -5920,6 +5937,75 @@ mod tests {
         assert!(
             outbox.lock().await.get(plain_hash).is_some(),
             "non-sensitive item must enter the outbox"
+        );
+    }
+
+    /// DIR-P2-05 sibling of `complete_reassembled_item_gates_outbox_on_sensitivity`:
+    /// the outbox gate is keyed on `sensitive` alone, not on `Kind` — so a
+    /// sensitive IMAGE (the new `CmdOp::PushImage { sensitive: true }` path)
+    /// must be excluded exactly like a sensitive text item, while a
+    /// non-sensitive image still populates the outbox normally.
+    #[tokio::test]
+    async fn complete_reassembled_item_gates_outbox_on_sensitivity_for_images() {
+        use super::{complete_reassembled_item, Outbox};
+        use crate::transport::Transport;
+        use fluxsync_core::SeenSet;
+        use fluxsync_proto::Kind;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind loopback transport");
+        let transport = Arc::new(transport);
+        let inflight = Arc::new(Mutex::new(HashMap::new()));
+        let mesh_seen = Arc::new(Mutex::new(SeenSet::default()));
+        let (event_tx, _event_rx) = mpsc::channel(1024);
+        let outbox = Arc::new(Mutex::new(Outbox::new()));
+
+        let sensitive_hash = [0xCCu8; 32];
+        complete_reassembled_item(
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            [1u8; 32],
+            [2u8; 32],
+            1,
+            sensitive_hash,
+            Kind::Image,
+            true,
+            0,
+            b"fake-png-secret".to_vec(),
+            &outbox,
+        )
+        .await;
+        assert!(
+            outbox.lock().await.get(sensitive_hash).is_none(),
+            "sensitive image must not enter the outbox"
+        );
+
+        let plain_hash = [0xDDu8; 32];
+        complete_reassembled_item(
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            [1u8; 32],
+            [2u8; 32],
+            2,
+            plain_hash,
+            Kind::Image,
+            false,
+            0,
+            b"fake-png-plain".to_vec(),
+            &outbox,
+        )
+        .await;
+        assert!(
+            outbox.lock().await.get(plain_hash).is_some(),
+            "non-sensitive image must enter the outbox"
         );
     }
 

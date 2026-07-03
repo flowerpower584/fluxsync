@@ -46,9 +46,18 @@ pub enum CmdOp {
     },
     /// Inject an image clipboard item. `data` is the base64 of the raw
     /// PNG bytes — NDJSON is line-based, so binary payloads ride as
-    /// base64. Fired by the Android FFI `push_item("image", …)`.
+    /// base64. Fired by the Android FFI `push_item("image", …)` and
+    /// `fluxctl push-image`.
+    /// DIR-P2-05: `sensitive` mirrors the text `Push` path's classifier
+    /// output — there is no image-content classifier, so the caller
+    /// (fluxctl's `--sensitive`, or the mobile FFI) decides instead.
+    /// `#[serde(default)]` keeps an older fluxctl/FFI caller (pre-DIR-P2-05,
+    /// omitting the field entirely) decodable against a newer daemon: it
+    /// simply defaults to `false`, the prior hardcoded behavior.
     PushImage {
         data: String,
+        #[serde(default)]
+        sensitive: bool,
     },
     /// Fetch a clipboard item's raw bytes by its hex content hash. Used
     /// by the Android client to pull an inbound image's PNG on demand —
@@ -299,7 +308,7 @@ impl CmdResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{CmdOp, DEFAULT_TAIL_N};
+    use super::{CmdOp, CmdRequest, DEFAULT_TAIL_N};
 
     /// FS-027: a `tail` request that omits `n` must deserialize with the
     /// default count instead of failing — a bare `{"op":"tail"}` from a
@@ -316,5 +325,57 @@ mod tests {
         let op: CmdOp = serde_json::from_str(r#"{"op":"tail","n":5}"#)
             .expect("explicit n must still deserialize");
         assert!(matches!(op, CmdOp::Tail { n: 5 }), "explicit n must win");
+    }
+
+    /// DIR-P2-05: an old-format `push_image` request (no `sensitive` field
+    /// at all — how every pre-DIR-P2-05 fluxctl/mobile-FFI caller shapes
+    /// it) must still decode, defaulting to non-sensitive rather than
+    /// failing. This is the "old client -> new daemon" IPC compat
+    /// direction: the extra `#[serde(default)]` on `PushImage::sensitive`
+    /// is exactly what makes this a clean decode instead of a hard error.
+    #[test]
+    fn dir_p2_05_push_image_old_format_defaults_sensitive_false() {
+        let op: CmdOp = serde_json::from_str(r#"{"op":"push_image","data":"AAAA"}"#)
+            .expect("push_image without sensitive must still deserialize");
+        match op {
+            CmdOp::PushImage { data, sensitive } => {
+                assert_eq!(data, "AAAA");
+                assert!(!sensitive, "omitted sensitive must default to false");
+            }
+            other => panic!("expected PushImage, got {other:?}"),
+        }
+    }
+
+    /// DIR-P2-05: a `push_image` request that carries the `sensitive`
+    /// flag round-trips both `true` and `false` through the same
+    /// serde-tagged shape `fluxctl`/the mobile FFI actually send.
+    #[test]
+    fn dir_p2_05_push_image_sensitive_flag_roundtrips() {
+        for want in [true, false] {
+            let json = serde_json::json!({
+                "op": "push_image",
+                "data": "AAAA",
+                "sensitive": want,
+            });
+            let op: CmdOp = serde_json::from_value(json.clone())
+                .unwrap_or_else(|e| panic!("deserialize {json}: {e}"));
+            match op {
+                CmdOp::PushImage { sensitive, .. } => assert_eq!(sensitive, want),
+                other => panic!("expected PushImage, got {other:?}"),
+            }
+
+            // Round-trip through serialize too — a `fluxctl`/daemon pair on
+            // the same version must agree on the wire shape either way.
+            let req = CmdRequest {
+                id: 1,
+                op: CmdOp::PushImage { data: "AAAA".into(), sensitive: want },
+            };
+            let s = serde_json::to_string(&req).expect("serialize");
+            let back: CmdRequest = serde_json::from_str(&s).expect("deserialize own output");
+            match back.op {
+                CmdOp::PushImage { sensitive, .. } => assert_eq!(sensitive, want),
+                other => panic!("expected PushImage, got {other:?}"),
+            }
+        }
     }
 }

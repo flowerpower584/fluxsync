@@ -366,11 +366,30 @@ impl FluxsyncHandle {
     /// Inject a typed clipboard item. `kind` is `"text"` or `"image"`;
     /// `bytes` is the raw payload (UTF-8 for text, PNG for image). Image
     /// bytes ride to the daemon as base64 since the IPC channel is NDJSON.
+    ///
+    /// DIR-P2-05: `sensitive` marks an `"image"` push as sensitive — same
+    /// treatment as a detected-secret text item (still syncs to the peer,
+    /// excluded from history/vault/outbox on both ends). There is no
+    /// image-content classifier, so this flag is the only way an image
+    /// gets marked. Ignored for `"text"`, which already runs the real
+    /// classifier server-side. Defaults to `false` so existing Kotlin call
+    /// sites that predate this parameter keep compiling unchanged.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn push_item(&self, kind: String, bytes: Vec<u8>) -> Result<(), FluxError> {
+    #[uniffi::method(default(sensitive = false))]
+    pub fn push_item(
+        &self,
+        kind: String,
+        bytes: Vec<u8>,
+        sensitive: bool,
+    ) -> Result<(), FluxError> {
         let request = match kind.as_str() {
             "image" => {
-                serde_json::json!({"id": 1, "op": "push_image", "data": B64.encode(&bytes)})
+                serde_json::json!({
+                    "id": 1,
+                    "op": "push_image",
+                    "data": B64.encode(&bytes),
+                    "sensitive": sensitive,
+                })
             }
             "text" => {
                 let text = String::from_utf8_lossy(&bytes).into_owned();

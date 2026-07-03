@@ -313,7 +313,7 @@ async fn over_cap_image_push_is_rejected_not_truncated() {
 
     let resp = ipc_send_recv(
         &ipc_a,
-        CmdRequest { id: 42, op: fluxsyncd::cmd::CmdOp::PushImage { data: b64 } },
+        CmdRequest { id: 42, op: fluxsyncd::cmd::CmdOp::PushImage { data: b64, sensitive: false } },
     )
     .await;
     eprintln!("REGRESSION: over-cap image push ok={} err={:?}", resp.ok, resp.err);

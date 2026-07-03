@@ -7,6 +7,8 @@
 #![cfg_attr(windows, allow(dead_code))]
 
 use anyhow::{anyhow, Context, Result};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -41,6 +43,18 @@ enum Cmd {
     Off,
     /// Inject a clipboard item.
     Push { text: String },
+    /// Inject an image clipboard item read from a PNG file on disk.
+    PushImage {
+        /// Path to a PNG file.
+        path: PathBuf,
+        /// Mark this image as sensitive: it still syncs to the peer, but is
+        /// excluded from history, the on-disk vault, and the resync outbox
+        /// on both ends — same treatment as a detected-secret text item.
+        /// There is no image-content classifier, so this is the only way
+        /// to flag a pushed image as sensitive.
+        #[arg(long)]
+        sensitive: bool,
+    },
     /// Print the most recent peer item.
     Pull,
     /// Show the last `n` log entries.
@@ -230,6 +244,24 @@ async fn main() -> Result<()> {
             one_shot(&ipc_path, json!({"id": 1, "op": "push", "text": text})).await?,
             Kind::Ack("pushed"),
         ),
+        Cmd::PushImage { path, sensitive } => {
+            let bytes = tokio::fs::read(&path)
+                .await
+                .with_context(|| format!("reading image file {}", path.display()))?;
+            (
+                one_shot(
+                    &ipc_path,
+                    json!({
+                        "id": 1,
+                        "op": "push_image",
+                        "data": B64.encode(&bytes),
+                        "sensitive": sensitive,
+                    }),
+                )
+                .await?,
+                Kind::Ack("image pushed"),
+            )
+        }
         Cmd::Pull => (
             one_shot(&ipc_path, json!({"id": 1, "op": "pull"})).await?,
             Kind::Pull,
