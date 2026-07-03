@@ -45,7 +45,7 @@ never log scraping.
 | Scenario | Proves toward G2 |
 |---|---|
 | `KILL9_RESTART` | A hard process kill (simulates a crash/OOM-kill) mid-traffic, then an immediate restart: identity + trust + vault history all persist (rehydration is asserted on its own, before any re-link), an explicit reconnect-by-address re-links, and the already-delivered item is never duplicated. Automatic post-crash *rediscovery* is deliberately not asserted — see "no unicast redial hint" below. |
-| `SIGSTOP_WAKE` | A frozen process (simulates laptop sleep, 15-60s) resumes to a healthy, re-linked session within the backoff envelope. See "Known gap" below for what it does *not* yet prove. |
+| `SIGSTOP_WAKE` | A frozen process (simulates laptop sleep, 15-60s) resumes to a healthy, re-linked session within the backoff envelope. See "Closed (v0.6.x): resync-on-reconnect" below for why the mid-sleep item is logged rather than hard-asserted. |
 | `FLAP` | 10 rapid freeze/thaw cycles don't trigger a handshake storm (`ConnectionMetrics.handshakes_total` stays bounded) and the pair settles back to `Linked`. |
 | `PORT_SQUAT` | If a daemon's UDP port is taken by something else, it fails to boot cleanly (non-zero exit, no hang) instead of degrading silently, and recovers once the port frees up (reconnect driven by the same explicit `PairAccept { addr }` as `KILL9_RESTART` — see "no unicast redial hint" below). |
 | `SLOW_START` | A daemon that's been idle and unpaired for a long time (60s) is still fully healthy and pairs normally once a peer shows up — no timer/resource wedge from sitting alone. |
@@ -76,32 +76,41 @@ persist the peer's last-seen socket address on link (the read side in
 `main.rs` already exists and is currently dead code). Flagged under
 "requested hooks" below.
 
-### 2. No resync-on-reconnect (items lost past the retransmit budget)
+### 2. Closed (v0.6.x): resync-on-reconnect
 
 `driver.rs`'s outbound delivery retries an unacked item every 2s
 (`RETRANSMIT_INTERVAL`) for 6 attempts (`MAX_RETRANSMIT`) — about 14s —
-then drops it for good. There is no resync-on-reconnect: a fresh
-handshake does not replay anything the retry loop already gave up on.
+then drops it from `inflight`. That retry loop alone could never replay
+anything it already gave up on. As of the resync-1 slice, it doesn't
+have to: on session link, peers that negotiated the `resync-1`
+capability (advertised in `Msg::Hello.caps`) exchange
+`ResyncOffer`/`ResyncPull` over content hashes held in a small
+in-memory outbox — 16 items / 8 MiB / 24h, non-sensitive items only
+(the same classifier the at-rest vault uses), full payload bytes so a
+re-offer is byte-identical to the original send. Whatever the peer is
+missing gets re-served through the normal inflight machinery, so a
+relink after any outage — a laptop sleep, a Wi-Fi drop, a killed and
+restarted daemon on the *receiving* end — recovers items the direct
+retransmit budget alone would have lost.
 
 DIR-P1-03 asks `SIGSTOP_WAKE` to prove zero item loss across a 15-60s
-simulated sleep. That range is almost entirely *longer* than the ~14s
-retransmit budget, so most runs cannot honestly claim zero loss today.
-`sigstop_wake_recovers_within_backoff_envelope` reflects this precisely
-instead of narrowing the scenario to a duration that always passes:
+simulated sleep, which is longer than the ~14s retransmit budget for
+nearly the whole range — exactly the case resync-1 now covers.
+`sigstop_wake_recovers_within_backoff_envelope` still logs (rather than
+hard-asserts) the outcome for the mid-sleep item past that budget,
+since that scenario's job is proving session **recovery**, not resync-1
+itself. The dedicated end-to-end proof — a real peer restart, a missed
+item recovered out of the sender's outbox, `items_resynced` advancing
+on the sender — lives in `crates/fluxsyncd/tests/resync_on_reconnect.rs`.
 
-- it always hard-asserts session **recovery** (reconnect within 30s of
-  `SIGCONT`) and that the link is healthy again (a *post-wake* item
-  always delivers) — both are real, currently-true guarantees;
-- for the item copied *during* the sleep, it only hard-asserts delivery
-  when the drawn stop duration is within the retransmit budget; outside
-  that window it logs a `KNOWN GAP` line instead of failing the run.
-
-**This is the single most important finding from building this
-harness.** Closing it needs a resync-on-reconnect mechanism in
-`driver.rs` (e.g. replay outstanding/recent items keyed by the peer's
-last-seen Lamport clock once a fresh session links) — out of scope here
-per this task's constraint not to touch `driver.rs`/`backoff.rs`, but a
-concrete, harness-verified candidate for the next DIR-P1 item.
+One case stays narrow and out of scope for resync-1 by design: the
+outbox is purely in-memory. If the *sender* itself restarts before the
+peer relinks, whatever it alone was holding for that peer is lost with
+it — a **receiver** restart is fine (the sender is still up and still
+holds the outbox to re-offer from), but a **sender** restart is not.
+Closing that would mean persisting the outbox to disk, which reopens
+exactly the kind of at-rest exposure the "non-sensitive only, in-memory"
+design was built to avoid — not pursued here.
 
 ### 3. Write-behind vault persistence window
 
@@ -140,8 +149,10 @@ network-fault-unverified."
 Not added here — noted for whoever picks up DIR-P1-09 or the next pass
 on `driver.rs`:
 
-- **Resync-on-reconnect** (known gap 2 above) — the biggest one.
-- **Persist `last_addr` on link** (known gap 1 above): the `main.rs` read
+- **Resync-on-reconnect** — shipped, see "Closed (v0.6.x)" (known gap 2
+  above); no longer a requested hook.
+- **Persist `last_addr` on link** (known gap 1 above) — the biggest
+  remaining one. The `main.rs` read
   side already exists; populating it in driver.rs's `StoredPeer` writes
   would make crash-restart re-link deterministic without mDNS, and would
   let `KILL9_RESTART` assert fully automatic recovery instead of driving

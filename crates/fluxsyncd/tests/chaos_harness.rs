@@ -28,20 +28,28 @@
 //! `metrics` (`ConnectionMetrics`: `handshakes_total`, `dedup_drops`, ...)
 //! for counters — never log scraping.
 //!
-//! ## A real gap this harness surfaces, not papers over
+//! ## Resync-on-reconnect (resync-1) closed the item-loss gap here
 //!
 //! `driver.rs`'s outbound retry only retransmits an unacked item every
 //! `RETRANSMIT_INTERVAL` (2s) for `MAX_RETRANSMIT` (6) attempts — about 14s
-//! — and then drops it for good ("item dropped: peer never acked after max
-//! retransmits"). There is no resync-on-reconnect: a fresh handshake does
-//! not replay anything the retry loop already gave up on. `SIGSTOP_WAKE`'s
-//! spec (DIR-P1-03) asks for zero item loss across a 15-60s simulated
-//! sleep, which is longer than that budget for nearly the whole range.
-//! Rather than silently narrowing the scenario to a duration that always
-//! passes, `sigstop_wake` below asserts the honest, currently-true claims
-//! (session recovery; the link is healthy again after wake) and logs —
-//! without failing the run — whether the mid-sleep item made it, flagging
-//! it as a known gate-G2 gap. See `docs/CHAOS.md`.
+//! — and then drops it from `inflight` ("item dropped: peer never acked
+//! after max retransmits"). That retry loop alone still can't replay
+//! anything it already gave up on — but that is no longer the whole
+//! story: on relink, peers that negotiated the `resync-1` capability
+//! exchange `ResyncOffer`/`ResyncPull` over content hashes held in an
+//! in-memory outbox (16 items / 8 MiB / 24h, non-sensitive only), and the
+//! sender re-serves anything the peer is missing through the same
+//! inflight machinery. `SIGSTOP_WAKE`'s spec (DIR-P1-03) asks for zero
+//! item loss across a 15-60s simulated sleep; `sigstop_wake` below still
+//! logs — without failing the run — the rare case where the mid-sleep
+//! item doesn't make it, kept as defense in depth since this scenario's
+//! job is proving *session recovery*, not resync-1 itself (neither daemon
+//! here ever restarts — `b` is only frozen via `SIGSTOP`/`SIGCONT` — so
+//! resync-1's own remaining narrow gap, the *sender* restarting before the
+//! peer relinks and losing its in-memory outbox, doesn't apply to this
+//! scenario at all). The end-to-end proof that resync-1 recovers an item
+//! across a real peer restart lives in `tests/resync_on_reconnect.rs`.
+//! See `docs/CHAOS.md`.
 //!
 //! Do not modify `driver.rs` or `backoff.rs` from this file (two other
 //! agents' work lands there); every fault here is injected at the process
@@ -67,8 +75,9 @@ use tokio::time::timeout;
 
 /// `MAX_RETRANSMIT` (6) * `RETRANSMIT_INTERVAL` (2s) from `driver.rs`,
 /// plus slack. An item pushed and never acked survives roughly this long
-/// before the sender gives up — there is no resync-on-reconnect, see the
-/// module doc above.
+/// before the sender gives up on direct retransmit and drops it from
+/// `inflight` — resync-1 (see the module doc above) is what recovers it
+/// after that, once the peer relinks.
 const RETRANSMIT_BUDGET: Duration = Duration::from_secs(14);
 
 /// Generous envelope for "the link is healthy again": 3 missed heartbeats
@@ -653,16 +662,17 @@ async fn sigstop_wake_recovers_within_backoff_envelope() {
         );
     } else if !delivered {
         eprintln!(
-            "[chaos:sigstop_wake] KNOWN GAP (see docs/CHAOS.md): item copied during a {stop_secs}s \
-             sleep was NOT delivered. driver.rs has no resync-on-reconnect and gives up \
-             retransmitting after ~{RETRANSMIT_BUDGET:?}; DIR-P1-03 asks for zero loss across the \
-             full 15-60s range, which this build cannot yet meet for sleeps over the retransmit \
-             budget. Not treated as a harness failure — flagged as a product gap."
+            "[chaos:sigstop_wake] item copied during a {stop_secs}s sleep (> retransmit budget \
+             {RETRANSMIT_BUDGET:?}) was NOT delivered even though resync-1 should have recovered \
+             it on relink (see docs/CHAOS.md and tests/resync_on_reconnect.rs). Not treated as a \
+             harness failure — this scenario's job is proving session recovery, not resync-1 \
+             itself — but worth a look if it shows up repeatedly."
         );
     } else {
         eprintln!(
             "[chaos:sigstop_wake] item copied during a {stop_secs}s sleep (> retransmit budget) \
-             was delivered anyway — got lucky on retry timing, still not a guarantee."
+             was delivered anyway — the expected outcome now that resync-1 re-offers items past \
+             the direct-retransmit budget once the peer relinks (see docs/CHAOS.md)."
         );
     }
 

@@ -2697,6 +2697,25 @@ async fn transport_recv_loop(
                         let g = pending_initiator_tx.lock().await;
                         if let Some(tx) = g.as_ref() {
                             let _ = tx.send(msg);
+                            // On a fast/loopback link the peer's post-handshake
+                            // traffic (its own `Msg::Hello`, sent the instant
+                            // ITS side reaches Linked) can already be sitting
+                            // in this socket's recv buffer right behind this
+                            // `HandshakeResp` datagram. Forwarding to
+                            // `run_initiator` above only wakes that task; it
+                            // does not run it. Without yielding here, this
+                            // loop can read the very next datagram (that
+                            // Hello) and fail it with "encrypted frame but no
+                            // session" before `run_initiator` ever gets
+                            // scheduled to call `try_install_session`. Since
+                            // `Msg::Hello` is sent exactly once per session
+                            // establishment (resync-1 caps ride on it, never
+                            // retried), losing that race silently and
+                            // permanently drops resync-1 negotiation for the
+                            // whole session. A single cooperative yield here
+                            // gives `run_initiator` a real chance to finish
+                            // installing the session first.
+                            tokio::task::yield_now().await;
                         } else {
                             tracing::debug!("HandshakeResp with no pending initiator");
                         }
