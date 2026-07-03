@@ -80,6 +80,17 @@ pub struct State {
     /// signal only, so the macOS/Android wire shape is unchanged.
     #[serde(skip)]
     pub vault_wipe_gen: u64,
+    /// DIR-P3-10 (`fluxctl doctor`): mirrors `DaemonConfig::disable_mdns`
+    /// (negated), so a client can tell "no live peer, mDNS is off" apart
+    /// from "no live peer, still searching" without a new IPC round trip.
+    /// `#[serde(default = "default_mdns_enabled")]` keeps older snapshots
+    /// (pre-doctor) deserializing as the common case (mDNS on).
+    #[serde(default = "default_mdns_enabled")]
+    pub mdns_enabled: bool,
+}
+
+fn default_mdns_enabled() -> bool {
+    true
 }
 
 /// One clipboard item parked by the firewall's `Ask` rule, surfaced to the UI
@@ -219,6 +230,9 @@ pub struct Config {
     /// Clipboard firewall (chantier A). Disabled by default, so a daemon
     /// built without firewall config syncs everything exactly as before.
     pub firewall: FirewallPolicy,
+    /// DIR-P3-10: mirrors `DaemonConfig::disable_mdns` (negated). Projected
+    /// into `State.mdns_enabled` for `fluxctl doctor`.
+    pub mdns_enabled: bool,
 }
 
 impl Default for Config {
@@ -230,6 +244,7 @@ impl Default for Config {
             build_id: String::from("unknown"),
             cipher: String::from("chacha20-poly1305"),
             firewall: FirewallPolicy::default(),
+            mdns_enabled: true,
         }
     }
 }
@@ -271,6 +286,7 @@ impl State {
             firewall: config.firewall.clone(),
             pending: Vec::new(),
             vault_wipe_gen: 0,
+            mdns_enabled: config.mdns_enabled,
         }
     }
 
@@ -373,6 +389,7 @@ mod tests {
             "charge_override",
             "firewall",
             "pending",
+            "mdns_enabled",
         ] {
             assert!(j.get(k).is_some(), "missing key {k} in JSON shape");
         }

@@ -192,6 +192,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
             build_id: String::from(env!("FLUXSYNCD_BUILD_ID")),
             cipher: String::from("chacha20-poly1305"),
             firewall,
+            mdns_enabled: !disable_mdns,
         },
         // This daemon's stable mesh identity: the BLAKE3 id of its Noise
         // static key, the same bytes peers see as `peer_id`. Stamped as

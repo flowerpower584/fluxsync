@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+mod doctor;
 mod render;
 
 #[derive(Parser, Debug)]
@@ -93,6 +94,9 @@ enum Cmd {
         #[command(subcommand)]
         sub: FirewallSub,
     },
+    /// One-shot diagnostic: why isn't sync working? Exits 0 unless a check
+    /// FAILs (WARNs are allowed).
+    Doctor,
 }
 
 #[derive(Subcommand, Debug)]
@@ -232,6 +236,13 @@ async fn main() -> Result<()> {
     let ipc_path = args.ipc_path.unwrap_or_else(default_ipc_path);
 
     let (value, kind) = match args.cmd {
+        // `doctor` has no daemon-side counterpart and its own exit-code
+        // contract (0 unless a check FAILs), so it bypasses the shared
+        // one_shot/render pipeline entirely.
+        Cmd::Doctor => {
+            let ok = doctor::run(&ipc_path, args.json).await?;
+            std::process::exit(i32::from(!ok));
+        }
         Cmd::Status => (
             one_shot(&ipc_path, json!({"id": 1, "op": "status"})).await?,
             Kind::Status,

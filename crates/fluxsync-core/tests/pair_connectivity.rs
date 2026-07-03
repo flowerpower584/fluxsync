@@ -33,6 +33,7 @@ fn make_app(name: &str) -> App {
         build_id: "test".into(),
         cipher: "chacha20-poly1305".into(),
         firewall: fluxsync_core::FirewallPolicy::default(),
+        mdns_enabled: true,
     })
 }
 

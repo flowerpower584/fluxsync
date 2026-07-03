@@ -110,6 +110,7 @@ The CLI talks to the daemon via the local IPC socket — useful for scripting he
 fluxctl status
 fluxctl push "Hello from Kaolack! 🇸🇳"
 fluxctl pair show-qr   # render this device's pair QR in the terminal
+fluxctl doctor         # one-shot diagnostic: why isn't sync working?
 ```
 
 ### 4. Sync across networks with Tailscale (optional)
