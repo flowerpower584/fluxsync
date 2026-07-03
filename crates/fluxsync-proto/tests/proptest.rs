@@ -6,8 +6,9 @@
 
 use fluxsync_proto::{
     decode, encode, Ack, BatteryStatus, Chunk, ClipboardItem, Frame, HandshakeInit, HandshakeResp,
-    Heartbeat, Hello, Kind, Msg, Nak, MAX_CAP_LEN, MAX_HELLO_CAPS, MAX_HELLO_NAME,
-    MAX_HELLO_PLATFORM, MAX_NAK_MISSING, PROTOCOL_VERSION,
+    Heartbeat, Hello, Kind, Msg, Nak, ResyncOffer, ResyncPull, MAX_CAP_LEN, MAX_HELLO_CAPS,
+    MAX_HELLO_NAME, MAX_HELLO_PLATFORM, MAX_NAK_MISSING, MAX_RESYNC_HASHES, PROTOCOL_VERSION,
+    RESYNC_HASH_LEN,
 };
 use proptest::prelude::*;
 
@@ -161,6 +162,21 @@ fn arb_nak() -> impl Strategy<Value = Nak> {
     })
 }
 
+fn arb_resync_hash() -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        prop_oneof![prop::char::range('0', '9'), prop::char::range('a', 'f')],
+        RESYNC_HASH_LEN,
+    )
+    .prop_map(|chars| chars.into_iter().collect::<String>())
+}
+
+fn arb_resync_hashes() -> impl Strategy<Value = Vec<String>> {
+    prop_oneof![
+        3 => prop::collection::vec(arb_resync_hash(), 0..=MAX_RESYNC_HASHES),
+        1 => Just(vec!["a".repeat(RESYNC_HASH_LEN); MAX_RESYNC_HASHES]),
+    ]
+}
+
 fn arb_msg() -> impl Strategy<Value = Msg> {
     prop_oneof![
         arb_handshake_init().prop_map(Msg::HandshakeInit),
@@ -174,6 +190,8 @@ fn arb_msg() -> impl Strategy<Value = Msg> {
         Just(Msg::Bye),
         Just(Msg::Revoke),
         arb_hello().prop_map(Msg::Hello),
+        arb_resync_hashes().prop_map(|hashes| Msg::ResyncOffer(ResyncOffer { hashes })),
+        arb_resync_hashes().prop_map(|hashes| Msg::ResyncPull(ResyncPull { hashes })),
     ]
 }
 

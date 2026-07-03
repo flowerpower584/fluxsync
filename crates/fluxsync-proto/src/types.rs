@@ -47,6 +47,17 @@ pub enum Msg {
     /// Carries the sender's `peer_name_self` so the receiver can drop
     /// the TOFU "pending" placeholder and show the real device name.
     Hello(Hello),
+    /// resync-1 capability (§6.2, docs/PROTOCOL.md): sent after a session
+    /// links when both sides advertised `resync-1` in `Hello.caps`. Offers
+    /// up to [`crate::MAX_RESYNC_HASHES`] content hashes of recently
+    /// sent/seen non-sensitive items so the peer can ask for the ones it
+    /// is missing after a reconnect.
+    ResyncOffer(ResyncOffer),
+    /// resync-1 capability (§6.2, docs/PROTOCOL.md): reply to a
+    /// [`ResyncOffer`] naming the subset of hashes the receiver does not
+    /// hold, so the sender knows which items to re-transmit as ordinary
+    /// `ClipboardItem`/`Chunk` flows.
+    ResyncPull(ResyncPull),
 }
 
 /// Post-handshake greeting. The Noise IK handshake itself doesn't carry
@@ -161,4 +172,26 @@ pub struct PeerInfo {
     pub peer_id: [u8; 32],
     pub name: String,
     pub addr: SocketAddr,
+}
+
+/// resync-1 capability (§6.2, docs/PROTOCOL.md): a list of content hashes
+/// the sender recently sent or saw, offered to the peer so it can request
+/// the ones it's missing after a reconnect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResyncOffer {
+    /// Hex-encoded BLAKE3-256, lowercase, exactly 64 characters each —
+    /// same format as `HistoryItem.hash` in `fluxsync-core`. Bounded to
+    /// [`crate::MAX_RESYNC_HASHES`] entries; see
+    /// [`crate::validate_resync_hashes`].
+    pub hashes: Vec<String>,
+}
+
+/// resync-1 capability (§6.2, docs/PROTOCOL.md): reply to a
+/// [`ResyncOffer`] naming the subset of hashes the receiver does not hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResyncPull {
+    /// Same shape and bounds as [`ResyncOffer::hashes`].
+    pub hashes: Vec<String>,
 }

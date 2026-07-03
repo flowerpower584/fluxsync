@@ -1,8 +1,8 @@
 use crate::error::ProtoError;
 use crate::types::{Chunk, ClipboardItem, Frame, Msg, Nak};
 use crate::{
-    MAX_CAP_LEN, MAX_CHUNKS, MAX_CHUNK_DATA, MAX_HELLO_CAPS, MAX_HELLO_NAME, MAX_HELLO_PLATFORM,
-    MAX_NAK_MISSING, MAX_PAYLOAD, PROTOCOL_VERSION,
+    is_valid_resync_hash, MAX_CAP_LEN, MAX_CHUNKS, MAX_CHUNK_DATA, MAX_HELLO_CAPS, MAX_HELLO_NAME,
+    MAX_HELLO_PLATFORM, MAX_NAK_MISSING, MAX_PAYLOAD, MAX_RESYNC_HASHES, PROTOCOL_VERSION,
 };
 
 /// Encode a [`Frame`] to CBOR bytes.
@@ -73,8 +73,26 @@ fn validate(frame: &Frame) -> Result<(), ProtoError> {
         Msg::Hello(h) if h.caps.iter().any(|c| !is_ascii_printable_cap(c)) => {
             Err(ProtoError::HelloCapNotAsciiPrintable)
         }
+        Msg::ResyncOffer(r) => validate_resync_msg(&r.hashes),
+        Msg::ResyncPull(r) => validate_resync_msg(&r.hashes),
         _ => Ok(()),
     }
+}
+
+/// Shared bound check for `ResyncOffer.hashes` / `ResyncPull.hashes`
+/// (resync-1, §6.2): at most `MAX_RESYNC_HASHES` entries, each a
+/// well-formed 64-char lowercase-hex hash. Mirrors the `Hello.caps`
+/// enforcement above — checked on both `encode` and `decode`. Same rule as
+/// [`crate::validate_resync_hashes`], applied inline so `validate` returns
+/// the specific [`ProtoError`] variant instead of a bare bool.
+fn validate_resync_msg(hashes: &[String]) -> Result<(), ProtoError> {
+    if hashes.len() > MAX_RESYNC_HASHES {
+        return Err(ProtoError::ResyncTooManyHashes(hashes.len()));
+    }
+    if hashes.iter().any(|h| !is_valid_resync_hash(h)) {
+        return Err(ProtoError::ResyncHashMalformed);
+    }
+    Ok(())
 }
 
 /// ASCII-printable check for a single `Hello.caps` entry: bytes `0x20..=0x7E`
@@ -497,6 +515,77 @@ mod tests {
             matches!(err, ProtoError::Cbor(_)),
             "expected CBOR deserialization error from unknown field, got {err:?}"
         );
+    }
+
+    /// A well-formed 64-char lowercase-hex `resync-1` hash for test fixtures.
+    fn valid_hash() -> String {
+        "cd".repeat(crate::RESYNC_HASH_LEN / 2)
+    }
+
+    #[test]
+    fn round_trip_resync_offer() {
+        let f = frame(Msg::ResyncOffer(crate::ResyncOffer {
+            hashes: vec![valid_hash(), valid_hash()],
+        }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn round_trip_resync_pull() {
+        let f = frame(Msg::ResyncPull(crate::ResyncPull {
+            hashes: vec![valid_hash()],
+        }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn accepts_resync_hashes_at_max_count() {
+        let f = frame(Msg::ResyncOffer(crate::ResyncOffer {
+            hashes: vec![valid_hash(); MAX_RESYNC_HASHES],
+        }));
+        let bytes = encode(&f).unwrap();
+        assert!(decode(&bytes).is_ok());
+    }
+
+    #[test]
+    fn rejects_too_many_resync_hashes() {
+        let f = frame(Msg::ResyncOffer(crate::ResyncOffer {
+            hashes: vec![valid_hash(); MAX_RESYNC_HASHES + 1],
+        }));
+        let err = encode(&f).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoError::ResyncTooManyHashes(n) if n == MAX_RESYNC_HASHES + 1
+        ));
+    }
+
+    #[test]
+    fn rejects_resync_hash_wrong_length() {
+        let f = frame(Msg::ResyncPull(crate::ResyncPull {
+            hashes: vec!["ab".into()],
+        }));
+        let err = encode(&f).unwrap_err();
+        assert!(matches!(err, ProtoError::ResyncHashMalformed));
+    }
+
+    #[test]
+    fn rejects_resync_hash_uppercase() {
+        let f = frame(Msg::ResyncOffer(crate::ResyncOffer {
+            hashes: vec![valid_hash().to_uppercase()],
+        }));
+        let err = encode(&f).unwrap_err();
+        assert!(matches!(err, ProtoError::ResyncHashMalformed));
+    }
+
+    #[test]
+    fn rejects_resync_hash_non_hex() {
+        let f = frame(Msg::ResyncOffer(crate::ResyncOffer {
+            hashes: vec!["g".repeat(crate::RESYNC_HASH_LEN)],
+        }));
+        let err = encode(&f).unwrap_err();
+        assert!(matches!(err, ProtoError::ResyncHashMalformed));
     }
 
     #[test]

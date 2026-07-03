@@ -342,3 +342,53 @@ cannot pair. Every addition after this one is designed to avoid that: a
 build that doesn't send `caps` at all still decodes cleanly (`#[serde(
 default)]` on the field), and a build that receives caps it has never heard
 of simply ignores them instead of failing.
+
+### 6.2 resync-1 capability
+
+`resync-1` is negotiated exactly like any other tag in `Hello.caps` (§6.1):
+each side takes the intersection of its own `SUPPORTED_CAPS` with the peer's
+advertised list via `fluxsync_proto::negotiate_caps`. It adds no new struct
+field and no `PROTOCOL_VERSION` bump — it is a purely optional pair of `Msg`
+variants that a peer only sends once it knows the other side understands
+them.
+
+Once a session has reached the Linked state (§2) and **both** sides
+advertised `resync-1`, either side MAY send:
+
+```rust
+struct ResyncOffer {
+    hashes: Vec<String>,   // up to MAX_RESYNC_HASHES entries
+}
+
+struct ResyncPull {
+    hashes: Vec<String>,   // up to MAX_RESYNC_HASHES entries
+}
+```
+
+- `ResyncOffer.hashes` lists the content hashes (BLAKE3-256, hex-encoded,
+  lowercase, exactly 64 characters — the same format as `ClipboardItem.hash`
+  / `HistoryItem.hash`) of recently sent/seen **non-sensitive** items. It is
+  the offering side's way of saying "these are the items I have"; it never
+  includes anything marked `sensitive` (§1.4), since those are never
+  persisted past the receiver's live ring in the first place.
+- The receiver replies with `ResyncPull`, listing the subset of those
+  hashes it does **not** already hold (by its own dedup ring / history —
+  §1.6).
+- The original sender then re-transmits each requested item as an ordinary
+  `ClipboardItem` (and `Chunk` flow, if large — §1.4, §1.7) keyed by that
+  hash, exactly as if it were being sent for the first time. `ResyncOffer`
+  and `ResyncPull` never carry payload bytes themselves — they are purely an
+  index exchange that feeds back into the existing reliability machinery.
+- Both `hashes` lists are bounded to `MAX_RESYNC_HASHES` (32) entries,
+  enforced on **decode** as well as **encode** — same fail-closed
+  convention as `Hello.caps` (§6.1). A hash that isn't exactly 64 lowercase
+  hex characters is rejected the same way; `fluxsync_proto::
+  validate_resync_hashes` exposes this check for callers that want to
+  pre-validate a list before building a message.
+- A peer that never advertised `resync-1` never receives these messages —
+  there is nothing to negotiate around on its side. And, as with any
+  variant a build doesn't recognize, an unrecognized `Msg` tag (e.g. an
+  older build seeing `ResyncOffer` from a newer peer that mistakenly sent it
+  without negotiation) is dropped by `decode()` as a `ProtoError`, never a
+  panic and never a session teardown — this is regression-tested
+  (`regression_unknown_variant.rs`).

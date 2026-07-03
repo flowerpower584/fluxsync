@@ -41,6 +41,12 @@ pub enum ProtoError {
     #[error("hello cap is not ASCII printable")]
     HelloCapNotAsciiPrintable,
 
+    #[error("too many resync hashes: {0} entries (max 32)")]
+    ResyncTooManyHashes(usize),
+
+    #[error("resync hash malformed: must be exactly 64 lowercase hex characters")]
+    ResyncHashMalformed,
+
     #[error("CBOR decode failed: {0}")]
     Cbor(String),
 
