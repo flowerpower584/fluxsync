@@ -23,6 +23,13 @@ pub struct State {
     pub peer_id: [u8; 32],
     pub peer_name: String,
     pub trusted_peer_name: Option<String>,
+    /// DIR-P3-01: this device's own friendly name, as sent in `Msg::Hello`
+    /// on the next session establishment. Mirrors `Config.peer_name_self` so
+    /// clients (fluxctl, tray, Android settings) can render + edit it via
+    /// `CmdOp::SetDeviceName` without a separate read path. `#[serde(
+    /// default)]` keeps older snapshots (pre-rename) deserializing.
+    #[serde(default)]
+    pub device_name: String,
     /// Peer's OS family (`macos`/`windows`/`linux`/`android`/`ios`), learned
     /// from `Msg::Hello`. Empty until the peer's Hello arrives. Frontends key
     /// the device icon off this instead of hardcoding one.
@@ -125,9 +132,21 @@ pub struct ConnectionMetrics {
     pub network_changes: u64,
     pub reconnects: u64,
     pub decrypt_failures: u64,
+    /// DIR-P1-09: content-hash dedup drops (an echo of our own local copy,
+    /// or a peer retransmit already applied). Counted at `App::handle`'s
+    /// `suppress_action` sites via `Action::DuplicateDropped`.
     pub dedup_drops: u64,
     pub last_disconnect_reason: Option<DisconnectReason>,
     pub uptime_session_secs: u64,
+    /// DIR-P1-09: clipboard items successfully handed to the transport for
+    /// sending (`Action::SendItem`, fanned out to at least one linked peer).
+    /// Counts logical items, not wire frames — a chunked image is one.
+    #[serde(default)]
+    pub items_sent: u64,
+    /// DIR-P1-09: clipboard items applied to the local OS clipboard
+    /// (`Action::WriteClipboard`) after arriving from a peer.
+    #[serde(default)]
+    pub items_received: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,6 +249,7 @@ impl State {
             peer_id: [0u8; 32],
             peer_name: String::new(),
             trusted_peer_name: None,
+            device_name: config.peer_name_self.clone(),
             peer_platform: String::new(),
             peer_caps: Vec::new(),
             peer_battery: 255, // sentinel: unknown until first BatteryStatus → UI shows "—"
@@ -335,6 +355,7 @@ mod tests {
             "peer_id",
             "peer_name",
             "trusted_peer_name",
+            "device_name",
             "peer_battery",
             "peer_charging",
             "peers",

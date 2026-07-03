@@ -666,6 +666,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_charge_override(
     ): Short
+    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_device_name(
+    ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_favorite(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_firewall(
@@ -699,159 +701,161 @@ internal object UniffiLib {
         
     }
     external fun uniffi_fluxsync_mobile_ffi_fn_clone_fluxsynchandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun uniffi_fluxsync_mobile_ffi_fn_free_fluxsynchandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_constructor_fluxsynchandle_start(`peerName`: RustBuffer.ByValue,`ipcPath`: RustBuffer.ByValue,`udpPort`: Short,`identity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_fetch_item(`ptr`: Long,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_log_cursor(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_accept(`ptr`: Long,`pubkeyB32`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`addr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_confirm(`ptr`: Long,`peerId`: RustBuffer.ByValue,`accept`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_from_uri(`ptr`: Long,`uri`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_pending(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_show(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_poll_logs(`ptr`: Long,`since`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_poll_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_item(`ptr`: Long,`kind`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_text(`ptr`: Long,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_resolve_pending(`ptr`: Long,`hash`: RustBuffer.ByValue,`allow`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_revoke(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_battery_threshold(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_charge_override(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_favorite(`ptr`: Long,`hash`: RustBuffer.ByValue,`favorite`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_firewall(`ptr`: Long,`policyJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_self_battery(`ptr`: Long,`level`: Byte,`charging`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_stop(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_toggle(`ptr`: Long,`on`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_unpair(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun ffi_fluxsync_mobile_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun ffi_fluxsync_mobile_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_u8(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_u8(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_i8(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_i8(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_u16(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_u16(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Short
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_i16(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_i16(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Short
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_u32(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_u32(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Int
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_i32(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_i32(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Int
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_u64(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_u64(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_i64(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_i64(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_f32(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_f32(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Float
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_f64(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_f64(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Double
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_rust_buffer(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_rust_buffer(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun ffi_fluxsync_mobile_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_void(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_free_void(`handle`: Long,
-    ): Unit
-    external fun ffi_fluxsync_mobile_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
+): Long
+external fun uniffi_fluxsync_mobile_ffi_fn_free_fluxsynchandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_constructor_fluxsynchandle_start(`peerName`: RustBuffer.ByValue,`ipcPath`: RustBuffer.ByValue,`udpPort`: Short,`identity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_fetch_item(`ptr`: Long,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_log_cursor(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_accept(`ptr`: Long,`pubkeyB32`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,`addr`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_confirm(`ptr`: Long,`peerId`: RustBuffer.ByValue,`accept`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_from_uri(`ptr`: Long,`uri`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_pending(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_show(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_poll_logs(`ptr`: Long,`since`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_poll_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_item(`ptr`: Long,`kind`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_text(`ptr`: Long,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_resolve_pending(`ptr`: Long,`hash`: RustBuffer.ByValue,`allow`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_revoke(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_battery_threshold(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_charge_override(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_device_name(`ptr`: Long,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_favorite(`ptr`: Long,`hash`: RustBuffer.ByValue,`favorite`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_firewall(`ptr`: Long,`policyJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_self_battery(`ptr`: Long,`level`: Byte,`charging`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_stop(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_toggle(`ptr`: Long,`on`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_unpair(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun ffi_fluxsync_mobile_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun ffi_fluxsync_mobile_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_u8(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_u8(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_i8(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_i8(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_u16(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_u16(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Short
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_i16(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_i16(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Short
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_u32(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_u32(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Int
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_i32(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_i32(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Int
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_u64(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_u64(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_i64(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_i64(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_f32(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_f32(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Float
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_f64(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_f64(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Double
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_rust_buffer(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_rust_buffer(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun ffi_fluxsync_mobile_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_cancel_void(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_free_void(`handle`: Long,
+): Unit
+external fun ffi_fluxsync_mobile_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 
-        
+    
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
@@ -908,6 +912,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_charge_override() != 22905.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_device_name() != 56288.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_favorite() != 58674.toShort()) {
@@ -1459,6 +1466,15 @@ public interface FluxsyncHandleInterface {
     fun `setChargeOverride`(`value`: kotlin.Boolean)
     
     /**
+     * DIR-P3-01: rename this device. Validation (non-empty, wire-length
+     * bound, printable) happens daemon-side in `App::set_device_name`; a
+     * rejected name comes back as `FluxError::Ipc` with the daemon's
+     * message. An already-linked peer sees the new name on the next
+     * session establishment, not immediately.
+     */
+    fun `setDeviceName`(`name`: kotlin.String)
+    
+    /**
      * FluxVault: pin (`favorite = true`) or unpin a history item by its hex
      * content hash. Pinned items survive the vault's TTL + disk cap.
      */
@@ -1865,6 +1881,26 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
     UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_charge_override(
         it,
         FfiConverterBoolean.lower(`value`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * DIR-P3-01: rename this device. Validation (non-empty, wire-length
+     * bound, printable) happens daemon-side in `App::set_device_name`; a
+     * rejected name comes back as `FluxError::Ipc` with the daemon's
+     * message. An already-linked peer sees the new name on the next
+     * session establishment, not immediately.
+     */
+    @Throws(FluxException::class)override fun `setDeviceName`(`name`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_device_name(
+        it,
+        FfiConverterString.lower(`name`),_status)
 }
     }
     

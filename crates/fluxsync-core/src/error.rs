@@ -7,4 +7,7 @@ pub enum CoreError {
 
     #[error("battery level {0} > 100")]
     BatteryLevel(u8),
+
+    #[error("invalid device name: {0}")]
+    InvalidDeviceName(String),
 }

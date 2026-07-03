@@ -43,6 +43,8 @@ data class DaemonState(
     val history: List<HistoryItem>,
     val version: String,
     val cipher: String,
+    /** DIR-P3-01: this device's own friendly name, editable via `setDeviceName`. */
+    val deviceName: String,
     val trustedPeerName: String?,
     val metrics: ConnectionMetricsView?,
     val peers: List<MeshPeer>,
@@ -74,6 +76,7 @@ data class DaemonState(
                 history = parseHistory(o.optJSONArray("history")),
                 version = o.optString("version", ""),
                 cipher = o.optString("cipher", ""),
+                deviceName = o.optString("device_name", ""),
                 trustedPeerName = o.optString("trusted_peer_name", null),
                 metrics = ConnectionMetricsView.parse(o.optJSONObject("metrics")),
                 peers = parsePeers(o.optJSONArray("peers")),
@@ -294,6 +297,10 @@ data class ConnectionMetricsView(
     val heartbeatsMissedConsecutive: Int,
     val uptimeSessionSecs: Long,
     val lastDisconnectReason: String?,
+    /** DIR-P1-09: logical items handed to the transport for sending. */
+    val itemsSent: Long,
+    /** DIR-P1-09: logical items applied to the local OS clipboard. */
+    val itemsReceived: Long,
 ) {
     companion object {
         fun parse(o: JSONObject?): ConnectionMetricsView? {
@@ -310,6 +317,8 @@ data class ConnectionMetricsView(
                 heartbeatsMissedConsecutive = o.optInt("heartbeats_missed_consecutive", 0),
                 uptimeSessionSecs = o.optLong("uptime_session_secs", 0L),
                 lastDisconnectReason = o.optString("last_disconnect_reason", "").ifEmpty { null },
+                itemsSent = o.optLong("items_sent", 0L),
+                itemsReceived = o.optLong("items_received", 0L),
             )
         }
     }

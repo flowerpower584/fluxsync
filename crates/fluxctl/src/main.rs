@@ -52,6 +52,9 @@ enum Cmd {
     SetThreshold { value: u8 },
     /// Toggle the "resume while charging" override.
     SetChargeOverride { value: bool },
+    /// Rename this device. An already-linked peer sees the new name on the
+    /// next session establishment, not immediately.
+    SetName { name: String },
     /// Revoke a peer by hex peer-id.
     Revoke { peer_id: String },
     /// Force a reconnection by dropping the current session and starting discovery.
@@ -250,6 +253,14 @@ async fn main() -> Result<()> {
             )
             .await?,
             Kind::Ack("charge override updated"),
+        ),
+        Cmd::SetName { name } => (
+            one_shot(
+                &ipc_path,
+                json!({"id": 1, "op": "set_device_name", "name": name}),
+            )
+            .await?,
+            Kind::Ack("device renamed"),
         ),
         Cmd::Revoke { peer_id } => (
             one_shot(

@@ -45,6 +45,18 @@ async fn fluxsync_set_charge_override(value: bool) -> Result<(), String> {
         .map(|_| ())
 }
 
+/// DIR-P3-01: rename this device. Validation (non-empty, wire-length
+/// bound, printable) happens daemon-side; a rejected name comes back as
+/// an `Err(String)` the settings UI can show inline. An already-linked
+/// peer sees the new name on the next session establishment, not
+/// immediately.
+#[tauri::command]
+async fn fluxsync_set_device_name(name: String) -> Result<(), String> {
+    ipc::one_shot(json!({"id": 1, "op": "set_device_name", "name": name}))
+        .await
+        .map(|_| ())
+}
+
 #[tauri::command]
 fn fluxsync_set_launch_at_login(app: tauri::AppHandle, value: bool) -> Result<(), String> {
     // Real OS-level autostart via tauri-plugin-autostart: a LaunchAgent
@@ -290,6 +302,7 @@ pub fn run() {
             fluxsync_toggle,
             fluxsync_set_threshold,
             fluxsync_set_charge_override,
+            fluxsync_set_device_name,
             fluxsync_pair_show,
             fluxsync_pair_from_uri,
             fluxsync_pair_from_pin,

@@ -49,7 +49,22 @@
             <h1>General</h1>
             <p id="general-subtitle">How FluxSync behaves on this Mac.</p>
           </header>
-          
+
+          <div class="field-row">
+            <div class="field-info">
+              <div class="label">Device name</div>
+              <div class="hint">Shown to your other devices</div>
+            </div>
+            <input
+              type="text"
+              id="device-name-input"
+              class="text-input"
+              maxlength="256"
+              aria-label="Device name"
+              placeholder="This device"
+            />
+          </div>
+
           <div class="field-row">
             <div class="field-info">
               <div class="label">Launch at login</div>
@@ -142,10 +157,34 @@
 
           <div class="field-row">
             <div class="field-info">
+              <div class="label">Items synced</div>
+              <div class="hint">Sent · received since the daemon started</div>
+            </div>
+            <span class="mono-val" id="metric-items">—</span>
+          </div>
+
+          <div class="field-row">
+            <div class="field-info">
+              <div class="label">Duplicates dropped</div>
+              <div class="hint">Dedup ring — echoes and retransmits</div>
+            </div>
+            <span class="mono-val" id="metric-dups">—</span>
+          </div>
+
+          <div class="field-row">
+            <div class="field-info">
               <div class="label">Reconnects</div>
               <div class="hint">Transport drops since the daemon started</div>
             </div>
             <span class="mono-val" id="metric-reconnects">—</span>
+          </div>
+
+          <div class="field-row">
+            <div class="field-info">
+              <div class="label">Handshake failures</div>
+              <div class="hint">Attempted handshakes that didn't complete</div>
+            </div>
+            <span class="mono-val" id="metric-hs-failed">—</span>
           </div>
 
           <div class="field-row no-border">

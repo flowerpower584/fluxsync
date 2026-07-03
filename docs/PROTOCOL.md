@@ -239,7 +239,15 @@ Request:
 { "id": 15, "op": "pair_confirm", "peer_id": "..." }
 { "id": 16, "op": "revoke", "peer_id": "..." }
 { "id": 17, "op": "debug_capture" }
+{ "id": 18, "op": "set_device_name", "name": "Dethie's MacBook" }
 ```
+
+`set_device_name` (DIR-P3-01) renames this device. Validated (non-empty
+after trim, <= `MAX_HELLO_NAME` = 256 bytes, no control characters) and
+persisted to `device_name.json` in the keystore dir; an already-linked
+peer only sees the new name in the next `Msg::Hello`, i.e. the next
+session establishment — not immediately, and no reconnect is forced just
+to push it sooner.
 
 Examples for the two boolean/number setters (the CLI sends one of these every time the user adjusts a slider or toggle in the UI):
 

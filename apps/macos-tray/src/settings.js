@@ -74,6 +74,15 @@ function fmtUptime(secs) {
 }
 
 function updateUI(s) {
+  // Device name: skip the refresh while the field is focused so a
+  // 5s poll (or a live state-update push) doesn't stomp what the user is
+  // mid-typing — same hazard `threshold-slider` doesn't have (a drag is
+  // transient; a text field holds partial input across ticks).
+  const nameInput = document.getElementById('device-name-input');
+  if (document.activeElement !== nameInput) {
+    nameInput.value = s.device_name || '';
+  }
+
   // General tab — battery threshold + slider stay in sync with the daemon.
   document.getElementById('threshold-display').textContent = s.battery_threshold || 20;
   document.getElementById('threshold-slider').value = s.battery_threshold || 20;
@@ -91,7 +100,10 @@ function updateUI(s) {
   const m = s.metrics || null;
   document.getElementById('metric-rtt').textContent = m && m.last_rtt_ms ? `${m.last_rtt_ms} MS` : '—';
   document.getElementById('metric-rtt-p99').textContent = m && m.rtt_p99_ms ? `${m.rtt_p99_ms} MS` : '—';
+  document.getElementById('metric-items').textContent = m ? `${m.items_sent ?? 0} ↑ ${m.items_received ?? 0} ↓` : '—';
+  document.getElementById('metric-dups').textContent = m ? `${m.dedup_drops ?? 0}` : '—';
   document.getElementById('metric-reconnects').textContent = m ? `${m.reconnects ?? 0}` : '—';
+  document.getElementById('metric-hs-failed').textContent = m ? `${m.handshakes_failed ?? 0}` : '—';
   document.getElementById('metric-uptime').textContent = m ? fmtUptime(m.uptime_session_secs) : '—';
 
   // Update device list if on devices tab
@@ -197,6 +209,30 @@ document.getElementById('threshold-slider').addEventListener('change', async (e)
     e.target.value = prev;
     document.getElementById('threshold-display').textContent = prev;
     showToast(`Couldn't update threshold: ${err}`);
+  }
+});
+
+// DIR-P3-01: save on blur (native `change` semantics for a text input),
+// and Enter triggers the same blur instead of needing a separate Save
+// button — mirrors the slider's "commit on release" feel.
+document.getElementById('device-name-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') e.target.blur();
+});
+
+document.getElementById('device-name-input').addEventListener('change', async (e) => {
+  const val = e.target.value.trim();
+  const prev = lastState ? (lastState.device_name || '') : '';
+  if (!val) {
+    e.target.value = prev;
+    showToast("Device name can't be empty.");
+    return;
+  }
+  try {
+    await invoke('fluxsync_set_device_name', { name: val });
+    showToast('Device name updated.');
+  } catch (err) {
+    e.target.value = prev;
+    showToast(`Couldn't rename device: ${err}`);
   }
 });
 

@@ -64,6 +64,14 @@ pub enum CmdOp {
     SetThreshold {
         value: u8,
     },
+    /// DIR-P3-01: rename this device. Validated + persisted by the daemon
+    /// (see `App::set_device_name` + `keystore::save_device_name`); an
+    /// already-linked peer sees the new name on the next session
+    /// establishment (`Msg::Hello`), not immediately — no disruptive
+    /// reconnect is forced just for this.
+    SetDeviceName {
+        name: String,
+    },
     SetChargeOverride {
         value: bool,
     },

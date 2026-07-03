@@ -139,6 +139,13 @@ pub enum Action {
         level: u8,
         charging: bool,
     },
+    /// DIR-P1-09: the content-hash dedup ring suppressed this event (an
+    /// echo of our own local copy, or a peer retransmit already applied).
+    /// Emitted alongside whatever else `App::handle` returns from a
+    /// `suppress_action` branch so the daemon can bump
+    /// `ConnectionMetrics::dedup_drops` — the FSM stays pure, this is just
+    /// a signal, no I/O.
+    DuplicateDropped,
 }
 
 /// A friendly log entry. Routed both to `tracing` (structured) and to the

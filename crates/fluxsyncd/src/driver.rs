@@ -172,6 +172,16 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         None => firewall,
     };
 
+    // DIR-P3-01: same rationale as the firewall load above — a persisted
+    // `CmdOp::SetDeviceName` is authoritative across restarts. Falls back to
+    // whatever `main.rs` resolved (hostname or `--peer-name`) when no rename
+    // has ever been persisted. This is the single source `CoreConfig`, mDNS
+    // advertisement, and the initial `Msg::Hello` all read below.
+    let peer_name_self = match keystore_dir.as_ref() {
+        Some(dir) => crate::keystore::load_device_name(dir).unwrap_or(peer_name_self),
+        None => peer_name_self,
+    };
+
     // ── App + channels ────────────────────────────────────────────
     let mut app = App::new_with_device(
         CoreConfig {
@@ -945,6 +955,10 @@ async fn dispatch(
                             frames = frames.len(),
                             "SendItem: fanning item out to linked peers"
                         );
+                        // DIR-P1-09: counts logical items handed to the
+                        // transport, not wire frames — a chunked image is
+                        // still one `items_sent`.
+                        metrics.lock().await.on_item_sent();
                         let multi = frames.len() > 1;
                         for peer in &targets {
                             for (i, bytes) in frames.iter().enumerate() {
@@ -983,7 +997,17 @@ async fn dispatch(
                 // the core FSM contract stays unchanged.
                 let _ = hash;
             }
+            Action::DuplicateDropped => {
+                // DIR-P1-09: content-hash dedup suppressed this event (an
+                // echo of our own local copy, or a peer retransmit already
+                // applied). See `App::handle`'s `suppress_action` branches.
+                metrics.lock().await.on_dedup_drop();
+            }
             Action::WriteClipboard { kind, payload } => {
+                // DIR-P1-09: this is the "item apply" chokepoint — a
+                // logical inbound item accepted and written to the local
+                // OS clipboard, regardless of text/image kind.
+                metrics.lock().await.on_item_received();
                 // Mark the hash before writing so the watcher's next
                 // poll skips this exact payload — otherwise we'd read
                 // back our own write, fire a LocalClipboardChange, and
@@ -1464,6 +1488,38 @@ async fn handle_driver_cmd(
                 );
                 dispatch(
                     actions,
+                    app,
+                    transport,
+                    trusted,
+                    keystore_dir,
+                    state_watch_tx,
+                    logs_bcast_tx,
+                    log_tail,
+                    last_written_hashes,
+                    metrics,
+                    inflight,
+                    peer_meta,
+                )
+                .await;
+                CmdResponse::ok(req_id, None)
+            }
+            Err(e) => CmdResponse::err(req_id, e.to_string()),
+        },
+        CmdOp::SetDeviceName { name } => match app.set_device_name(&name) {
+            Ok(()) => {
+                let resolved = app.config().peer_name_self.clone();
+                tracing::info!(name = %resolved, "IPC: set-device-name");
+                // Best-effort: a write failure logs but never fails the
+                // command — the rename is already live in memory (and will
+                // ship in the next `Msg::Hello`) even if the disk write
+                // doesn't survive a restart.
+                if let Some(dir) = keystore_dir {
+                    if let Err(e) = crate::keystore::save_device_name(dir, &resolved) {
+                        tracing::warn!(error = %e, "failed to persist device name");
+                    }
+                }
+                dispatch(
+                    vec![Action::EmitState],
                     app,
                     transport,
                     trusted,
@@ -2519,9 +2575,18 @@ async fn transport_recv_loop(
                         let evt = event_tx.clone();
                         let kd = keystore_dir.clone();
                         let pending = pending_pairs.clone();
+                        let responder_metrics = metrics.clone();
                         tokio::spawn(async move {
                             if let Err(e) = handshake::run_responder(id, msg, from, tr, trusted, window, evt, kd, pending).await {
                                 tracing::warn!(error = %e, "responder failed");
+                                // DIR-P1-09: counted here (not inside
+                                // `handshake::run_responder`) because
+                                // `MetricsTracker` lives in `fluxsyncd`, while
+                                // `handshake` only returns an error type —
+                                // keeps the metrics dependency at the one
+                                // call site instead of threading it through
+                                // every handshake helper.
+                                responder_metrics.lock().await.on_handshake_fail();
                             }
                         });
                     }
@@ -4405,6 +4470,9 @@ async fn start_initiator(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, addr = %addr, attempt = i, "initiator attempt failed");
+                    // DIR-P1-09: one failed hint = one failed handshake
+                    // attempt, same accounting as the responder/rekey paths.
+                    transport.metrics.lock().await.on_handshake_fail();
                 }
             }
         }

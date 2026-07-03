@@ -49,6 +49,12 @@ fun SettingsScreen(vm: FluxsyncViewModel, onOpenOemGuidance: () -> Unit = {}) {
     val s = state ?: return
 
     var showUnpairConfirm by remember { mutableStateOf(false) }
+    // DIR-P3-01: rename dialog. `renameInput` is seeded from the live
+    // device name each time the dialog opens (see the "Device name" row's
+    // onClick below), not on every recomposition — a `metrics` refresh
+    // mid-edit must not stomp what the user is typing.
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameInput by remember { mutableStateOf("") }
     // DIR-P3-07: refreshed by the same MainActivity.onResume hook that
     // drives `checkAccessibility()` — covers the "granted it, came back
     // from Settings" case without a dedicated poll.
@@ -66,6 +72,21 @@ fun SettingsScreen(vm: FluxsyncViewModel, onOpenOemGuidance: () -> Unit = {}) {
     ) {
         item {
             SettingsGroup(title = "General") {
+                SettingsItem(
+                    label = "Device name",
+                    hint = "Shown to your other devices",
+                    right = {
+                        Text(
+                            "${s.deviceName.ifEmpty { "—" }} ›",
+                            color = FsDarkMuted,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                    onClick = {
+                        renameInput = s.deviceName
+                        showRenameDialog = true
+                    },
+                )
                 SettingsItem(
                     label = "Battery threshold",
                     hint = "Pause sync below ${s.threshold}%",
@@ -197,6 +218,17 @@ fun SettingsScreen(vm: FluxsyncViewModel, onOpenOemGuidance: () -> Unit = {}) {
                     },
                 )
                 SettingsItem(
+                    label = "Items synced",
+                    hint = "Sent · received since the daemon started",
+                    right = {
+                        Text(
+                            "${m?.itemsSent ?: 0L} ↑ ${m?.itemsReceived ?: 0L} ↓",
+                            color = FsDarkMuted,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                )
+                SettingsItem(
                     label = "Reconnects",
                     hint = "Transport drops since the daemon started",
                     right = {
@@ -297,6 +329,49 @@ fun SettingsScreen(vm: FluxsyncViewModel, onOpenOemGuidance: () -> Unit = {}) {
             },
             dismissButton = {
                 TextButton(onClick = { showUnpairConfirm = false }) {
+                    Text("CANCEL", color = FsDarkMuted)
+                }
+            },
+        )
+    }
+
+    if (showRenameDialog) {
+        val trimmed = renameInput.trim()
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            containerColor = FsDarkSurface,
+            title = { Text("Rename this device", color = FsDarkFg) },
+            text = {
+                Column {
+                    Text(
+                        "Shown to your other devices. Already-paired peers see the " +
+                            "new name the next time they reconnect, not immediately.",
+                        color = FsDarkMuted,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    androidx.compose.material3.OutlinedTextField(
+                        value = renameInput,
+                        onValueChange = { renameInput = it },
+                        singleLine = true,
+                        isError = trimmed.isEmpty(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = trimmed.isNotEmpty(),
+                    onClick = {
+                        vm.setDeviceName(trimmed)
+                        showRenameDialog = false
+                    },
+                ) {
+                    Text("SAVE", color = if (trimmed.isEmpty()) FsDarkMuted else FsDarkFg)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) {
                     Text("CANCEL", color = FsDarkMuted)
                 }
             },

@@ -10,6 +10,7 @@
 
 use crate::clock::{Clock, LamportClock, WallClock};
 use crate::dedup::{ContentHash, DedupRing, SeenSet};
+use crate::error::CoreError;
 use crate::events::{Action, Event, LogEntry};
 use crate::fsm::{transition, Phase};
 use crate::id::{DeviceId, EventId};
@@ -163,6 +164,35 @@ impl App {
     pub fn set_charge_override(&mut self, value: bool) {
         self.config.charge_override = value;
         self.state.charge_override = value;
+    }
+
+    /// DIR-P3-01: rename this device. Validates non-empty (after trim),
+    /// within the `Msg::Hello.name` wire bound, and printable — the same
+    /// gate `fluxsync_proto::codec` enforces on the receiving end, checked
+    /// here too so a rejected name never reaches the config/state at all.
+    /// Takes effect for an already-linked peer on the next session
+    /// establishment (`Action::OpenSession` reads `config.peer_name_self`
+    /// fresh every time); the caller is responsible for persisting it
+    /// across restarts.
+    pub fn set_device_name(&mut self, name: &str) -> Result<(), CoreError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(CoreError::InvalidDeviceName("name is empty".into()));
+        }
+        if trimmed.len() > fluxsync_proto::MAX_HELLO_NAME {
+            return Err(CoreError::InvalidDeviceName(format!(
+                "name exceeds {} bytes",
+                fluxsync_proto::MAX_HELLO_NAME
+            )));
+        }
+        if trimmed.chars().any(char::is_control) {
+            return Err(CoreError::InvalidDeviceName(
+                "name contains non-printable characters".into(),
+            ));
+        }
+        self.config.peer_name_self = trimmed.to_string();
+        self.state.device_name = trimmed.to_string();
+        Ok(())
     }
 
     /// Replace the clipboard firewall policy at runtime (driven by an IPC
@@ -629,10 +659,12 @@ impl App {
         if suppress_action {
             // [REMEDIATION] If suppressed (duplicate/replay), we skip the FSM transition entirely.
             // However, for incoming clipboard frames, we still MUST send an Ack to stop the peer's retransmission.
+            // DIR-P1-09: `DuplicateDropped` lets the daemon count this at the
+            // dedup chokepoint without the FSM performing any I/O itself.
             if let Event::FrameReceivedClipboard { hash, .. } = &event {
-                return vec![Action::AckItem { hash: *hash }];
+                return vec![Action::DuplicateDropped, Action::AckItem { hash: *hash }];
             }
-            return vec![];
+            return vec![Action::DuplicateDropped];
         }
 
         // ── Run the pure transition ─────────────────────────────────────
@@ -1803,5 +1835,58 @@ mod tests {
         // Any echo back is dropped — no loop.
         assert_eq!(b.ingest_remote(c_id, eid), Ingest::Dropped);
         assert_eq!(a.ingest_remote(b_id, eid), Ingest::Dropped);
+    }
+
+    /// DIR-P3-01: a valid rename updates both the live config (read by
+    /// `Action::OpenSession` for the next `Msg::Hello`) and the state
+    /// projection (read by `fluxctl status` / the tray / Android settings).
+    #[test]
+    fn set_device_name_updates_config_and_state() {
+        let mut app = boot();
+        assert!(app.set_device_name("  Dethie's MacBook  ").is_ok());
+        assert_eq!(app.config().peer_name_self, "Dethie's MacBook");
+        assert_eq!(app.snapshot().device_name, "Dethie's MacBook");
+    }
+
+    #[test]
+    fn set_device_name_rejects_empty_or_whitespace_only() {
+        let mut app = boot();
+        assert!(matches!(
+            app.set_device_name(""),
+            Err(CoreError::InvalidDeviceName(_))
+        ));
+        assert!(matches!(
+            app.set_device_name("   "),
+            Err(CoreError::InvalidDeviceName(_))
+        ));
+    }
+
+    #[test]
+    fn set_device_name_rejects_over_wire_bound() {
+        let mut app = boot();
+        let too_long = "x".repeat(fluxsync_proto::MAX_HELLO_NAME + 1);
+        assert!(matches!(
+            app.set_device_name(&too_long),
+            Err(CoreError::InvalidDeviceName(_))
+        ));
+    }
+
+    #[test]
+    fn set_device_name_rejects_control_characters() {
+        let mut app = boot();
+        assert!(matches!(
+            app.set_device_name("bad\nname"),
+            Err(CoreError::InvalidDeviceName(_))
+        ));
+    }
+
+    #[test]
+    fn set_device_name_rejects_do_not_mutate_prior_state() {
+        let mut app = boot();
+        assert!(app.set_device_name("Good Name").is_ok());
+        assert!(app.set_device_name("").is_err());
+        // A rejected rename must not clobber the last-accepted name.
+        assert_eq!(app.config().peer_name_self, "Good Name");
+        assert_eq!(app.snapshot().device_name, "Good Name");
     }
 }

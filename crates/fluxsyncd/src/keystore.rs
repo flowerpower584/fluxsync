@@ -57,6 +57,7 @@ use std::path::Path;
 const IDENTITY_FILE: &str = "identity.bin";
 const PEERS_FILE: &str = "peers.json";
 const FIREWALL_FILE: &str = "firewall.json";
+const DEVICE_NAME_FILE: &str = "device_name.json";
 
 /// Service name used for the keychain entry. Keep stable: changing it
 /// after the first release would orphan every existing user's identity.
@@ -606,6 +607,70 @@ pub fn save_firewall(dir: &Path, policy: &FirewallPolicy) -> Result<()> {
     Ok(())
 }
 
+/// On-disk shape of `device_name.json`. A tiny wrapper (rather than a bare
+/// string file) so the format matches every other keystore file and can
+/// grow fields later without a migration.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DeviceNameFile {
+    name: String,
+}
+
+/// DIR-P3-01: load the persisted device name, if any. Returns `None` when
+/// the file is missing, empty, or unparseable — first boot, or a corrupt
+/// file, both fall back to the caller's own default (hostname-derived or
+/// `--peer-name`) rather than a hardcoded string.
+#[must_use]
+pub fn load_device_name(dir: &Path) -> Option<String> {
+    let path = dir.join(DEVICE_NAME_FILE);
+    let s = fs::read_to_string(&path).ok()?;
+    let f: DeviceNameFile = serde_json::from_str(&s).ok()?;
+    if f.name.trim().is_empty() {
+        None
+    } else {
+        Some(f.name)
+    }
+}
+
+/// Persist the device name so a `CmdOp::SetDeviceName` survives a restart.
+/// Atomic via `*.tmp` + fsync + rename, same durability guarantee as
+/// `save_peers`/`save_firewall`. Not a secret, but written 0o600 for
+/// consistency with the other state files.
+pub fn save_device_name(dir: &Path, name: &str) -> Result<()> {
+    use std::io::Write;
+
+    ensure_dir(dir)?;
+    let path = dir.join(DEVICE_NAME_FILE);
+    let s = serde_json::to_string_pretty(&DeviceNameFile {
+        name: name.to_string(),
+    })?;
+    let tmp = path.with_extension("json.tmp");
+    {
+        #[cfg(unix)]
+        let opts = {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut o = fs::OpenOptions::new();
+            o.create(true).write(true).truncate(true).mode(0o600);
+            o
+        };
+        #[cfg(not(unix))]
+        let opts = {
+            let mut o = fs::OpenOptions::new();
+            o.create(true).write(true).truncate(true);
+            o
+        };
+        let mut f = opts
+            .open(&tmp)
+            .with_context(|| format!("create {}", tmp.display()))?;
+        f.write_all(s.as_bytes())
+            .with_context(|| format!("write {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync {}", tmp.display()))?;
+    }
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
 /// FS-062 / DIR-P2-01 — self-only keychain ACL for the identity item.
 ///
 /// **Opt-in** (`FLUXSYNC_STRICT_KEYCHAIN=1`, see `strict_keychain_enabled`
@@ -924,8 +989,8 @@ mod mac_acl {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_firewall, load_peers, save_firewall, save_peers, upsert_peer, StoredPeer,
-        FIREWALL_FILE, PEERS_FILE,
+        load_device_name, load_firewall, load_peers, save_device_name, save_firewall, save_peers,
+        upsert_peer, StoredPeer, DEVICE_NAME_FILE, FIREWALL_FILE, PEERS_FILE,
     };
     #[cfg(unix)]
     use super::{read_legacy_identity, write_secret_atomic, IDENTITY_FILE};
@@ -988,6 +1053,40 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join(FIREWALL_FILE), b"{ not json").unwrap();
         assert_eq!(load_firewall(dir.path()), FirewallPolicy::default());
+    }
+
+    /// DIR-P3-01: the renamed device name round-trips through disk and
+    /// leaves no stale `*.tmp`; a missing file yields `None` so the caller
+    /// falls back to its own hostname-derived default.
+    #[test]
+    fn device_name_save_load_round_trips() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        assert_eq!(load_device_name(dir.path()), None);
+
+        save_device_name(dir.path(), "Dethie's MacBook").expect("save_device_name must succeed");
+        assert_eq!(
+            load_device_name(dir.path()),
+            Some("Dethie's MacBook".to_string())
+        );
+
+        let tmp = dir
+            .path()
+            .join(DEVICE_NAME_FILE)
+            .with_extension("json.tmp");
+        assert!(!tmp.exists(), "the .tmp file must not survive the rename");
+    }
+
+    /// A corrupt or empty-name device_name.json must fall back to `None`
+    /// (caller default), never panic.
+    #[test]
+    fn device_name_corrupt_or_empty_falls_back_to_none() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join(DEVICE_NAME_FILE), b"{ not json").unwrap();
+        assert_eq!(load_device_name(dir.path()), None);
+
+        save_device_name(dir.path(), "   ").expect("save_device_name must succeed");
+        assert_eq!(load_device_name(dir.path()), None);
     }
 
     /// FS-029: `upsert_peer` must dedup by `peer_id_hex` (last-write-wins)

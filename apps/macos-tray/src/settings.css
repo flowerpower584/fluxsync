@@ -150,6 +150,21 @@ input[type="range"]:active::-webkit-slider-thumb {
 .mono-val { font-family: var(--fs-mono); font-size: 13px; color: var(--fs-fg); }
 .mono-val.dimmed { color: var(--fs-muted); font-size: 11px; }
 
+.text-input {
+  width: 180px;
+  background: transparent;
+  border: 1px solid var(--fs-border-strong);
+  border-radius: 2px;
+  color: var(--fs-fg);
+  font-family: var(--fs-ui);
+  font-size: 13px;
+  padding: 5px 8px;
+  outline: none;
+  transition: border-color .15s ease;
+}
+.text-input:focus { border-color: var(--fs-crit); }
+.text-input.error { border-color: var(--fs-crit); }
+
 /* ── Offline banner ────────────────────────────────────────────── */
 .offline-banner {
   display: flex;

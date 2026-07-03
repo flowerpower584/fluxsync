@@ -121,6 +121,14 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setChargeOverride(on: Boolean) = ffi("Set charge override") { it.setChargeOverride(on) }
 
+    /**
+     * DIR-P3-01: rename this device. Validation (non-empty, wire-length
+     * bound, printable) happens daemon-side; a rejected name surfaces as a
+     * transient error via [ffi]. An already-linked peer sees the new name
+     * on the next session establishment, not immediately.
+     */
+    fun setDeviceName(name: String) = ffi("Rename device") { it.setDeviceName(name) }
+
     fun unpair() = ffi("Unpair") { it.unpair() }
 
     /** FluxMesh: revoke one specific peer by hex peer-id, leaving every

@@ -315,3 +315,130 @@ async fn favorite_flag_survives_restart() {
     sd2.cancel();
     let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
 }
+
+/// Read the daemon's own `device_name` from its State.
+async fn device_name_of(ipc: &Path, id: u64) -> Option<String> {
+    let r = ipc_send_recv(ipc, CmdRequest { id, op: CmdOp::Status }).await;
+    match r.data {
+        Some(CmdData::State(s)) => Some(s.device_name),
+        _ => None,
+    }
+}
+
+/// DIR-P3-01: a `SetDeviceName` must be written to `device_name.json` and
+/// rehydrated on the next boot, so a rename is not silently lost on
+/// restart — same contract as `firewall_policy_survives_restart`.
+#[tokio::test]
+async fn device_name_survives_restart() {
+    let id = Identity::generate();
+    let port = pick_free_udp_port().await;
+    let dir = tempdir().unwrap();
+    let keystore = dir.path().join("ks");
+    std::fs::create_dir(&keystore).unwrap();
+    let ipc = keystore.join("d.sock");
+
+    // ── v1: boots with the CLI-style default, then renames ──
+    let sd1 = CancellationToken::new();
+    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "name-d"), sd1.clone()));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+
+    assert_eq!(device_name_of(&ipc, 1).await, Some("name-d".to_string()));
+
+    let r = ipc_send_recv(
+        &ipc,
+        CmdRequest {
+            id: 2,
+            op: CmdOp::SetDeviceName {
+                name: "Dethie's MacBook".into(),
+            },
+        },
+    )
+    .await;
+    assert!(r.ok, "set-device-name failed: {r:?}");
+
+    let name_file = keystore.join("device_name.json");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let f = name_file.clone();
+            async move { f.exists() }
+        })
+        .await,
+        "device_name.json was never written"
+    );
+    assert_eq!(
+        device_name_of(&ipc, 3).await,
+        Some("Dethie's MacBook".to_string()),
+        "rename not reflected in v1 State"
+    );
+
+    sd1.cancel();
+    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+
+    // ── v2: same keystore, DIFFERENT `--peer-name`-style default → the
+    // persisted rename wins (disk is authoritative, same as firewall). ──
+    let port2 = pick_free_udp_port().await;
+    let sd2 = CancellationToken::new();
+    let h2 = tokio::spawn(run(
+        cfg_for(&id, port2, &keystore, &ipc, "name-d-v2-should-be-overridden"),
+        sd2.clone(),
+    ));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let ipc = ipc.clone();
+            async move {
+                device_name_of(&ipc, 4).await == Some("Dethie's MacBook".to_string())
+            }
+        })
+        .await,
+        "device name was not restored after restart"
+    );
+
+    sd2.cancel();
+    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+}
+
+/// DIR-P3-01: empty/whitespace-only and over-the-wire-bound names are
+/// rejected, and a rejection must not clobber the name already in effect.
+#[tokio::test]
+async fn set_device_name_rejects_invalid() {
+    let id = Identity::generate();
+    let port = pick_free_udp_port().await;
+    let dir = tempdir().unwrap();
+    let keystore = dir.path().join("ks");
+    std::fs::create_dir(&keystore).unwrap();
+    let ipc = keystore.join("d.sock");
+
+    let sd = CancellationToken::new();
+    let h = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "reject-d"), sd.clone()));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+
+    let empty = ipc_send_recv(
+        &ipc,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::SetDeviceName { name: "  ".into() },
+        },
+    )
+    .await;
+    assert!(!empty.ok, "empty/whitespace-only name must be rejected");
+
+    let oversized = ipc_send_recv(
+        &ipc,
+        CmdRequest {
+            id: 2,
+            op: CmdOp::SetDeviceName {
+                name: "x".repeat(fluxsync_proto::MAX_HELLO_NAME + 1),
+            },
+        },
+    )
+    .await;
+    assert!(!oversized.ok, "over-bound name must be rejected");
+
+    // Neither rejected attempt may have clobbered the boot-time name.
+    assert_eq!(device_name_of(&ipc, 3).await, Some("reject-d".to_string()));
+
+    sd.cancel();
+    let _ = timeout(Duration::from_secs(5), h).await.expect("shutdown hung");
+}

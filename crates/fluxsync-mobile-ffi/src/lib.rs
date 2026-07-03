@@ -443,6 +443,22 @@ impl FluxsyncHandle {
             .map_err(|e| FluxError::Ipc(e.to_string()))
     }
 
+    /// DIR-P3-01: rename this device. Validation (non-empty, wire-length
+    /// bound, printable) happens daemon-side in `App::set_device_name`; a
+    /// rejected name comes back as `FluxError::Ipc` with the daemon's
+    /// message. An already-linked peer sees the new name on the next
+    /// session establishment, not immediately.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn set_device_name(&self, name: String) -> Result<(), FluxError> {
+        self.runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({"id": 1, "op": "set_device_name", "name": name}),
+            ))
+            .map(|_| ())
+            .map_err(|e| FluxError::Ipc(e.to_string()))
+    }
+
     /// Push host-OS battery telemetry into the daemon. Called from the
     /// Android `MainActivity` whenever the system fires
     /// `ACTION_BATTERY_CHANGED`. Without this, the daemon reports a

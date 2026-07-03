@@ -43,6 +43,7 @@ pub fn render_status(v: &Value) {
         .get("link_latency_ms")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let device_name = data.get("device_name").and_then(Value::as_str).unwrap_or("");
     let peer_name = data.get("peer_name").and_then(Value::as_str).unwrap_or("");
     let peer_batt = data
         .get("peer_battery")
@@ -92,6 +93,10 @@ pub fn render_status(v: &Value) {
         daemon_label,
         status_color
     );
+
+    if !device_name.is_empty() {
+        println!("  {}      {}", "name".dimmed(), device_name.white());
+    }
 
     let bolt = if charging {
         "⚡".yellow().to_string()
@@ -199,6 +204,27 @@ pub fn render_status(v: &Value) {
         format!("{history_count} items").white().to_string()
     };
     println!("  {}   {hist_color}", "history".dimmed());
+
+    // DIR-P1-09: compact reliability counters, one line. `--json` carries
+    // the full `ConnectionMetrics` object for scripting; this is the
+    // human-glance summary.
+    if let Some(m) = data.get("metrics").filter(|v| !v.is_null()) {
+        let sent = m.get("items_sent").and_then(Value::as_u64).unwrap_or(0);
+        let received = m
+            .get("items_received")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let dups = m.get("dedup_drops").and_then(Value::as_u64).unwrap_or(0);
+        let reconnects = m.get("reconnects").and_then(Value::as_u64).unwrap_or(0);
+        let hs_failed = m
+            .get("handshakes_failed")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        println!(
+            "  {} sent {sent} · recv {received} · dups {dups} · reconnects {reconnects} · hs-fail {hs_failed}",
+            "counters".dimmed()
+        );
+    }
 
     println!("{}", bar.dimmed());
 }
@@ -378,4 +404,97 @@ fn render_err(v: &Value, action: &str) {
         .and_then(Value::as_str)
         .unwrap_or("malformed response");
     println!("{} {action}: {}", "✗".red().bold(), err.red());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_status;
+    use serde_json::json;
+
+    /// DIR-P1-09: `fluxctl status --json` is a raw passthrough of the
+    /// daemon's response (`main.rs` just `serde_json::to_string_pretty`s
+    /// the `Value` it already has) — so the contract to protect is that
+    /// the shape survives that round-trip with every key a scripting
+    /// consumer would look for, including the DIR-P3-01 device name and
+    /// the DIR-P1-09 KPI counters.
+    fn sample_status_response() -> serde_json::Value {
+        json!({
+            "id": 1,
+            "ok": true,
+            "data": {
+                "phase": "linked",
+                "on": true,
+                "status": "syncing",
+                "device_name": "Dethie's MacBook",
+                "peer_name": "Galaxy S21",
+                "peer_platform": "android",
+                "battery_level": 80,
+                "battery_threshold": 20,
+                "charging": false,
+                "peer_battery": 55,
+                "peer_charging": true,
+                "link_latency_ms": 12,
+                "cipher": "chacha20-poly1305",
+                "version": "0.7.0",
+                "history": [],
+                "metrics": {
+                    "handshakes_total": 1,
+                    "handshakes_failed": 0,
+                    "heartbeats_sent": 10,
+                    "heartbeats_received": 10,
+                    "heartbeats_missed_consecutive": 0,
+                    "last_rtt_ms": 5,
+                    "rtt_p99_ms": 5,
+                    "network_changes": 0,
+                    "reconnects": 1,
+                    "decrypt_failures": 0,
+                    "dedup_drops": 2,
+                    "last_disconnect_reason": null,
+                    "uptime_session_secs": 42,
+                    "items_sent": 7,
+                    "items_received": 5,
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn json_passthrough_round_trips_expected_keys() {
+        let v = sample_status_response();
+        let s = serde_json::to_string_pretty(&v).expect("serialize");
+        let back: serde_json::Value = serde_json::from_str(&s).expect("must parse as valid JSON");
+
+        let data = back.get("data").expect("data object");
+        for key in [
+            "phase",
+            "device_name",
+            "peer_name",
+            "peer_platform",
+            "battery_level",
+            "link_latency_ms",
+        ] {
+            assert!(data.get(key).is_some(), "missing top-level key {key}");
+        }
+        let metrics = data.get("metrics").expect("metrics object");
+        for key in [
+            "items_sent",
+            "items_received",
+            "dedup_drops",
+            "reconnects",
+            "handshakes_failed",
+        ] {
+            assert!(metrics.get(key).is_some(), "missing metrics key {key}");
+        }
+    }
+
+    /// Smoke test: the human renderer must not panic on a payload carrying
+    /// the new `device_name` + KPI fields (or when they're absent, e.g. an
+    /// older daemon / a fresh boot with `metrics: null`).
+    #[test]
+    fn render_status_does_not_panic_with_or_without_new_fields() {
+        render_status(&sample_status_response());
+
+        let minimal = json!({"id": 1, "ok": true, "data": {"phase": "idle", "on": false}});
+        render_status(&minimal);
+    }
 }
