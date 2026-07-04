@@ -361,7 +361,7 @@ pub fn run() {
                 use std::sync::{Arc, Mutex};
                 use std::time::Instant;
                 let last_name: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-                let last_history_hash: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+                let last_history_hash: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
                 // Throttle `state-update` emits so a handshake burst can't
                 // saturate the WebView IPC. 100 ms ≈ one paint frame.
                 let last_emit: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
@@ -442,35 +442,66 @@ pub fn run() {
                             }
                         }
 
-                        if let Some(history) = state.get("history").and_then(|h| h.as_array()) {
-                            if let Some(first) = history.first() {
-                                if let Some(preview) = first.get("preview").and_then(|p| p.as_str()) {
-                                    let mut h_guard = lh.lock().unwrap();
+                        {
+                            let first = state
+                                .get("history")
+                                .and_then(|h| h.as_array())
+                                .and_then(|h| h.first());
+                            let preview = first
+                                .and_then(|f| f.get("preview"))
+                                .and_then(|p| p.as_str())
+                                .unwrap_or("");
+                            let mut h_guard = lh.lock().unwrap();
 
-                                    // [FIX] RAM Protection: hash the preview instead of storing it raw.
-                                    // Protects the tray app from 10MB+ clipboard payloads.
-                                    let current_hash = blake3::hash(preview.as_bytes()).to_hex().to_string();
+                            // [FIX] RAM Protection: hash the preview instead of storing it raw.
+                            // Protects the tray app from 10MB+ clipboard payloads.
+                            let current_hash = blake3::hash(preview.as_bytes()).to_hex().to_string();
 
-                                    if !preview.is_empty() && *h_guard != current_hash {
-                                        *h_guard = current_hash;
+                            if h_guard.is_none() {
+                                // First snapshot after launch: seed the dedup
+                                // hash silently. The daemon restores persisted
+                                // history (FluxVault), so history[0] may already
+                                // be a remote item from a previous session.
+                                *h_guard = Some(current_hash);
+                            } else if !preview.is_empty() && h_guard.as_deref() != Some(current_hash.as_str()) {
+                                *h_guard = Some(current_hash.clone());
 
-                                        // ❌ BUG FIX: Only notify if it came from the peer (remote)
-                                        let source = first.get("source").and_then(|s| s.as_str()).unwrap_or("local");
-                                        if source == "remote" {
-                                            eprintln!("[fluxsync-tray] showing notification for remote clipboard change: {}", preview);
-                                            drop(h_guard);
-                                            // Show notification
-                                            use tauri_plugin_notification::NotificationExt;
-                                            match ah.notification()
-                                                .builder()
-                                                .title("FluxSync")
-                                                .body(format!("Received: {}", if preview.chars().count() > 50 { format!("{}...", preview.chars().take(47).collect::<String>()) } else { preview.to_string() }))
-                                                .show() {
-                                                    Ok(_) => eprintln!("[fluxsync-tray] notification .show() returned Ok"),
-                                                    Err(e) => eprintln!("[fluxsync-tray] notification .show() failed: {e}"),
-                                                }
+                                // ❌ BUG FIX: Only notify if it came from the peer (remote)
+                                let source = first.and_then(|f| f.get("source")).and_then(|s| s.as_str()).unwrap_or("local");
+                                if source == "remote" {
+                                    eprintln!("[fluxsync-tray] showing notification for remote clipboard change: hash={current_hash} len={}", preview.len());
+                                    drop(h_guard);
+                                    let kind = first.and_then(|f| f.get("kind")).and_then(|k| k.as_str());
+                                    let peer = if name.is_empty() || name == "pending" || name == "New Peer" {
+                                        state
+                                            .get("trusted_peer_name")
+                                            .and_then(|x| x.as_str())
+                                            .filter(|s| !s.is_empty())
+                                    } else {
+                                        Some(name.as_str())
+                                    };
+                                    let body = match (kind, peer) {
+                                        (Some(kind), Some(peer)) => {
+                                            let noun = match kind {
+                                                "image" => "image",
+                                                "url" => "link",
+                                                "code" => "code",
+                                                _ => "text",
+                                            };
+                                            format!("Received {noun} from {peer}")
                                         }
-                                    }
+                                        _ => "Clipboard received".to_string(),
+                                    };
+                                    // Show notification
+                                    use tauri_plugin_notification::NotificationExt;
+                                    match ah.notification()
+                                        .builder()
+                                        .title("FluxSync")
+                                        .body(body)
+                                        .show() {
+                                            Ok(_) => eprintln!("[fluxsync-tray] notification .show() returned Ok"),
+                                            Err(e) => eprintln!("[fluxsync-tray] notification .show() failed: {e}"),
+                                        }
                                 }
                             }
                         }
