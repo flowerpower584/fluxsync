@@ -52,3 +52,14 @@ image = { version = "0.25", default-features = false, features = ["ico", "png"] 
 # settings from `tauri.conf.json`; mixing it into the workspace tends
 # to fight with `cargo check` invariants the rest of the repo relies on.
 [workspace]
+
+# tray-icon (pulled in transitively via tauri's "tray-icon" feature) does
+# not route ctrl+click to the context menu on macOS — see
+# vendor/tray-icon-ctrlclick/src/platform_impl/macos/mod.rs for the root
+# cause and the fix. Confirmed unfixed upstream through 0.24.1 (latest
+# release), and tauri 2.10.3 pins tray-icon to `^0.21` (max 0.21.3) anyway,
+# so this vendors a same-version copy with the ctrl+click fix applied.
+# This [patch] applies workspace-wide since this crate is its own
+# single-member workspace (see `[workspace]` above).
+[patch.crates-io]
+tray-icon = { path = "vendor/tray-icon-ctrlclick" }

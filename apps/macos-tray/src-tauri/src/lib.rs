@@ -473,6 +473,8 @@ pub fn run() {
             });
 
             // Native fallback menu on right-click.
+            let open_item =
+                MenuItem::with_id(app, "open", "Open FluxSync", true, None::<&str>)?;
             let pair_item = MenuItem::with_id(app, "pair", "Pair a device…", true, None::<&str>)?;
             let prefs_item =
                 MenuItem::with_id(app, "prefs", "Preferences…", true, None::<&str>)?;
@@ -482,6 +484,8 @@ pub fn run() {
             let menu = Menu::with_items(
                 app,
                 &[
+                    &open_item,
+                    &PredefinedMenuItem::separator(app)?,
                     &pair_item,
                     &prefs_item,
                     &PredefinedMenuItem::separator(app)?,
@@ -520,6 +524,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
+                    "open" => show_menu(app),
                     "pair" => open_pair_window(app),
                     "prefs" => open_settings_window(app),
                     "unpair" => {
