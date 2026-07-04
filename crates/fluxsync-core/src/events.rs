@@ -66,6 +66,14 @@ pub enum Event {
         preview: String,
         sensitive: bool,
         lamport: u64,
+        /// resync-1: true when this item arrived because WE sent a
+        /// `ResyncPull` for its hash (catching up on a peer's outbox after a
+        /// reconnect), as opposed to a live/fresh copy from the peer. A
+        /// resync delivery still enters history/vault/relay and is still
+        /// acked — it just must never silently overwrite the user's current
+        /// OS clipboard on their behalf. See `App::handle`'s post-transition
+        /// `Action::WriteClipboard` strip.
+        resync: bool,
     },
     Reconnect,
     /// FluxMesh Phase 3: a non-primary mesh peer joined, left, or updated its
@@ -146,6 +154,14 @@ pub enum Action {
     /// `ConnectionMetrics::dedup_drops` — the FSM stays pure, this is just
     /// a signal, no I/O.
     DuplicateDropped,
+    /// resync-1 apply-suppression fix (DEFECT 1): emitted alongside the rest
+    /// of a `FrameReceivedClipboard { resync: true, .. }` transition's
+    /// actions, right where `Action::WriteClipboard` was stripped, so the
+    /// daemon can bump `ConnectionMetrics::resync_applies_suppressed` — a
+    /// test-visible, IPC-observable proof that a resync delivery did NOT
+    /// touch the OS clipboard. History insertion, the vault persist it
+    /// triggers, mesh relay, and the Ack are unaffected; see `App::handle`.
+    ResyncApplySuppressed,
 }
 
 /// A friendly log entry. Routed both to `tracing` (structured) and to the

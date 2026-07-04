@@ -34,6 +34,7 @@ impl MetricsTracker {
                 items_sent: 0,
                 items_received: 0,
                 items_resynced: 0,
+                resync_applies_suppressed: 0,
             },
             session_start: None,
             last_heartbeat_sent: None,
@@ -117,6 +118,14 @@ impl MetricsTracker {
     /// per requested hash).
     pub fn on_item_resynced(&mut self) {
         self.metrics.items_resynced += 1;
+    }
+
+    /// resync-1 apply-suppression fix (DEFECT 1): a `ResyncPull` response
+    /// landed and its `Action::WriteClipboard` was deliberately dropped
+    /// (`Action::ResyncApplySuppressed`) rather than applied to the OS
+    /// clipboard.
+    pub fn on_resync_apply_suppressed(&mut self) {
+        self.metrics.resync_applies_suppressed += 1;
     }
 
     pub fn on_disconnect(&mut self, reason: DisconnectReason) {

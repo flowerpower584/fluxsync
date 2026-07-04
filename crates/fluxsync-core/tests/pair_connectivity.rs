@@ -681,6 +681,8 @@ fn test_20_full_offline_online_cycle_end_to_end() {
             preview: "from android".into(),
             lamport: 2,
             sensitive: false,
+
+            resync: false,
         },
         &wall(),
     );

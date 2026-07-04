@@ -322,13 +322,19 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     let backoff: BackoffMap = Arc::new(Mutex::new(HashMap::new()));
     let mdns_ctx: MdnsCtx = Arc::new(Mutex::new(None));
 
+    // ── Long-lived tasks ──────────────────────────────────────────
+    // Declared here (rather than just before the IPC task below) so the
+    // vault persister — which must be tracked in this `JoinSet` rather than
+    // bare-`tokio::spawn`ed, see DEFECT 2's fix — can join it too.
+    let mut tasks = JoinSet::new();
+
     // Persist history off the state-watch channel: a dedicated task wakes
     // on every state change, diffs the history list, and writes the vault
     // only when it actually changed (skipping the frequent battery /
     // heartbeat / peer-list EmitStates). Lives only when a keystore dir is
-    // configured; exits when the watch sender drops at shutdown. Spawned
-    // here (after `disc_cache` exists) so the persister can also purge it
-    // on a security wipe (DIR-P2-04a).
+    // configured; exits on `shutdown` (or when the watch sender drops).
+    // Spawned here (after `disc_cache` exists) so the persister can also
+    // purge it on a security wipe (DIR-P2-04a).
     if let Some((dir, key, entries)) = vault {
         let ctx = VaultCtx {
             dir,
@@ -341,13 +347,31 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         // the task's first poll is still observed as a change (see the note in
         // run_vault_persister).
         let initial_wipe_gen = app.snapshot().vault_wipe_gen;
-        tokio::spawn(run_vault_persister(
-            ctx,
-            state_watch_tx.subscribe(),
-            initial_wipe_gen,
-            disc_cache.clone(),
-            backoff.clone(),
-        ));
+        // Clone every shared handle BEFORE the `async move` block: the
+        // block captures by move, and `disc_cache`/`backoff`/`state_watch_tx`
+        // are all still needed by later setup (the transport recv loop, the
+        // main event loop) in the rest of `run()`.
+        let state_rx_for_persister = state_watch_tx.subscribe();
+        let disc_cache_for_persister = disc_cache.clone();
+        let backoff_for_persister = backoff.clone();
+        // DEFECT 2 fix: tracked in `tasks` (not a bare detached `tokio::spawn`)
+        // and handed a clone of `shutdown`, so `run()`'s final
+        // `while tasks.join_next().await.is_some() {}` actually waits for this
+        // task's last-write flush before the caller can exit. See
+        // `run_vault_persister`'s doc comment.
+        let shutdown_for_persister = shutdown.clone();
+        tasks.spawn(async move {
+            run_vault_persister(
+                ctx,
+                state_rx_for_persister,
+                initial_wipe_gen,
+                disc_cache_for_persister,
+                backoff_for_persister,
+                shutdown_for_persister,
+            )
+            .await;
+            Ok(())
+        });
     }
 
     if let Some(tpp) = test_pending_pair {
@@ -388,6 +412,10 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // after missing them. Written on SendItem and on first-sight reception,
     // read to build a ResyncOffer and to serve a ResyncPull.
     let outbox: SharedOutbox = Arc::new(Mutex::new(Outbox::new()));
+    // resync-1 apply-suppression fix: hashes we've asked a peer for via
+    // ResyncPull, so the receive path can tell "I requested this catch-up
+    // item" apart from a fresh copy. See `PendingPulls`'s doc comment.
+    let pending_pulls: PendingPulls = Arc::new(Mutex::new(HashMap::new()));
 
     // ── Test path: install session + jump to Linked ────────────────
     if let Some(tp) = test_pair {
@@ -489,9 +517,6 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         event_tx.try_send(Event::ToggleOn).ok();
     }
 
-    // ── Long-lived tasks ──────────────────────────────────────────
-    let mut tasks = JoinSet::new();
-
     // IPC.
     let ipc_server = IpcServer::bind(&ipc_path)
         .await
@@ -525,6 +550,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let disc_cache_for_recv = disc_cache.clone();
         let backoff_for_recv = backoff.clone();
         let outbox_for_recv = outbox.clone();
+        let pending_pulls_for_recv = pending_pulls.clone();
         let state_rx_for_recv = state_watch_tx.subscribe();
         tasks.spawn(async move {
             transport_recv_loop(
@@ -545,6 +571,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 backoff_for_recv,
                 lan_only_handshakes,
                 outbox_for_recv,
+                pending_pulls_for_recv,
                 state_rx_for_recv,
             )
             .await
@@ -1041,27 +1068,44 @@ async fn dispatch(
                 if frames.is_empty() {
                     tracing::error!("SendItem: nothing to send (encode failed)");
                 } else {
-                    // Resync-on-reconnect (resync-1): keep a resend copy so a
-                    // peer that reconnects later can be offered this item.
-                    // Sensitive items must never enter the outbox (see
-                    // `crate::outbox`'s security invariant).
-                    if !sensitive {
-                        outbox.lock().await.insert(
-                            hash,
-                            OutboxEntry {
-                                payload: payload.clone(),
-                                kind,
-                                origin,
-                                seq: event_seq,
-                                created: Instant::now(),
-                            },
-                        );
-                    }
                     // FluxMesh 2C-b: fan the item out to every linked peer.
                     let targets = transport.linked_peer_ids().await;
                     if targets.is_empty() {
+                        // DEFECT 3 fix: an item copied while fully unlinked
+                        // must never enter the outbox. The resync-1 promise is
+                        // narrow — recover items whose DELIVERY was actually
+                        // attempted but went unacked when the link dropped —
+                        // not "resurface anything ever copied offline" (that
+                        // was a privacy leak: an old private copy from hours
+                        // earlier, made with no peer connected, would flush to
+                        // whichever peer links next). Gating on a non-empty
+                        // `targets` here, computed BEFORE the outbox write,
+                        // is what proves delivery was attempted. Compare the
+                        // receive-side inserts (`complete_reassembled_item`,
+                        // the non-chunked first-sight path): those are
+                        // inherently fine, since receiving/relaying a frame at
+                        // all requires an active linked session with the peer
+                        // that sent it.
                         tracing::warn!("SendItem: no linked peers; nothing to send");
                     } else {
+                        // Resync-on-reconnect (resync-1): keep a resend copy so
+                        // a *different* peer that reconnects later can be
+                        // offered this item too. Sensitive items must never
+                        // enter the outbox (see `crate::outbox`'s security
+                        // invariant). Deliberately inside the `targets`
+                        // non-empty branch — see the DEFECT 3 note above.
+                        if !sensitive {
+                            outbox.lock().await.insert(
+                                hash,
+                                OutboxEntry {
+                                    payload: payload.clone(),
+                                    kind,
+                                    origin,
+                                    seq: event_seq,
+                                    created: Instant::now(),
+                                },
+                            );
+                        }
                         tracing::info!(
                             peers = targets.len(),
                             frames = frames.len(),
@@ -1114,6 +1158,12 @@ async fn dispatch(
                 // echo of our own local copy, or a peer retransmit already
                 // applied). See `App::handle`'s `suppress_action` branches.
                 metrics.lock().await.on_dedup_drop();
+            }
+            Action::ResyncApplySuppressed => {
+                // resync-1 apply-suppression fix (DEFECT 1): a ResyncPull
+                // response's WriteClipboard was dropped by `App::handle`.
+                // History/vault/relay/ack already happened normally.
+                metrics.lock().await.on_resync_apply_suppressed();
             }
             Action::WriteClipboard { kind, payload } => {
                 // DIR-P1-09: this is the "item apply" chokepoint — a
@@ -2537,6 +2587,7 @@ async fn transport_recv_loop(
     backoff: BackoffMap,
     lan_only_handshakes: bool,
     outbox: SharedOutbox,
+    pending_pulls: PendingPulls,
     state_rx: watch::Receiver<State>,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
@@ -2814,7 +2865,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &backoff, &peer_meta, keystore_dir.as_ref(), &outbox, &state_rx).await,
+                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &backoff, &peer_meta, keystore_dir.as_ref(), &outbox, &pending_pulls, &state_rx).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -2895,16 +2946,106 @@ impl VaultCtx {
     }
 }
 
+/// One persist attempt: mirror a security wipe to disk if `wipe_gen`
+/// advanced past `*last_wipe_gen`, then save `history` if it differs from
+/// what's already persisted (`ctx.last`). Factored out of
+/// `run_vault_persister` so the exact same logic can also run once more,
+/// synchronously, during a graceful shutdown — see the final flush at the
+/// end of that function.
+async fn persist_history_change(
+    ctx: &mut VaultCtx,
+    last_wipe_gen: &mut u64,
+    history: Vec<HistoryItem>,
+    wipe_gen: u64,
+    disc_cache: &DiscoveryCache,
+    backoff: &BackoffMap,
+) {
+    // A security wipe (untrusted-peer, ghost-timeout, peer-swap) cleared
+    // the in-memory history for safety; mirror it on disk. Delete the
+    // encrypted vault and forget cached favorites so a pinned secret can't
+    // be re-appended by rebuild() and the file can't outlive the wipe.
+    // The disk clear is async relative to the in-memory wipe; a crash in
+    // that sub-second window can leave history.enc on disk until the next
+    // boot rehydrates+re-wipes it (residual, low-severity: the secret is
+    // the user's own, on the user's own device).
+    if wipe_gen != *last_wipe_gen {
+        ctx.entries.clear();
+        // DIR-P2-04a: a security wipe means this peer relationship is no
+        // longer trusted; the mDNS discovery cache still holds its
+        // pubkey, name, addrs, and pairing PIN from before the wipe.
+        // Purge it too — eagerly, since an in-memory clear cannot fail,
+        // rather than gating it on the disk clear below.
+        disc_cache.lock().await.clear();
+        // DIR-P1-02: same rationale — drop every peer's backoff timer.
+        backoff.lock().await.clear();
+        let dir = ctx.dir.clone();
+        match tokio::task::spawn_blocking(move || history_store::clear(&dir)).await {
+            // Only advance past this generation once the file is actually
+            // gone; on failure keep last_wipe_gen so the next state publish
+            // re-attempts the clear instead of permanently losing the wipe.
+            Ok(Ok(())) => *last_wipe_gen = wipe_gen,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "vault security wipe failed; will retry on next change");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "vault security wipe task join failed; will retry on next change");
+            }
+        }
+        // Force the post-wipe history (empty, or freshly-started for a
+        // peer-swap) to be re-persisted below instead of short-circuiting.
+        ctx.last = Vec::new();
+    }
+    if history == ctx.last {
+        return;
+    }
+    let now = now_ms();
+    let entries = ctx.rebuild(&history, now);
+    let dir = ctx.dir.clone();
+    let key = *ctx.key;
+    let to_save = entries.clone();
+    let saved = tokio::task::spawn_blocking(move || {
+        history_store::save(
+            &dir,
+            &key,
+            &to_save,
+            now,
+            history_store::DEFAULT_TTL_SECS,
+            history_store::DEFAULT_DISK_CAP,
+        )
+    })
+    .await;
+    match saved {
+        Ok(Ok(())) => {
+            ctx.entries = entries;
+            ctx.last = history;
+        }
+        Ok(Err(e)) => tracing::warn!(error = %e, "vault persist failed"),
+        Err(e) => tracing::warn!(error = %e, "vault persist task join failed"),
+    }
+}
+
 /// Persist clipboard history whenever it changes. Wakes on every state
 /// publish, skips when the history list is unchanged, and writes the
 /// encrypted vault off-thread (`spawn_blocking`) so the fsync never stalls
-/// a runtime worker. Exits when the watch sender drops at shutdown.
+/// a runtime worker.
+///
+/// DEFECT 2 fix (resync-1 "every launch" loop): this task used to be a bare
+/// detached `tokio::spawn`, not tracked in `run()`'s `JoinSet`, so a
+/// graceful shutdown could return — and the process could exit — before the
+/// LAST history change (e.g. a resync-1 delivery landing right after Hello)
+/// had actually reached disk. The next boot's vault load would then miss
+/// that item, `missing_resync_hashes` would call it missing again, and the
+/// daemon would re-`ResyncPull` it on every subsequent relaunch forever.
+/// Now this task is spawned into the tracked `JoinSet` and also selects on
+/// `shutdown`, so `run()`'s `while tasks.join_next().await.is_some() {}`
+/// genuinely waits for the final flush below before the caller can exit.
 async fn run_vault_persister(
     mut ctx: VaultCtx,
     mut rx: watch::Receiver<State>,
     initial_wipe_gen: u64,
     disc_cache: DiscoveryCache,
     backoff: BackoffMap,
+    shutdown: CancellationToken,
 ) {
     // Baseline is seeded from the CONSTRUCTION snapshot, not a late
     // `rx.borrow()`: a security wipe that lands between `subscribe()` and the
@@ -2912,74 +3053,57 @@ async fn run_vault_persister(
     // would never observe it and the disk clear would be skipped while
     // ctx.entries still holds the favorite (which rebuild() would resurrect).
     let mut last_wipe_gen = initial_wipe_gen;
-    while rx.changed().await.is_ok() {
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    // All senders dropped — the driver already tore down
+                    // without going through the shutdown token (e.g. a test
+                    // harness that just drops its `watch::Sender`). Nothing
+                    // left to observe; exit exactly like the old `while
+                    // rx.changed().await.is_ok()` loop did, with no extra
+                    // final-flush attempt (there is no fresher state to read).
+                    return;
+                }
+            }
+        }
         let (history, wipe_gen) = {
             let snap = rx.borrow_and_update();
             (snap.history.clone(), snap.vault_wipe_gen)
         };
-        // A security wipe (untrusted-peer, ghost-timeout, peer-swap) cleared
-        // the in-memory history for safety; mirror it on disk. Delete the
-        // encrypted vault and forget cached favorites so a pinned secret can't
-        // be re-appended by rebuild() and the file can't outlive the wipe.
-        // The disk clear is async relative to the in-memory wipe; a crash in
-        // that sub-second window can leave history.enc on disk until the next
-        // boot rehydrates+re-wipes it (residual, low-severity: the secret is
-        // the user's own, on the user's own device).
-        if wipe_gen != last_wipe_gen {
-            ctx.entries.clear();
-            // DIR-P2-04a: a security wipe means this peer relationship is no
-            // longer trusted; the mDNS discovery cache still holds its
-            // pubkey, name, addrs, and pairing PIN from before the wipe.
-            // Purge it too — eagerly, since an in-memory clear cannot fail,
-            // rather than gating it on the disk clear below.
-            disc_cache.lock().await.clear();
-            // DIR-P1-02: same rationale — drop every peer's backoff timer.
-            backoff.lock().await.clear();
-            let dir = ctx.dir.clone();
-            match tokio::task::spawn_blocking(move || history_store::clear(&dir)).await {
-                // Only advance past this generation once the file is actually
-                // gone; on failure keep last_wipe_gen so the next state publish
-                // re-attempts the clear instead of permanently losing the wipe.
-                Ok(Ok(())) => last_wipe_gen = wipe_gen,
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "vault security wipe failed; will retry on next change");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "vault security wipe task join failed; will retry on next change");
-                }
-            }
-            // Force the post-wipe history (empty, or freshly-started for a
-            // peer-swap) to be re-persisted below instead of short-circuiting.
-            ctx.last = Vec::new();
-        }
-        if history == ctx.last {
-            continue;
-        }
-        let now = now_ms();
-        let entries = ctx.rebuild(&history, now);
-        let dir = ctx.dir.clone();
-        let key = *ctx.key;
-        let to_save = entries.clone();
-        let saved = tokio::task::spawn_blocking(move || {
-            history_store::save(
-                &dir,
-                &key,
-                &to_save,
-                now,
-                history_store::DEFAULT_TTL_SECS,
-                history_store::DEFAULT_DISK_CAP,
-            )
-        })
+        persist_history_change(
+            &mut ctx,
+            &mut last_wipe_gen,
+            history,
+            wipe_gen,
+            &disc_cache,
+            &backoff,
+        )
         .await;
-        match saved {
-            Ok(Ok(())) => {
-                ctx.entries = entries;
-                ctx.last = history;
-            }
-            Ok(Err(e)) => tracing::warn!(error = %e, "vault persist failed"),
-            Err(e) => tracing::warn!(error = %e, "vault persist task join failed"),
-        }
     }
+    // Final flush: `shutdown` fired. The daemon may have published one more
+    // history change in the same instant as the cancellation, with no
+    // guarantee this task's last loop iteration observed it before
+    // `shutdown.cancelled()` won the `tokio::select!` race — `rx.changed()`
+    // is edge-triggered, not level-triggered, so a change that arrives and
+    // is immediately followed by cancellation can otherwise be lost. Read
+    // the CURRENT state directly (`borrow`, not `changed`) and persist it if
+    // it differs from what's already on disk.
+    let (history, wipe_gen) = {
+        let snap = rx.borrow();
+        (snap.history.clone(), snap.vault_wipe_gen)
+    };
+    persist_history_change(
+        &mut ctx,
+        &mut last_wipe_gen,
+        history,
+        wipe_gen,
+        &disc_cache,
+        &backoff,
+    )
+    .await;
 }
 
 /// Dedup hash over an image's raw RGBA pixels (prefixed with its
@@ -3943,6 +4067,7 @@ async fn complete_reassembled_item(
     lamport: u64,
     payload: Vec<u8>,
     outbox: &SharedOutbox,
+    pending_pulls: &PendingPulls,
 ) {
     ack_source(transport, source, hash).await;
     let eid = EventId::new(DeviceId::from(origin), event_seq);
@@ -3969,6 +4094,11 @@ async fn complete_reassembled_item(
     let frames = build_item_frames(lamport, hash, kind, &payload, sensitive, origin, event_seq);
     forward_frames(transport, inflight, source, origin, hash, frames).await;
     let preview = preview_label(kind, &payload);
+    // resync-1 apply-suppression fix: did WE ask `source` for this exact
+    // hash via ResyncPull? If so this is a catch-up delivery, not a fresh
+    // copy — history/vault/relay/ack still happen (above/below), but
+    // `App::handle` must drop the `WriteClipboard` action for it.
+    let resync = take_pending_pull(pending_pulls, source, hash).await;
     let _ = event_tx.try_send(Event::FrameReceivedClipboard {
         hash,
         kind,
@@ -3976,6 +4106,7 @@ async fn complete_reassembled_item(
         preview,
         sensitive,
         lamport,
+        resync,
     });
 }
 
@@ -4043,6 +4174,7 @@ async fn dispatch_inbound_frame(
     peer_meta: &PeerMetaMap,
     keystore_dir: Option<&std::path::PathBuf>,
     outbox: &SharedOutbox,
+    pending_pulls: &PendingPulls,
     state_rx: &watch::Receiver<State>,
 ) {
     // FS-052 strict gate (VULN-002 fix): if the active session's peer
@@ -4111,7 +4243,7 @@ async fn dispatch_inbound_frame(
 
                     complete_reassembled_item(
                         transport, inflight, mesh_seen, event_tx, peer_id, origin, event_seq,
-                        item.hash, kind, sensitive, lamport, full_payload, outbox,
+                        item.hash, kind, sensitive, lamport, full_payload, outbox, pending_pulls,
                     )
                     .await;
                 }
@@ -4149,6 +4281,10 @@ async fn dispatch_inbound_frame(
                             .await;
                     }
                     let preview = preview_label(item.kind, &item.payload);
+                    // resync-1 apply-suppression fix: same check as
+                    // `complete_reassembled_item` for the chunked path — see
+                    // its doc comment.
+                    let resync = take_pending_pull(pending_pulls, peer_id, item.hash).await;
                     let _ = event_tx.try_send(Event::FrameReceivedClipboard {
                         hash: item.hash,
                         kind: item.kind,
@@ -4156,6 +4292,7 @@ async fn dispatch_inbound_frame(
                         preview,
                         sensitive: item.sensitive,
                         lamport: item.lamport,
+                        resync,
                     });
                 }
             }
@@ -4216,7 +4353,7 @@ async fn dispatch_inbound_frame(
 
                 complete_reassembled_item(
                     transport, inflight, mesh_seen, event_tx, peer_id, origin, event_seq,
-                    c.item_id, kind, sensitive, lamport, full_payload, outbox,
+                    c.item_id, kind, sensitive, lamport, full_payload, outbox, pending_pulls,
                 )
                 .await;
             }
@@ -4472,6 +4609,24 @@ async fn dispatch_inbound_frame(
                     count = missing.len(),
                     "resync-1: sending ResyncPull"
                 );
+                // resync-1 apply-suppression fix (DEFECT 1): remember every
+                // hash we're about to ask this peer for, so when it comes
+                // back as an ordinary ClipboardItem/Chunk we recognise it as
+                // catch-up bookkeeping rather than a fresh copy — see
+                // `PendingPulls` and `take_pending_pull`. Malformed hex (the
+                // codec already bounds the string shape/count, but a corrupt
+                // entry would still fail `decode_hex32`) is skipped rather
+                // than tracked, matching `Msg::ResyncPull`'s own handling.
+                {
+                    let now = Instant::now();
+                    let mut map = pending_pulls.lock().await;
+                    let per_peer = map.entry(peer_id).or_default();
+                    for hex_hash in &missing {
+                        if let Ok(hash) = decode_hex32(hex_hash) {
+                            per_peer.insert(hash, now);
+                        }
+                    }
+                }
                 let frame = Frame {
                     version: PROTOCOL_VERSION,
                     msg: Msg::ResyncPull(ResyncPull { hashes: missing }),
@@ -4583,6 +4738,42 @@ type InflightMap = Arc<Mutex<HashMap<[u8; 32], Inflight>>>;
 /// non-sensitive items, written on send/first-sight-receive and read to
 /// build a `ResyncOffer` / serve a `ResyncPull`. See `crate::outbox`.
 type SharedOutbox = Arc<Mutex<Outbox>>;
+
+/// Resync-on-reconnect (resync-1) apply-suppression bug fix: hashes WE asked
+/// a peer for via `ResyncPull`, keyed first by that peer's id then by content
+/// hash, each with the instant we asked. When the matching `ClipboardItem`/
+/// `Chunk` completes, this lets the receive path recognise "this is catch-up
+/// bookkeeping I requested" — history/vault/relay/ack proceed as usual, but
+/// the OS clipboard must not be silently overwritten with stale content on
+/// the user's behalf (see `Event::FrameReceivedClipboard.resync` and
+/// `App::handle`'s post-transition strip). Entries are consumed on arrival
+/// (`take_pending_pull`) and lazily swept past `RESYNC_PULL_TIMEOUT` so a
+/// pull that never gets served (peer dropped the item, e.g. it expired from
+/// their outbox between offer and pull) doesn't wedge a stale entry forever.
+/// Deliberately explicit tracking — never inferred from Lamport tick (0 on
+/// resync sends) or item age, both of which a legitimate item can also have.
+type PendingPulls = Arc<Mutex<HashMap<[u8; 32], HashMap<[u8; 32], Instant>>>>;
+
+/// How long a `ResyncPull` we sent stays "pending" before we give up
+/// expecting it and would treat a same-hash arrival as a fresh item instead.
+const RESYNC_PULL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Consume a pending resync pull for `hash` from `peer_id`, if one is still
+/// outstanding and fresh. Also lazily sweeps every other stale entry for that
+/// peer (`RESYNC_PULL_TIMEOUT` old) so the bounded map never accumulates
+/// pulls that were never served.
+async fn take_pending_pull(pending_pulls: &PendingPulls, peer_id: [u8; 32], hash: [u8; 32]) -> bool {
+    let mut map = pending_pulls.lock().await;
+    let Some(per_peer) = map.get_mut(&peer_id) else {
+        return false;
+    };
+    per_peer.retain(|_, asked_at| asked_at.elapsed() < RESYNC_PULL_TIMEOUT);
+    let found = per_peer.remove(&hash).is_some();
+    if per_peer.is_empty() {
+        map.remove(&peer_id);
+    }
+    found
+}
 
 /// FluxMesh 2C-b: shared mesh anti-loop guard. Keyed on `EventId`
 /// (origin + sequence), it records every item already relayed/applied at
@@ -5543,12 +5734,16 @@ mod tests {
 
         // Channel init: empty, gen=0. Persister records last_wipe_gen=0.
         let (tx, rx) = watch::channel(State::initial(&Config::default()));
+        // Never-cancelled token: this test ends the persister the old way
+        // (dropping `tx` below), exercising that path still works unchanged.
+        let shutdown = tokio_util::sync::CancellationToken::new();
         let persister = tokio::spawn(run_vault_persister(
             ctx,
             rx,
             0,
             disc_cache.clone(),
             backoff.clone(),
+            shutdown,
         ));
 
         // Baseline: publish the favorited secret (gen still 0) → persister saves
@@ -5699,6 +5894,7 @@ mod tests {
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
             &outbox,
+            &Arc::new(Mutex::new(HashMap::new())),
             &state_rx,
         )
         .await;
@@ -5790,6 +5986,7 @@ mod tests {
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
             &outbox,
+            &Arc::new(Mutex::new(HashMap::new())),
             &state_rx,
         )
         .await;
@@ -5895,6 +6092,7 @@ mod tests {
         let mesh_seen = Arc::new(Mutex::new(SeenSet::default()));
         let (event_tx, _event_rx) = mpsc::channel(1024);
         let outbox = Arc::new(Mutex::new(Outbox::new()));
+        let pending_pulls = Arc::new(Mutex::new(HashMap::new()));
 
         let sensitive_hash = [0xAAu8; 32];
         complete_reassembled_item(
@@ -5911,6 +6109,7 @@ mod tests {
             0,
             b"secret".to_vec(),
             &outbox,
+            &pending_pulls,
         )
         .await;
         assert!(
@@ -5933,6 +6132,7 @@ mod tests {
             0,
             b"hello".to_vec(),
             &outbox,
+            &pending_pulls,
         )
         .await;
         assert!(
@@ -5964,6 +6164,7 @@ mod tests {
         let mesh_seen = Arc::new(Mutex::new(SeenSet::default()));
         let (event_tx, _event_rx) = mpsc::channel(1024);
         let outbox = Arc::new(Mutex::new(Outbox::new()));
+        let pending_pulls = Arc::new(Mutex::new(HashMap::new()));
 
         let sensitive_hash = [0xCCu8; 32];
         complete_reassembled_item(
@@ -5980,6 +6181,7 @@ mod tests {
             0,
             b"fake-png-secret".to_vec(),
             &outbox,
+            &pending_pulls,
         )
         .await;
         assert!(
@@ -6002,6 +6204,7 @@ mod tests {
             0,
             b"fake-png-plain".to_vec(),
             &outbox,
+            &pending_pulls,
         )
         .await;
         assert!(
@@ -6043,6 +6246,7 @@ mod tests {
         let backoff = Arc::new(Mutex::new(HashMap::new()));
         let peer_meta = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
         let outbox = Arc::new(Mutex::new(Outbox::new()));
+        let pending_pulls = Arc::new(Mutex::new(HashMap::new()));
         let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
             &fluxsync_core::Config::default(),
         ));
@@ -6077,6 +6281,7 @@ mod tests {
             &peer_meta,
             None,
             &outbox,
+            &pending_pulls,
             &state_rx,
         )
         .await;

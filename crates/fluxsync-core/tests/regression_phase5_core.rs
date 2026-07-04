@@ -65,6 +65,7 @@ fn inbound_text(n: u8, lamport: u64) -> Event {
         preview: format!("peer-{n}"),
         sensitive: false,
         lamport,
+        resync: false,
     }
 }
 

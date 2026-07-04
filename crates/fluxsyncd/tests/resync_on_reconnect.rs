@@ -176,6 +176,19 @@ async fn items_resynced(ipc: &Path) -> u64 {
     status(ipc).await.metrics.as_ref().map_or(0, |m| m.items_resynced)
 }
 
+/// DEFECT 1 regression proof: a resync-delivered item's `WriteClipboard`
+/// action was stripped (`Action::ResyncApplySuppressed`) instead of applied.
+/// Clipboard I/O is disabled in this harness (`disable_clipboard = true`),
+/// so this dedicated counter is the only IPC-observable signal — see
+/// `ConnectionMetrics::resync_applies_suppressed`.
+async fn resync_applies_suppressed(ipc: &Path) -> u64 {
+    status(ipc)
+        .await
+        .metrics
+        .as_ref()
+        .map_or(0, |m| m.resync_applies_suppressed)
+}
+
 // ── Real IPC pairing (PairShow -> PairAccept -> PairConfirm x2) ──
 // Mirrors chaos_harness.rs's helpers of the same names/shape, ported from
 // the subprocess `Daemon` wrapper to plain ipc paths for the in-process
@@ -464,4 +477,184 @@ async fn sensitive_item_never_resyncs() {
     shutdown_b2.cancel();
     let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
     let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
+}
+
+/// DEFECT 1 + DEFECT 2 regression: the live "every macOS relaunch" bug.
+///
+/// Extends the two-cycle structure above with a SECOND relink of `b` rather
+/// than duplicating a new harness:
+///  * Cycle 1 proves a missed item — deliberately CRLF-bearing text, DEFECT
+///    2(a)'s prime suspect (a hash mismatch from text normalization between
+///    the wire hash and a locally-recomputed history hash) — still resyncs,
+///    and that its `WriteClipboard` apply was suppressed
+///    (`resync_applies_suppressed`, DEFECT 1) rather than silently replacing
+///    whatever was already on `b`'s OS-clipboard-equivalent (clipboard I/O
+///    is disabled in this harness, so the dedicated counter is the
+///    IPC-observable stand-in the module doc's "add a test-visible counter"
+///    escape hatch calls for).
+///  * Cycle 2 kills `b` a SECOND time and restarts it fresh again. If the
+///    held-check that should stop a repeat pull were broken (DEFECT 2 — the
+///    vault-persist race that dropped the resynced item before the next
+///    boot's vault load could see it, or a hash mismatch that made the
+///    held-check never match), `a` would serve the same item again on this
+///    second relink and `items_resynced` would advance a second time. It
+///    must not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resync_apply_suppressed_and_loop_stops_after_second_relink() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let (ipc_a, shutdown_a, h_a, id_b, keystore_b, ipc_b, _port_b, addr_a, a_pub) =
+        boot_and_link().await;
+
+    // CRLF-bearing text: if the offered hash (computed by `a` over its own
+    // outbox entry) ever diverged from the hash `b` recomputes for the SAME
+    // logical content, the held-check would miss forever and this whole
+    // test would hang on the cycle-2 assertion below instead of passing.
+    // No TRAILING \r\n here (only an internal one, between the two lines):
+    // `CmdOp::Push` trims the pushed text's outer whitespace before hashing
+    // AND before stamping `HistoryItem.preview`, so a trailing CRLF in this
+    // literal would never round-trip back out of `history_has`'s exact
+    // string match — that's a test-harness pitfall, not a resync-1 bug.
+    let missed = "resync-crlf-item\r\nsecond line";
+    push(&ipc_a, missed).await;
+
+    // Same deliberate plain sleep as the scenarios above — past the
+    // retransmit budget before b comes back, so the item can only reappear
+    // via the resync-1 outbox path.
+    tokio::time::sleep(RETRANSMIT_EXHAUSTION_WAIT).await;
+
+    let items_resynced_before_cycle1 = items_resynced(&ipc_a).await;
+
+    // ── Cycle 1: b comes back, resync-1 delivers the missed item ──
+    // NOTE: b2 is a brand-new process (fresh `MetricsTracker::new()`), so
+    // `resync_applies_suppressed` starts at 0 — no "before" baseline needs
+    // querying over b's IPC while b is still down (its socket isn't even
+    // listening yet).
+    let (shutdown_b2, h_b2) =
+        restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub.clone(), &ipc_a).await;
+
+    assert!(
+        wait_until(Duration::from_secs(15), || async { history_has(&ipc_b, missed).await }).await,
+        "CRLF item never resynced onto b within 15s of relink cycle 1 — if this hangs, suspect \
+         a hash mismatch between a's offered hash and b's history hash (DEFECT 2a)"
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || async {
+            items_resynced(&ipc_a).await > items_resynced_before_cycle1
+        })
+        .await,
+        "a's items_resynced counter never advanced for cycle 1"
+    );
+
+    // DEFECT 1: the resync delivery must NOT have applied to b's OS
+    // clipboard — proven via the dedicated suppression counter.
+    assert!(
+        wait_until(Duration::from_secs(5), || async {
+            resync_applies_suppressed(&ipc_b).await > 0
+        })
+        .await,
+        "b never recorded a suppressed resync apply for the CRLF item — DEFECT 1 not fixed"
+    );
+    let items_resynced_after_cycle1 = items_resynced(&ipc_a).await;
+
+    // ── Cycle 2: kill b again, restart it fresh a second time, relink ──
+    // b's vault must have persisted the resynced item before this shutdown
+    // (DEFECT 2's fix: the vault persister is now a tracked, joined task
+    // that flushes on `shutdown` rather than a detached spawn a fast
+    // shutdown could race past), so the rehydrated history already holds
+    // the hash and resync-1's held-check must skip it entirely this time.
+    shutdown_b2.cancel();
+    let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
+
+    let (shutdown_b3, h_b3) =
+        restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub, &ipc_a).await;
+
+    assert!(
+        history_has(&ipc_b, missed).await,
+        "b lost the resynced item across its own restart (vault flush regressed)"
+    );
+    // Real window for an errant second pull to land before asserting it
+    // didn't — mirrors the ordering-based bound in
+    // `sensitive_item_never_resyncs` rather than a blind race.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        items_resynced(&ipc_a).await,
+        items_resynced_after_cycle1,
+        "a re-served the CRLF item on a SECOND relink cycle — resync-1's held-check did not \
+         stop the loop (DEFECT 2); items_resynced must not grow between cycle 1 and cycle 2"
+    );
+
+    shutdown_a.cancel();
+    shutdown_b3.cancel();
+    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b3).await.expect("b3: clean shutdown hung");
+}
+
+/// DEFECT 3 regression: resync-1's promise is narrow — recover items whose
+/// DELIVERY was actually attempted but went unacked when the link dropped —
+/// not "resurface anything ever copied while fully offline". `a` is booted
+/// alone (no peer paired at all yet, so `transport.linked_peer_ids()` is
+/// empty) and an item is copied in that window, before `b` even exists.
+/// Once `a` and `b` pair for the very first time, the item must never
+/// appear in `b`'s history: it was never inserted into `a`'s outbox in the
+/// first place (see the `targets.is_empty()` gate in the `Action::SendItem`
+/// dispatch, ordered BEFORE the outbox write).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn item_copied_while_fully_unlinked_never_resyncs() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let port_a = pick_free_udp_port().await;
+    let port_b = pick_free_udp_port().await;
+    assert_ne!(port_a, port_b);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = Box::leak(Box::new(dir));
+    let keystore_a = dir.path().join("ks-a");
+    let keystore_b = dir.path().join("ks-b");
+    std::fs::create_dir(&keystore_a).unwrap();
+    std::fs::create_dir(&keystore_b).unwrap();
+    let ipc_a = keystore_a.join("a.sock");
+    let ipc_b = keystore_b.join("b.sock");
+    let addr_a: SocketAddr = format!("127.0.0.1:{port_a}").parse().unwrap();
+
+    let shutdown_a = CancellationToken::new();
+    let h_a = tokio::spawn(run(
+        cfg_for(&id_a, port_a, &keystore_a, &ipc_a, "device-a"),
+        shutdown_a.clone(),
+    ));
+    assert!(ipc_up(&ipc_a, Duration::from_secs(5)).await, "a: ipc not up");
+    set_threshold(&ipc_a, 5).await;
+
+    // a has no peer at all yet (never paired) — copy here, with zero linked
+    // peers. This is the privacy-leak scenario: an old private copy made
+    // with no peer connected must never flush to whichever peer links next.
+    let offline_item = "resync-offline-privacy-leak";
+    push(&ipc_a, offline_item).await;
+
+    // Now bring b up and pair with a for the very first time.
+    let shutdown_b = CancellationToken::new();
+    let h_b = tokio::spawn(run(
+        cfg_for(&id_b, port_b, &keystore_b, &ipc_b, "device-b"),
+        shutdown_b.clone(),
+    ));
+    assert!(ipc_up(&ipc_b, Duration::from_secs(5)).await, "b: ipc not up");
+    set_threshold(&ipc_b, 5).await;
+
+    pair_daemons(&ipc_a, addr_a, &ipc_b).await;
+
+    // Real window — the same one a legitimate missed item gets in the other
+    // scenarios above — for an errant resync to land before asserting it
+    // didn't.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        !history_has(&ipc_b, offline_item).await,
+        "an item copied while fully unlinked leaked to b via resync-1 (DEFECT 3)"
+    );
+
+    shutdown_a.cancel();
+    shutdown_b.cancel();
+    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b).await.expect("b: clean shutdown hung");
 }

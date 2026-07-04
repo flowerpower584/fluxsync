@@ -456,6 +456,12 @@ impl App {
         // ── Pre-transition state mutations ──────────────────────────────
         // (everything that is "data the FSM expects to already be in state")
         let mut suppress_action = false;
+        // resync-1: set from `Event::FrameReceivedClipboard.resync` below;
+        // read post-transition to strip the just-emitted `WriteClipboard`
+        // action. History insertion, the vault persist it triggers, mesh
+        // relay, and the Ack all stay intact — see the arm below and the
+        // strip site right after `apply_firewall`.
+        let mut suppress_resync_apply = false;
         match &event {
             Event::ToggleOn => self.state.on = true,
             Event::ToggleOff => self.state.on = false,
@@ -532,7 +538,9 @@ impl App {
                 preview,
                 sensitive,
                 lamport,
+                resync,
             } => {
+                suppress_resync_apply = *resync;
                 // Strip leading/trailing whitespace from the preview
                 let preview = preview.trim();
 
@@ -691,6 +699,21 @@ impl App {
         // No-op while the firewall is disabled (the default) → behaviour
         // identical to pre-firewall.
         self.apply_firewall(&event, &mut actions);
+
+        // resync-1: an item delivered in response to OUR ResyncPull must
+        // never silently replace the user's current OS clipboard — it is
+        // catch-up bookkeeping, not a fresh copy event. History insertion
+        // (above), the vault persist it triggers, mesh relay, and the Ack
+        // all stay untouched; only the apply is dropped.
+        if suppress_resync_apply {
+            let had_write = actions
+                .iter()
+                .any(|a| matches!(a, Action::WriteClipboard { .. }));
+            actions.retain(|a| !matches!(a, Action::WriteClipboard { .. }));
+            if had_write {
+                actions.push(Action::ResyncApplySuppressed);
+            }
+        }
 
         // The HandshakeOk→Linked transition emits a placeholder `SendBattery`
         // (fsm.rs uses level=100). Overwrite every outgoing battery action with
@@ -937,6 +960,7 @@ mod tests {
                 preview: "hi".into(),
                 sensitive: false,
                 lamport: 1,
+                resync: false,
             },
             &wall(),
         );
@@ -1347,6 +1371,7 @@ mod tests {
                 preview: "Bonjour".into(),
                 lamport: 5,
                 sensitive: false,
+                resync: false,
             },
             &wall(),
         );
@@ -1387,6 +1412,7 @@ mod tests {
                 preview: "recent".into(),
                 lamport: 500,
                 sensitive: false,
+                resync: false,
             },
             &wall(),
         );
@@ -1401,6 +1427,7 @@ mod tests {
                 preview: "old retransmit".into(),
                 lamport: 3,
                 sensitive: false,
+                resync: false,
             },
             &wall(),
         );
@@ -1443,6 +1470,7 @@ mod tests {
                     preview: format!("item-{i}"),
                     lamport: u64::from(i),
                     sensitive: false,
+                    resync: false,
                 },
                 &wall(),
             );
@@ -1616,6 +1644,7 @@ mod tests {
                 preview: "from peer".into(),
                 sensitive: false,
                 lamport: 9,
+                resync: false,
             },
             &wall(),
         );
@@ -1696,6 +1725,7 @@ mod tests {
                 preview: "from peer".into(),
                 sensitive: false,
                 lamport: 9,
+                resync: false,
             },
             &wall(),
         );
@@ -1722,6 +1752,7 @@ mod tests {
                 preview: "from peer".into(),
                 sensitive: false,
                 lamport: 9,
+                resync: false,
             },
             &wall(),
         );

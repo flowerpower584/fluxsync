@@ -334,6 +334,8 @@ fn clipboard_peer_to_local_writes_and_acks() {
             preview: "Bonjour".into(),
             lamport: 5,
             sensitive: false,
+
+            resync: false,
         },
         &wall(),
     );
@@ -393,6 +395,8 @@ fn clipboard_cross_dedup_peer_then_local() {
             preview: "echo".into(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall(),
     );
@@ -427,6 +431,8 @@ fn se14_peer_supplied_hash_does_not_key_dedup() {
             preview: "real".into(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall(),
     );
@@ -440,6 +446,8 @@ fn se14_peer_supplied_hash_does_not_key_dedup() {
             preview: "fake".into(),
             lamport: 2,
             sensitive: false,
+
+            resync: false,
         },
         &wall(),
     );
@@ -478,6 +486,8 @@ fn clipboard_history_capped_at_50() {
                 preview: format!("item-{i}"),
                 lamport: u64::from(i),
                 sensitive: false,
+
+                resync: false,
             },
             &wall(),
         );
@@ -498,6 +508,8 @@ fn clipboard_history_newest_first() {
                 preview: format!("msg-{i}"),
                 lamport: u64::from(i),
                 sensitive: false,
+
+                resync: false,
             },
             &wall(),
         );
@@ -757,6 +769,8 @@ fn emit_state_on_every_meaningful_event() {
             preview: "test".into(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall(),
     );
@@ -810,6 +824,8 @@ fn stress_interleaved_clipboard_and_battery() {
                     preview: format!("remote-{i}"),
                     lamport: u64::from(i),
                     sensitive: false,
+
+                    resync: false,
                 },
                 &wall(),
             );

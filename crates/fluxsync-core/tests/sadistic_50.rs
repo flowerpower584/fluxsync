@@ -189,6 +189,8 @@ fn test_06_duplicate_hash_poisoning() {
             preview: "Real".into(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -200,6 +202,8 @@ fn test_06_duplicate_hash_poisoning() {
             preview: "Fake/Poison".into(),
             lamport: 2,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -238,6 +242,8 @@ fn test_07_clipboard_bomb_performance() {
                 preview: bomb.clone(),
                 lamport: i as u64,
                 sensitive: false,
+
+                resync: false,
             },
             &wall,
         );
@@ -306,6 +312,8 @@ fn test_09_lamport_jump_to_max() {
             preview: "End of Time".into(),
             lamport: u64::MAX - 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -348,6 +356,8 @@ fn test_10_negative_lamport_regression() {
             preview: "A".into(),
             lamport: 1000,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -360,6 +370,8 @@ fn test_10_negative_lamport_regression() {
             preview: "B".into(),
             lamport: 0,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -458,6 +470,8 @@ fn test_15_empty_payload_integrity() {
             preview: String::new(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     ); // Empty clipboard
@@ -493,6 +507,8 @@ fn test_16_history_rotation_at_limit() {
                 preview: format!("Old {i}"),
                 lamport: i as u64,
                 sensitive: false,
+
+                resync: false,
             },
             &wall,
         );
@@ -509,6 +525,8 @@ fn test_16_history_rotation_at_limit() {
             preview: "Fresh".into(),
             lamport: 100,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -543,6 +561,8 @@ fn test_17_dedup_collision_resistance() {
             preview: "Content A".into(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -554,6 +574,8 @@ fn test_17_dedup_collision_resistance() {
             preview: "Content B".into(),
             lamport: 2,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -588,6 +610,8 @@ fn test_18_lamport_clock_causality_violation() {
             preview: "T3".into(),
             lamport: 300,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -599,6 +623,8 @@ fn test_18_lamport_clock_causality_violation() {
             preview: "T2".into(),
             lamport: 200,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -610,6 +636,8 @@ fn test_18_lamport_clock_causality_violation() {
             preview: "T1".into(),
             lamport: 100,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -673,6 +701,8 @@ fn test_20_null_byte_in_preview() {
             preview: malicious.clone(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -702,6 +732,8 @@ fn test_21_large_history_unpair_repair_cycle() {
                 preview: format!("P1-{i}"),
                 lamport: u64::from(i),
                 sensitive: false,
+
+                resync: false,
             },
             &wall,
         );
@@ -799,6 +831,8 @@ fn test_25_local_clipboard_same_as_peer_ack_loop_prevention() {
             preview: "Shared".into(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -927,6 +961,8 @@ fn test_30_simulated_sha256_poisoning_in_history() {
             preview: "Poison".into(),
             lamport: 2,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -1019,6 +1055,8 @@ fn test_34_manual_unpair_resets_lamport_clock() {
             preview: "X".into(),
             lamport: 5000,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -1052,6 +1090,8 @@ fn test_35_very_long_preview_truncation() {
             preview: long_preview.clone(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -1087,6 +1127,8 @@ fn test_36_malformed_wall_clock_time() {
             preview: "X".into(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &crazy_wall,
     );
@@ -1164,6 +1206,8 @@ fn test_39_sensitive_data_then_replay_attack() {
             preview: "MOCK_STRIPE_KEY_REDACTED".into(),
             lamport: 2,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -1291,6 +1335,8 @@ fn test_46_dedup_eviction_and_reentry() {
             preview: "A".into(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -1305,6 +1351,8 @@ fn test_46_dedup_eviction_and_reentry() {
                 preview: "B".into(),
                 lamport: (i + 10) as u64,
                 sensitive: false,
+
+                resync: false,
             },
             &wall,
         );
@@ -1319,6 +1367,8 @@ fn test_46_dedup_eviction_and_reentry() {
             preview: "A".into(),
             lamport: 100,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -1348,6 +1398,8 @@ fn test_47_frozen_wall_clock() {
                 preview: "X".into(),
                 lamport: i as u64,
                 sensitive: false,
+
+                resync: false,
             },
             &frozen_wall,
         );

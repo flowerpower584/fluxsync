@@ -163,6 +163,14 @@ pub struct ConnectionMetrics {
     /// per requested hash — a hash we don't hold is silently skipped).
     #[serde(default)]
     pub items_resynced: u64,
+    /// resync-1 apply-suppression fix (DEFECT 1): items that arrived in
+    /// response to OUR OWN `ResyncPull` and so were deliberately NOT applied
+    /// to the OS clipboard (`Action::WriteClipboard` stripped) — still
+    /// entered history/vault/relay and were still acked. Test-visible proof
+    /// that a resync delivery didn't silently overwrite the user's current
+    /// clipboard; see `Action::ResyncApplySuppressed`.
+    #[serde(default)]
+    pub resync_applies_suppressed: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

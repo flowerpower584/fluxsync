@@ -43,6 +43,8 @@ mod elite_sandbox {
                 preview: "recent".into(),
                 lamport: 150,
                 sensitive: false,
+
+                resync: false,
             },
             &wall,
         );
@@ -57,6 +59,8 @@ mod elite_sandbox {
                 preview: "old retransmit".into(),
                 lamport: 10,
                 sensitive: false,
+
+                resync: false,
             },
             &wall,
         );
@@ -95,6 +99,8 @@ mod elite_sandbox {
                 preview: "First".into(),
                 lamport: 10,
                 sensitive: false,
+
+                resync: false,
             },
             &wall,
         );
@@ -111,6 +117,8 @@ mod elite_sandbox {
                 preview: "First".into(),
                 lamport: 11,
                 sensitive: false,
+
+                resync: false,
             },
             &wall,
         );

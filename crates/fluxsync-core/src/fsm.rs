@@ -400,6 +400,7 @@ mod tests {
             preview: "Bonjour".into(),
             lamport: 11,
             sensitive: false,
+            resync: false,
         };
         let (p, a) = transition(Phase::Linked, &ev);
         assert_eq!(p, Phase::Linked);
@@ -422,6 +423,7 @@ mod tests {
             preview: "early".into(),
             lamport: 3,
             sensitive: false,
+            resync: false,
         };
         let (p, a) = transition(Phase::Handshaking, &ev);
         assert_eq!(p, Phase::Handshaking, "phase must not change");

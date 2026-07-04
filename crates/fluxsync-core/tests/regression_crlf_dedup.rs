@@ -102,6 +102,8 @@ fn crlf_inbound_then_lf_readback_is_suppressed() {
             preview: crlf.into(),
             lamport: 5,
             sensitive: false,
+
+            resync: false,
         },
         &wall(),
     );
@@ -160,6 +162,8 @@ fn control_identical_readback_is_suppressed() {
             preview: text.into(),
             lamport: 5,
             sensitive: false,
+
+            resync: false,
         },
         &wall(),
     );

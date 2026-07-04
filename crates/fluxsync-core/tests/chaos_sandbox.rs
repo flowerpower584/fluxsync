@@ -101,6 +101,8 @@ fn the_time_paradox_test() {
             preview: "Future".into(),
             lamport: 100,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -115,6 +117,8 @@ fn the_time_paradox_test() {
             preview: "Past".into(),
             lamport: 10,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -205,6 +209,8 @@ fn history_spam_test() {
                 preview: format!("item {i}"),
                 lamport: i as u64,
                 sensitive: false,
+
+                resync: false,
             },
             &wall,
         );
@@ -272,6 +278,8 @@ fn the_duplicate_history_bug_test() {
             preview: "Duplicate Content".into(),
             lamport: 1,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -284,6 +292,8 @@ fn the_duplicate_history_bug_test() {
             preview: "Duplicate Content".into(),
             lamport: 2,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -319,6 +329,8 @@ fn the_out_of_order_history_test() {
             preview: "Message 2".into(),
             lamport: 10,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -332,6 +344,8 @@ fn the_out_of_order_history_test() {
             preview: "Message 1".into(),
             lamport: 5,
             sensitive: false,
+
+            resync: false,
         },
         &wall,
     );
@@ -418,6 +432,8 @@ fn memory_and_cpu_stress_test() {
                 preview: large_string.clone(),
                 lamport: i as u64,
                 sensitive: false,
+
+                resync: false,
             },
             &wall,
         );
