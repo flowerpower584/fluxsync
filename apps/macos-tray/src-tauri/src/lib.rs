@@ -127,6 +127,17 @@ async fn fluxsync_set_favorite(hash: String, favorite: bool) -> Result<(), Strin
         .map(|_| ())
 }
 
+/// "Clear clipboard history" (owner-requested, local-only — never
+/// propagated to the peer). Favorited items always survive from the tray:
+/// `include_favorites` is hardcoded `false` here. Deleting favorites too is
+/// CLI-only (`fluxctl history clear --all`), not exposed in this UI.
+#[tauri::command]
+async fn fluxsync_clear_history() -> Result<(), String> {
+    ipc::one_shot(json!({"id": 1, "op": "clear_history", "include_favorites": false}))
+        .await
+        .map(|_| ())
+}
+
 #[tauri::command]
 fn fluxsync_open_url(url: String) {
     // Defense-in-depth (H-TRAY-01): only ever hand http(s) URLs to the OS
@@ -298,6 +309,7 @@ pub fn run() {
             fluxsync_set_firewall,
             fluxsync_resolve_pending,
             fluxsync_set_favorite,
+            fluxsync_clear_history,
             fluxsync_open_url,
         ])
         .setup(|app| {

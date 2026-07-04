@@ -164,8 +164,26 @@ async fn push(ipc: &Path, text: &str) {
     assert!(r.ok, "push {text:?} failed: {r:?}");
 }
 
+async fn clear_history(ipc: &Path, include_favorites: bool) {
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 9,
+            op: CmdOp::ClearHistory { include_favorites },
+        },
+    )
+    .await;
+    assert!(r.ok, "clear-history failed: {r:?}");
+}
+
 async fn history_has(ipc: &Path, preview: &str) -> bool {
     status(ipc).await.history.iter().any(|h| h.preview == preview)
+}
+
+/// Full history row matching `preview`, so callers can inspect fields like
+/// `resync` beyond the plain presence check `history_has` does.
+async fn history_item(ipc: &Path, preview: &str) -> Option<fluxsync_core::HistoryItem> {
+    status(ipc).await.history.iter().find(|h| h.preview == preview).cloned()
 }
 
 async fn phase_linked(ipc: &Path) -> bool {
@@ -381,6 +399,45 @@ async fn missed_item_resyncs_after_relink() {
     let missed = "resync-missed-item";
     push(&ipc_a, missed).await;
 
+    // Also push a second missed item that the user clears from `a` (a
+    // non-favorite) before `b` ever relinks. "Clear clipboard history" is
+    // local-only + must purge a's resync outbox: if it didn't, this item
+    // would still resync onto `b` even though the user deleted it on `a`.
+    // `missed` is pinned as a favorite first so the blanket
+    // `ClearHistory{include_favorites: false}` below — which drops every
+    // non-favorite, not just `cleared` — doesn't also wipe it out from under
+    // the existing resync-recovery assertions further down; favorite status
+    // has no bearing on resync/outbox behavior, only on vault TTL/cap.
+    let cleared = "resync-cleared-item";
+    push(&ipc_a, cleared).await;
+    assert!(
+        history_has(&ipc_a, cleared).await,
+        "cleared-to-be item never reached a's own history"
+    );
+    let missed_hash = history_item(&ipc_a, missed)
+        .await
+        .expect("missed item must be in a's history before pinning")
+        .hash;
+    let fav_resp = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 8,
+            op: CmdOp::SetFavorite { hash: missed_hash, favorite: true },
+        },
+    )
+    .await;
+    assert!(fav_resp.ok, "set-favorite on missed item failed: {fav_resp:?}");
+
+    clear_history(&ipc_a, false).await;
+    assert!(
+        !history_has(&ipc_a, cleared).await,
+        "ClearHistory did not remove the item from a's in-memory history"
+    );
+    assert!(
+        history_has(&ipc_a, missed).await,
+        "ClearHistory{{include_favorites: false}} must keep a favorited item"
+    );
+
     // Deliberate plain sleep: no IPC-observable signal fires when an item
     // is dropped from `inflight` after MAX_RETRANSMIT (only a
     // `tracing::warn`, see the module doc), and this is the one thing this
@@ -400,6 +457,21 @@ async fn missed_item_resyncs_after_relink() {
         "missed item never resynced onto b within 15s of relink"
     );
 
+    // Client-side marker (this fix): a pull-resynced item must land in
+    // history with `resync == true` so Android's poll loop can mark it seen
+    // without applying it to the OS clipboard, while a normal, live-pushed
+    // item (the `boot_and_link` sanity item, delivered to b before it went
+    // down) stays `resync == false`.
+    let missed_item = history_item(&ipc_b, missed)
+        .await
+        .expect("missed item must be present in b's history after resync");
+    assert!(missed_item.resync, "pull-resynced item must have resync == true");
+
+    let sanity_item = history_item(&ipc_b, "resync-sanity-item")
+        .await
+        .expect("sanity item (live-pushed before b went down) must survive in b's history");
+    assert!(!sanity_item.resync, "a live-pushed item must have resync == false");
+
     assert!(
         wait_until(Duration::from_secs(5), || async {
             items_resynced(&ipc_a).await > items_resynced_before
@@ -407,6 +479,24 @@ async fn missed_item_resyncs_after_relink() {
         .await,
         "a's items_resynced counter never advanced — item may have arrived by a path other than \
          resync-1's outbox"
+    );
+
+    // The item cleared from a's history (and outbox) before b relinked must
+    // never surface on b — same ordering-based bound used elsewhere in this
+    // suite: resync-1 offers the whole outbox in one Hello round trip, so a
+    // few extra seconds past the confirmed resync above rules out a late
+    // arrival, not just "hasn't arrived yet".
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !history_has(&ipc_b, cleared).await,
+        "a cleared (non-favorite) item leaked onto b via the resync outbox — ClearHistory must \
+         purge the outbox"
+    );
+    assert_eq!(
+        items_resynced(&ipc_a).await,
+        items_resynced_before + 1,
+        "a's items_resynced advanced by more than the still-pending missed item alone — the \
+         cleared item may have been served from the outbox too"
     );
 
     shutdown_a.cancel();

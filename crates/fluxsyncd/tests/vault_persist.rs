@@ -316,6 +316,184 @@ async fn favorite_flag_survives_restart() {
     let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
 }
 
+async fn clear_history(ipc: &Path, include_favorites: bool, id: u64) {
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id,
+            op: CmdOp::ClearHistory { include_favorites },
+        },
+    )
+    .await;
+    assert!(r.ok, "clear-history failed: {r:?}");
+}
+
+/// "Clear clipboard history": with `include_favorites = false`, a favorited
+/// item survives both in-memory and on disk, while a non-favorite is
+/// removed from both — the on-disk vault is rewritten to just the
+/// surviving favorite, not merely deleted (which would otherwise resurrect
+/// nothing, but also prove nothing about the rewrite path).
+#[tokio::test]
+async fn clear_history_keeps_favorites_by_default() {
+    let id = Identity::generate();
+    let port = pick_free_udp_port().await;
+    let dir = tempdir().unwrap();
+    let keystore = dir.path().join("ks");
+    std::fs::create_dir(&keystore).unwrap();
+    let ipc = keystore.join("d.sock");
+
+    let sd1 = CancellationToken::new();
+    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "clr-d"), sd1.clone()));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+
+    ipc_send_recv(&ipc, CmdRequest { id: 0, op: CmdOp::Toggle { on: true } }).await;
+    ipc_send_recv(
+        &ipc,
+        CmdRequest { id: 1, op: CmdOp::Push { text: "keep-fav".into() } },
+    )
+    .await;
+    ipc_send_recv(
+        &ipc,
+        CmdRequest { id: 2, op: CmdOp::Push { text: "drop-me".into() } },
+    )
+    .await;
+
+    assert!(
+        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "keep-fav", 3).await }).await,
+        "favorite-to-be item never reached history"
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "drop-me", 4).await }).await,
+        "non-favorite item never reached history"
+    );
+
+    let (hash, _) = item_of(&ipc, "keep-fav", 5).await.expect("item present");
+    let r = ipc_send_recv(
+        &ipc,
+        CmdRequest { id: 6, op: CmdOp::SetFavorite { hash, favorite: true } },
+    )
+    .await;
+    assert!(r.ok, "set-favorite failed: {r:?}");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let ipc = ipc.clone();
+            async move { matches!(item_of(&ipc, "keep-fav", 7).await, Some((_, true))) }
+        })
+        .await,
+        "favorite flag never set in-memory"
+    );
+
+    clear_history(&ipc, false, 8).await;
+
+    assert!(
+        wait_until(Duration::from_secs(5), || async { !history_has(&ipc, "drop-me", 9).await }).await,
+        "non-favorite item survived ClearHistory{{include_favorites: false}} in memory"
+    );
+    assert!(
+        history_has(&ipc, "keep-fav", 10).await,
+        "favorited item was dropped from memory by ClearHistory{{include_favorites: false}}"
+    );
+
+    let hist_file = keystore.join("history.enc");
+    sd1.cancel();
+    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+
+    // Restart with the same keystore: the on-disk vault must already
+    // reflect the favorites-only survivor set, not the pre-clear list and
+    // not an empty file left over from a bare delete.
+    let port2 = pick_free_udp_port().await;
+    let sd2 = CancellationToken::new();
+    let h2 = tokio::spawn(run(cfg_for(&id, port2, &keystore, &ipc, "clr-d-v2"), sd2.clone()));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+    assert!(hist_file.exists(), "vault file must still exist (favorite survivor persisted)");
+
+    assert!(
+        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "keep-fav", 11).await }).await,
+        "favorited item was not restored from the on-disk vault after restart"
+    );
+    assert!(
+        !history_has(&ipc, "drop-me", 12).await,
+        "cleared non-favorite item resurrected from the on-disk vault after restart"
+    );
+
+    sd2.cancel();
+    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+}
+
+/// "Clear clipboard history" with `include_favorites = true`: even a
+/// favorited item is dropped, in memory and on disk — proves the vault
+/// persister's cached-favorites invalidation (via `vault_wipe_gen`) beats
+/// the `rebuild()` re-append-favorites path that would otherwise resurrect
+/// it on the very next persist tick.
+#[tokio::test]
+async fn clear_history_include_favorites_drops_everything() {
+    let id = Identity::generate();
+    let port = pick_free_udp_port().await;
+    let dir = tempdir().unwrap();
+    let keystore = dir.path().join("ks");
+    std::fs::create_dir(&keystore).unwrap();
+    let ipc = keystore.join("d.sock");
+
+    let sd1 = CancellationToken::new();
+    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "clr-all-d"), sd1.clone()));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+
+    ipc_send_recv(&ipc, CmdRequest { id: 0, op: CmdOp::Toggle { on: true } }).await;
+    ipc_send_recv(
+        &ipc,
+        CmdRequest { id: 1, op: CmdOp::Push { text: "also-drop-fav".into() } },
+    )
+    .await;
+    assert!(
+        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "also-drop-fav", 2).await }).await,
+        "item never reached history"
+    );
+    let (hash, _) = item_of(&ipc, "also-drop-fav", 3).await.expect("item present");
+    let r = ipc_send_recv(
+        &ipc,
+        CmdRequest { id: 4, op: CmdOp::SetFavorite { hash, favorite: true } },
+    )
+    .await;
+    assert!(r.ok, "set-favorite failed: {r:?}");
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let ipc = ipc.clone();
+            async move { matches!(item_of(&ipc, "also-drop-fav", 5).await, Some((_, true))) }
+        })
+        .await,
+        "favorite flag never set in-memory"
+    );
+
+    clear_history(&ipc, true, 6).await;
+
+    assert!(
+        wait_until(Duration::from_secs(5), || async { !history_has(&ipc, "also-drop-fav", 7).await }).await,
+        "favorited item survived ClearHistory{{include_favorites: true}} in memory"
+    );
+
+    sd1.cancel();
+    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+
+    // Restart with the same keystore: even the favorite must not come back
+    // from disk.
+    let port2 = pick_free_udp_port().await;
+    let sd2 = CancellationToken::new();
+    let h2 = tokio::spawn(run(cfg_for(&id, port2, &keystore, &ipc, "clr-all-d-v2"), sd2.clone()));
+    assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
+
+    // Real window for an errant resurrection to land before asserting it
+    // didn't (mirrors the ordering-based bounds used elsewhere in this
+    // suite rather than a blind assumption).
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !history_has(&ipc, "also-drop-fav", 8).await,
+        "favorited item resurrected from the on-disk vault after ClearHistory{{include_favorites: true}}"
+    );
+
+    sd2.cancel();
+    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+}
+
 /// Read the daemon's own `device_name` from its State.
 async fn device_name_of(ipc: &Path, id: u64) -> Option<String> {
     let r = ipc_send_recv(ipc, CmdRequest { id, op: CmdOp::Status }).await;

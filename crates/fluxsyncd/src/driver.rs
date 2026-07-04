@@ -1450,6 +1450,44 @@ async fn handle_driver_cmd(
             .await;
             CmdResponse::ok(req_id, None)
         }
+        CmdOp::ClearHistory { include_favorites } => {
+            tracing::info!(include_favorites, "IPC: clear-history");
+            // Snapshot the hashes about to be dropped BEFORE mutating state,
+            // so the outbox/image-cache purge below matches exactly what
+            // leaves `State.history`.
+            let cleared_hex: Vec<String> = app
+                .snapshot()
+                .history
+                .iter()
+                .filter(|h| include_favorites || !h.favorite)
+                .map(|h| h.hash.clone())
+                .collect();
+            let cleared_bytes: Vec<[u8; 32]> =
+                cleared_hex.iter().filter_map(|h| decode_hex32(h).ok()).collect();
+            // Purge the resync outbox first: a cleared item must not come
+            // back into history via a later pull/resync.
+            outbox.lock().await.remove_many(&cleared_bytes);
+            purge_cached_images(&cleared_hex);
+            let actions = app.handle(Event::ClearHistory { include_favorites }, &**wall);
+            dispatch(
+                actions,
+                app,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+                inflight,
+                peer_meta,
+                outbox,
+                seq_store,
+            )
+            .await;
+            CmdResponse::ok(req_id, None)
+        }
         CmdOp::SetFirewall { policy } => {
             tracing::info!(enabled = policy.enabled, "IPC: set-firewall");
             app.set_firewall(policy);
@@ -3158,6 +3196,16 @@ fn lookup_cached_image(hash_hex: &str) -> Option<Vec<u8>> {
     g.iter()
         .find(|(h, _)| h == hash_hex)
         .map(|(_, png)| png.clone())
+}
+
+/// "Clear clipboard history": drop every cached image payload whose hex hash
+/// is in `hashes_hex` so a cleared image can't still be fetched via
+/// `FetchItem` after the history entry that pointed at it is gone. A no-op
+/// on desktop, where nothing ever populates `IMAGE_CACHE`.
+fn purge_cached_images(hashes_hex: &[String]) {
+    if let Ok(mut g) = image_cache().lock() {
+        g.retain(|(h, _)| !hashes_hex.iter().any(|c| c == h));
+    }
 }
 
 /// Decode PNG bytes to `(width, height, rgba)`. `None` on any decode error.
@@ -5624,6 +5672,42 @@ mod tests {
         );
     }
 
+    /// "Clear clipboard history": `CmdOp::ClearHistory` purges cleared
+    /// hashes from `IMAGE_CACHE` so a cleared image can't still be fetched
+    /// via `FetchItem` afterwards. `cache_image` (the only inserter) is
+    /// `#[cfg(target_os = "android")]`-gated, so this test seeds the
+    /// process-global cache directly through `image_cache()` instead —
+    /// exactly what `purge_cached_images` (platform-independent) operates
+    /// on either way.
+    #[test]
+    fn clear_history_purges_cached_images_for_cleared_hashes() {
+        use super::{image_cache, lookup_cached_image, purge_cached_images};
+
+        let keep = "bb".repeat(32);
+        let drop = "aa".repeat(32);
+        {
+            let mut g = image_cache().lock().expect("lock image cache");
+            g.clear();
+            g.push_back((drop.clone(), vec![1, 2, 3]));
+            g.push_back((keep.clone(), vec![4, 5, 6]));
+        }
+
+        purge_cached_images(std::slice::from_ref(&drop));
+
+        assert!(
+            lookup_cached_image(&drop).is_none(),
+            "cleared hash must be purged from IMAGE_CACHE"
+        );
+        assert!(
+            lookup_cached_image(&keep).is_some(),
+            "an untouched hash must survive the purge"
+        );
+
+        // Don't leak this process-global cache's state into other tests in
+        // the same binary.
+        image_cache().lock().expect("lock image cache").clear();
+    }
+
     /// FS-026: the write side records `clipboard_dedup_hash(preview)` and
     /// the watcher looks up `clipboard_dedup_hash(raw_text)`. A payload that
     /// only differs by surrounding whitespace must hash equal, or a peer
@@ -5698,6 +5782,7 @@ mod tests {
             lamport: 1,
             hash: "aa".repeat(32),
             favorite: true,
+            resync: false,
         };
 
         // Persister starts empty (ctx.last empty) so the baseline publish below
@@ -5778,6 +5863,7 @@ mod tests {
             lamport: 2,
             hash: "bb".repeat(32),
             favorite: false,
+            resync: false,
         };
         let mut wiped = State::initial(&Config::default());
         wiped.history = vec![fresh.clone()];

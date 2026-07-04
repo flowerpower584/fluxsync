@@ -674,6 +674,22 @@ impl FluxsyncHandle {
             .map(|_| ())
             .map_err(|e| FluxError::Ipc(e.to_string()))
     }
+
+    /// "Clear clipboard history" (owner-requested, local-only — never
+    /// propagated to the peer). `include_favorites = false` keeps favorited
+    /// items; `true` drops everything, favorites included. Defaults to
+    /// `false` so existing Kotlin call sites keep compiling unchanged —
+    /// mirrors `push_item`'s `sensitive` default.
+    #[uniffi::method(default(include_favorites = false))]
+    pub fn clear_history(&self, include_favorites: bool) -> Result<(), FluxError> {
+        self.runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({"id": 1, "op": "clear_history", "include_favorites": include_favorites}),
+            ))
+            .map(|_| ())
+            .map_err(|e| FluxError::Ipc(e.to_string()))
+    }
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────

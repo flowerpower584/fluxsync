@@ -103,6 +103,14 @@ pub enum Event {
         hash: String,
         favorite: bool,
     },
+    /// "Clear clipboard history" (owner-requested, local-only — never
+    /// propagated to the peer). `include_favorites = false` keeps favorited
+    /// items; `true` drops everything. Also bumps `State.vault_wipe_gen` so
+    /// the vault persister invalidates its cached favorites and rewrites the
+    /// on-disk vault to match, the same mechanism the security wipes use.
+    ClearHistory {
+        include_favorites: bool,
+    },
     /// Clipboard firewall (chantier A): the user approved (`allow=true`) or
     /// rejected (`allow=false`) an item the `Ask` rule had parked. Keyed by the
     /// pending item's hex content `hash`. On approval the FSM re-emits the held

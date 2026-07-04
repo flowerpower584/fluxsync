@@ -94,6 +94,11 @@ enum Cmd {
         #[command(subcommand)]
         sub: FirewallSub,
     },
+    /// Clipboard history management.
+    History {
+        #[command(subcommand)]
+        sub: HistorySub,
+    },
     /// One-shot diagnostic: why isn't sync working? Exits 0 unless a check
     /// FAILs (WARNs are allowed).
     Doctor,
@@ -159,6 +164,17 @@ impl FwRule {
             FwRule::Never => "deny",
         }
     }
+}
+
+#[derive(Subcommand, Debug)]
+enum HistorySub {
+    /// Clear clipboard history. Local-only — never propagated to the peer.
+    /// Favorited items are kept unless `--all` is passed.
+    Clear {
+        /// Also delete favorited items.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -387,6 +403,16 @@ async fn main() -> Result<()> {
                     Kind::Ack("rule updated"),
                 )
             }
+        },
+        Cmd::History { sub } => match sub {
+            HistorySub::Clear { all } => (
+                one_shot(
+                    &ipc_path,
+                    json!({"id": 1, "op": "clear_history", "include_favorites": all}),
+                )
+                .await?,
+                Kind::Ack("history cleared"),
+            ),
         },
         Cmd::Pair { sub } => match sub {
             PairSub::Show => (

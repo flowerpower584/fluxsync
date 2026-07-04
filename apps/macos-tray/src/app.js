@@ -717,6 +717,18 @@ document.getElementById('unpair-btn').addEventListener('click', async () => {
   }
 });
 
+document.getElementById('clear-history-btn').addEventListener('click', async (e) => {
+  e.stopPropagation();
+  if (!confirm('Clear clipboard history? Favorites are kept.')) return;
+  try {
+    await invoke('fluxsync_clear_history');
+    showToast('History cleared.');
+    refreshState();
+  } catch (err) {
+    showToast(`Clear history failed: ${err}`);
+  }
+});
+
 async function openPair() {
   try {
     await invoke('fluxsync_open_pair');

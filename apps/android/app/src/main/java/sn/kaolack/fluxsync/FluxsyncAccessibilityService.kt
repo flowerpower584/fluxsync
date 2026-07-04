@@ -373,6 +373,16 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                             val fresh = newRemoteItems(parsed.history, seenHashes)
                             var grew = false
                             for (item in fresh) {
+                                // resync-1 client-side marker fix: a pull-resync
+                                // catch-up delivery is history-only bookkeeping,
+                                // not a live copy event — mark it seen so it isn't
+                                // reprocessed, but never write it to the system
+                                // clipboard.
+                                if (item.resync) {
+                                    markSeen(item.hash)
+                                    grew = true
+                                    continue
+                                }
                                 // #7: mark the hash seen ONLY after the write
                                 // actually lands. A thrown setPrimaryClip used
                                 // to mark-then-lose the item with no retry.

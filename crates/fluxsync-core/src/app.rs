@@ -528,6 +528,7 @@ impl App {
                         lamport: *lamport,
                         hash: hex32(hash),
                         favorite: false,
+                        resync: false,
                     });
                 }
             }
@@ -595,6 +596,7 @@ impl App {
                             lamport: *lamport,
                             hash: hex32(hash),
                             favorite: false,
+                            resync: *resync,
                         });
                     }
                 }
@@ -676,6 +678,18 @@ impl App {
                 for h in self.state.history.iter_mut().filter(|h| &h.hash == hash) {
                     h.favorite = *favorite;
                 }
+            }
+            Event::ClearHistory { include_favorites } => {
+                if *include_favorites {
+                    self.state.history.clear();
+                } else {
+                    self.state.history.retain(|h| h.favorite);
+                }
+                // Same invalidation signal the security wipes use: tells the
+                // vault persister to forget its cached favorites and rewrite
+                // the on-disk vault from the (now-trimmed) in-memory history,
+                // instead of risking a stale-cache favorite resurrection.
+                self.state.vault_wipe_gen += 1;
             }
             _ => {}
         }
@@ -777,6 +791,7 @@ impl App {
                 | Event::GhostTimeout
                 | Event::SetTrustedPeer { .. }
                 | Event::SetFavorite { .. }
+                | Event::ClearHistory { .. }
                 | Event::FrameReceivedClipboard { .. }
                 | Event::LocalClipboardChange { .. }
         ) && !actions.contains(&Action::EmitState)

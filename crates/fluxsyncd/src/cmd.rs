@@ -90,6 +90,14 @@ pub enum CmdOp {
         hash: String,
         favorite: bool,
     },
+    /// "Clear clipboard history": local-only, never propagated to the peer.
+    /// Favorited items survive unless `include_favorites` is set. `#[serde(default)]`
+    /// so an older client that omits the field defaults to the safer choice —
+    /// favorites kept.
+    ClearHistory {
+        #[serde(default)]
+        include_favorites: bool,
+    },
     /// Clipboard firewall (chantier A): replace the whole policy. The client
     /// sends the full `FirewallPolicy` object; the daemon swaps it in and
     /// re-emits state so every subscriber sees the new rules.
@@ -343,6 +351,38 @@ mod tests {
                 assert!(!sensitive, "omitted sensitive must default to false");
             }
             other => panic!("expected PushImage, got {other:?}"),
+        }
+    }
+
+    /// A `clear_history` request that omits `include_favorites` (an older
+    /// fluxctl/tray/mobile client, or a bare hand-typed IPC line) must still
+    /// deserialize, defaulting to keeping favorites rather than failing.
+    #[test]
+    fn clear_history_old_format_defaults_include_favorites_false() {
+        let op: CmdOp = serde_json::from_str(r#"{"op":"clear_history"}"#)
+            .expect("clear_history without include_favorites must still deserialize");
+        match op {
+            CmdOp::ClearHistory { include_favorites } => {
+                assert!(!include_favorites, "omitted field must default to false");
+            }
+            other => panic!("expected ClearHistory, got {other:?}"),
+        }
+    }
+
+    /// `clear_history` round-trips `include_favorites` both ways.
+    #[test]
+    fn clear_history_include_favorites_roundtrips() {
+        for want in [true, false] {
+            let json = serde_json::json!({
+                "op": "clear_history",
+                "include_favorites": want,
+            });
+            let op: CmdOp = serde_json::from_value(json.clone())
+                .unwrap_or_else(|e| panic!("deserialize {json}: {e}"));
+            match op {
+                CmdOp::ClearHistory { include_favorites } => assert_eq!(include_favorites, want),
+                other => panic!("expected ClearHistory, got {other:?}"),
+            }
         }
     }
 

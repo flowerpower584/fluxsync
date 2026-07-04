@@ -14,9 +14,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,6 +59,7 @@ fun HomeScreen(vm: FluxsyncViewModel) {
     // instantly even before the IPC round-trip completes.
     var pendingOn by remember { mutableStateOf<Boolean?>(null) }
     var isIPCStalled by remember { mutableStateOf(false) }
+    var showClearHistoryConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(s.active) {
         if (pendingOn != null && pendingOn == s.active) {
@@ -114,12 +117,23 @@ fun HomeScreen(vm: FluxsyncViewModel) {
             SectionLabel(
                 title = "Recent clipboard",
                 right = {
-                    Text(
-                        "${s.history.size} items",
-                        color = FsDarkSubtle,
-                        fontFamily = FsMono,
-                        fontSize = 10.sp,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "${s.history.size} items",
+                            color = FsDarkSubtle,
+                            fontFamily = FsMono,
+                            fontSize = 10.sp,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Clear",
+                            color = FsDarkSubtle,
+                            fontFamily = FsSans,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.W600,
+                            modifier = Modifier.clickable { showClearHistoryConfirm = true },
+                        )
+                    }
                 },
             )
         }
@@ -130,6 +144,38 @@ fun HomeScreen(vm: FluxsyncViewModel) {
                 RecentRow(h, onToggleFavorite = { vm.setFavorite(h.hash, !h.favorite) })
             }
         }
+    }
+
+    // "Clear clipboard history" (owner-requested, local-only — never synced
+    // to the peer). Favorites are always kept from this screen; dropping
+    // favorites too is CLI-only (`fluxctl history clear --all`).
+    if (showClearHistoryConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearHistoryConfirm = false },
+            containerColor = FsDarkSurface,
+            title = { Text("Clear clipboard history?", color = FsDarkFg) },
+            text = {
+                Text(
+                    "Removes recent clipboard items from this device only. " +
+                        "Favorites are kept. This cannot be undone.",
+                    color = FsDarkMuted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.clearHistory()
+                    showClearHistoryConfirm = false
+                }) {
+                    Text("CLEAR", color = FsCrit)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearHistoryConfirm = false }) {
+                    Text("CANCEL", color = FsDarkMuted)
+                }
+            },
+        )
     }
 }
 

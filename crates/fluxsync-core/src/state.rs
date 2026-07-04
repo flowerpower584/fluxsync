@@ -205,6 +205,14 @@ pub struct HistoryItem {
     /// and clients that don't send the field still deserialize to `false`.
     #[serde(default)]
     pub favorite: bool,
+    /// resync-1: true when this item was delivered as a catch-up response to
+    /// OUR OWN `ResyncPull` (not a live/fresh copy). Local IPC/state/vault
+    /// projection only — never part of the wire protocol. `#[serde(default)]`
+    /// so older state/vault JSON (pre-resync-marker) still deserializes to
+    /// `false`. Lets clients (e.g. Android) tell history-only catch-up items
+    /// apart from items that should be applied to the OS clipboard.
+    #[serde(default)]
+    pub resync: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

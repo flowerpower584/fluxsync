@@ -191,6 +191,14 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
     fun setFavorite(hash: String, favorite: Boolean) =
         ffi(if (favorite) "Pin item" else "Unpin item") { it.setFavorite(hash, favorite) }
 
+    /**
+     * "Clear clipboard history" (owner-requested, local-only — never synced
+     * to the peer). Favorited items are kept unless [includeFavorites] is
+     * true. Default mirrors the tray: favorites survive.
+     */
+    fun clearHistory(includeFavorites: Boolean = false) =
+        ffi("Clear history") { it.clearHistory(includeFavorites) }
+
     fun checkAccessibility() {
         val app = getApplication<Application>()
         val enabled = isAccessibilityServiceEnabled(app, FluxsyncAccessibilityService::class.java)

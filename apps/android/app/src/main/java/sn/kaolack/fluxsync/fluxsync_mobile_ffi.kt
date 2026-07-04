@@ -636,6 +636,8 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
+    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_clear_history(
+    ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_fetch_item(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_log_cursor(
@@ -706,6 +708,8 @@ external fun uniffi_fluxsync_mobile_ffi_fn_free_fluxsynchandle(`handle`: Long,un
 ): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_constructor_fluxsynchandle_start(`peerName`: RustBuffer.ByValue,`ipcPath`: RustBuffer.ByValue,`udpPort`: Short,`identity`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_clear_history(`ptr`: Long,`includeFavorites`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_fetch_item(`ptr`: Long,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_log_cursor(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -869,6 +873,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_clear_history() != 59800.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_fetch_item() != 46069.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1368,6 +1375,15 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 public interface FluxsyncHandleInterface {
     
     /**
+     * "Clear clipboard history" (owner-requested, local-only — never
+     * propagated to the peer). `include_favorites = false` keeps favorited
+     * items; `true` drops everything, favorites included. Defaults to
+     * `false` so existing Kotlin call sites keep compiling unchanged —
+     * mirrors `push_item`'s `sensitive` default.
+     */
+    fun `clearHistory`(`includeFavorites`: kotlin.Boolean = false)
+    
+    /**
      * Fetch a clipboard item's raw bytes by its hex content hash. Used by
      * the Android client to pull an inbound image's PNG on demand — the
      * state JSON only carries the hash + a label, never the bytes.
@@ -1627,6 +1643,26 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
             UniffiLib.uniffi_fluxsync_mobile_ffi_fn_clone_fluxsynchandle(handle, status)
         }
     }
+
+    
+    /**
+     * "Clear clipboard history" (owner-requested, local-only — never
+     * propagated to the peer). `include_favorites = false` keeps favorited
+     * items; `true` drops everything, favorites included. Defaults to
+     * `false` so existing Kotlin call sites keep compiling unchanged —
+     * mirrors `push_item`'s `sensitive` default.
+     */
+    @Throws(FluxException::class)override fun `clearHistory`(`includeFavorites`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_clear_history(
+        it,
+        FfiConverterBoolean.lower(`includeFavorites`),_status)
+}
+    }
+    
+    
 
     
     /**

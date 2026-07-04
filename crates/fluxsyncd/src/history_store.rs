@@ -226,6 +226,7 @@ mod tests {
                 lamport: created_ms,
                 hash: "00".repeat(32),
                 favorite,
+                resync: false,
             },
             created_ms,
         }
@@ -255,6 +256,41 @@ mod tests {
         let d = TmpDir::new();
         save(d.path(), &[3u8; 32], &[entry("x", 1000, false)], 1000, DEFAULT_TTL_SECS, DEFAULT_DISK_CAP).unwrap();
         assert!(load(d.path(), &[4u8; 32], 1000, DEFAULT_TTL_SECS).is_err());
+    }
+
+    #[test]
+    fn old_format_without_resync_field_still_loads_with_default_false() {
+        // Mirrors the on-disk shape written before the resync-1 client-side
+        // marker: `HistoryItem` JSON with no `resync` key at all. serde's
+        // `#[serde(default)]` on the new field must default it to `false`
+        // rather than fail to parse — the same backward-compat contract
+        // `favorite` already relies on.
+        let d = TmpDir::new();
+        let key = [6u8; 32];
+        let plain = serde_json::json!({
+            "version": 1,
+            "entries": [{
+                "item": {
+                    "kind": "text",
+                    "preview": "pre-resync-field entry",
+                    "time": "12:00",
+                    "source": "local",
+                    "sensitive": false,
+                    "lamport": 1,
+                    "hash": "cc".repeat(32),
+                    "favorite": false
+                },
+                "created_ms": 1000
+            }]
+        })
+        .to_string();
+        let blob = fluxsync_crypto::at_rest::seal(&key, plain.as_bytes()).unwrap();
+        std::fs::write(d.path().join("history.enc"), blob).unwrap();
+
+        let got = load(d.path(), &key, 1000, DEFAULT_TTL_SECS).unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(!got[0].item.resync, "old entry missing `resync` must default to false");
+        assert_eq!(got[0].item.preview, "pre-resync-field entry");
     }
 
     #[test]

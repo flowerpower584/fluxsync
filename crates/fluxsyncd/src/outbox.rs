@@ -157,6 +157,15 @@ impl Outbox {
         now.saturating_duration_since(entry.created) > max_age
     }
 
+    /// Purge every hash in `hashes` from the outbox. Used by "clear
+    /// clipboard history" so a cleared item cannot silently come back into
+    /// history via a later resync/pull — a missing hash is a no-op.
+    pub fn remove_many(&mut self, hashes: &[[u8; 32]]) {
+        for hash in hashes {
+            self.remove(*hash);
+        }
+    }
+
     /// Remove `hash` (if present), keeping `order` and `total_bytes` in sync.
     fn remove(&mut self, hash: [u8; 32]) {
         if let Some(old) = self.entries.remove(&hash) {
@@ -294,6 +303,21 @@ mod tests {
         let got = ob.get(hash(1)).expect("refreshed entry must exist");
         assert_eq!(got.seq, 99);
         assert_eq!(got.payload.len(), 5);
+    }
+
+    #[test]
+    fn remove_many_purges_given_hashes_and_leaves_the_rest() {
+        let mut ob = Outbox::new();
+        ob.insert(hash(1), entry(1, 1, Instant::now()));
+        ob.insert(hash(2), entry(1, 2, Instant::now()));
+        ob.insert(hash(3), entry(1, 3, Instant::now()));
+
+        ob.remove_many(&[hash(1), hash(3), hash(99)]); // hash(99) absent: no-op
+
+        assert!(ob.get(hash(1)).is_none());
+        assert!(ob.get(hash(3)).is_none());
+        assert!(ob.get(hash(2)).is_some());
+        assert_eq!(ob.len(), 1);
     }
 
     #[test]

@@ -134,6 +134,7 @@ fn fav_history(hash: &str) -> Vec<HistoryItem> {
         lamport: 1,
         hash: hash.into(),
         favorite: true,
+        resync: false,
     }]
 }
 

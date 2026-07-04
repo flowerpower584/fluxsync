@@ -156,6 +156,7 @@ data class DaemonState(
                     sensitive = o.optBoolean("sensitive", false),
                     lamport = o.optLong("lamport", 0L),
                     favorite = o.optBoolean("favorite", false),
+                    resync = o.optBoolean("resync", false),
                 )
             }
             return out
@@ -265,6 +266,11 @@ data class HistoryItem(
     val sensitive: Boolean,
     val lamport: Long,
     val favorite: Boolean = false,
+    // resync-1 client-side marker: true when this item is a pull-resync
+    // catch-up delivery, not a live/fresh copy — history/display only, must
+    // not be applied to the system clipboard. Defaults to false so parsing
+    // tolerates an older daemon that omits the field entirely.
+    val resync: Boolean = false,
 )
 
 /**
