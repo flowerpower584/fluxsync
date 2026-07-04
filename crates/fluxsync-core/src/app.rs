@@ -604,6 +604,20 @@ impl App {
             Event::PeerLost => {
                 self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
+                // Session died mid-SAS-verification (e.g. the peer's reaper
+                // revoked us because its human never confirmed): reset the
+                // in-flight phases so the UI can say "did not confirm in
+                // time" now, not after GhostTimeout. "peer_rejected" is
+                // deliberately kept — a reject also tears the session down
+                // and the follow-up PeerLost must not clobber the verdict
+                // the UI needs to display. "confirmed" survives too: a
+                // completed verification is not undone by a link drop.
+                if matches!(
+                    self.state.sas_phase.as_str(),
+                    "showing" | "peer_confirmed" | "local_confirmed"
+                ) {
+                    self.state.sas_phase = "idle".to_string();
+                }
             }
             Event::PrimaryFailover {
                 peer_id,
@@ -638,6 +652,7 @@ impl App {
                 self.state.history.clear();
                 self.drop_pending();
                 self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
+                self.state.sas_phase = "idle".to_string();
             }
             Event::GhostTimeout
                 if !matches!(self.phase, Phase::Linked | Phase::Paused | Phase::Halted) =>
@@ -651,6 +666,7 @@ impl App {
                 self.state.history.clear();
                 self.drop_pending();
                 self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
+                self.state.sas_phase = "idle".to_string();
             }
             Event::ManualUnpair => {
                 self.state.on = false;
@@ -670,6 +686,36 @@ impl App {
                 // it), but parked Ask items are dropped: the peer they targeted
                 // is gone, so they would otherwise leak forever.
                 self.drop_pending();
+                self.state.sas_phase = "idle".to_string();
+            }
+            Event::SasPairingStarted => {
+                self.state.sas_phase = "showing".to_string();
+            }
+            Event::SasLocalConfirmed => {
+                self.state.sas_phase = if matches!(
+                    self.state.sas_phase.as_str(),
+                    "peer_confirmed" | "confirmed"
+                ) {
+                    "confirmed".to_string()
+                } else {
+                    "local_confirmed".to_string()
+                };
+            }
+            Event::SasPeerConfirmed => {
+                self.state.sas_phase = if matches!(
+                    self.state.sas_phase.as_str(),
+                    "local_confirmed" | "confirmed"
+                ) {
+                    "confirmed".to_string()
+                } else {
+                    "peer_confirmed".to_string()
+                };
+            }
+            Event::SasPeerRejected => {
+                self.state.sas_phase = "peer_rejected".to_string();
+            }
+            Event::SasReset => {
+                self.state.sas_phase = "idle".to_string();
             }
             Event::SetTrustedPeer { name } => {
                 self.state.trusted_peer_name = Some(name.clone());
@@ -794,6 +840,11 @@ impl App {
                 | Event::ClearHistory { .. }
                 | Event::FrameReceivedClipboard { .. }
                 | Event::LocalClipboardChange { .. }
+                | Event::SasPairingStarted
+                | Event::SasLocalConfirmed
+                | Event::SasPeerConfirmed
+                | Event::SasPeerRejected
+                | Event::SasReset
         ) && !actions.contains(&Action::EmitState)
         {
             actions.push(Action::EmitState);
@@ -1950,5 +2001,154 @@ mod tests {
         // A rejected rename must not clobber the last-accepted name.
         assert_eq!(app.config().peer_name_self, "Good Name");
         assert_eq!(app.snapshot().device_name, "Good Name");
+    }
+
+    // ── Wire-level mutual SAS confirmation (sas_phase) ──────────────────
+
+    #[test]
+    fn fresh_app_sas_phase_is_idle() {
+        let app = boot();
+        assert_eq!(app.snapshot().sas_phase, "idle");
+    }
+
+    #[test]
+    fn sas_pairing_started_sets_showing() {
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        assert_eq!(app.snapshot().sas_phase, "showing");
+    }
+
+    #[test]
+    fn sas_local_confirm_first_moves_to_local_confirmed() {
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasLocalConfirmed, &wall());
+        assert_eq!(app.snapshot().sas_phase, "local_confirmed");
+    }
+
+    #[test]
+    fn sas_peer_confirm_first_moves_to_peer_confirmed() {
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPeerConfirmed, &wall());
+        assert_eq!(app.snapshot().sas_phase, "peer_confirmed");
+    }
+
+    #[test]
+    fn sas_local_confirm_after_peer_confirmed_moves_to_confirmed() {
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPeerConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed, &wall());
+        assert_eq!(app.snapshot().sas_phase, "confirmed");
+    }
+
+    #[test]
+    fn sas_peer_confirm_after_local_confirmed_moves_to_confirmed() {
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasPeerConfirmed, &wall());
+        assert_eq!(app.snapshot().sas_phase, "confirmed");
+    }
+
+    #[test]
+    fn sas_confirmed_stays_confirmed_on_either_side_re_confirming() {
+        // Idempotent: a duplicate confirm from either side must not regress
+        // "confirmed" back to a single-sided state.
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasPeerConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed, &wall());
+        assert_eq!(app.snapshot().sas_phase, "confirmed");
+        app.handle(Event::SasPeerConfirmed, &wall());
+        assert_eq!(app.snapshot().sas_phase, "confirmed");
+    }
+
+    #[test]
+    fn sas_peer_rejected_sets_peer_rejected() {
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasPeerRejected, &wall());
+        assert_eq!(app.snapshot().sas_phase, "peer_rejected");
+    }
+
+    #[test]
+    fn sas_reset_sets_idle() {
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasReset, &wall());
+        assert_eq!(app.snapshot().sas_phase, "idle");
+    }
+
+    #[test]
+    fn sas_pairing_started_overwrites_leftover_peer_rejected() {
+        // A fresh pairing must always overwrite any stale phase from a
+        // previous, doomed attempt.
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPeerRejected, &wall());
+        assert_eq!(app.snapshot().sas_phase, "peer_rejected");
+        app.handle(Event::SasPairingStarted, &wall());
+        assert_eq!(app.snapshot().sas_phase, "showing");
+    }
+
+    #[test]
+    fn manual_unpair_resets_sas_phase_to_idle() {
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasPeerConfirmed, &wall());
+        assert_eq!(app.snapshot().sas_phase, "confirmed");
+        app.handle(Event::ManualUnpair, &wall());
+        assert_eq!(app.snapshot().sas_phase, "idle");
+    }
+
+    #[test]
+    fn untrusted_peer_seen_resets_sas_phase_to_idle() {
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(
+            Event::UntrustedPeerSeen {
+                name: "mitm".to_string(),
+            },
+            &wall(),
+        );
+        assert_eq!(app.snapshot().sas_phase, "idle");
+    }
+
+    #[test]
+    fn ghost_timeout_resets_sas_phase_to_idle_when_not_linked() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall()); // → Discovering
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::GhostTimeout, &wall());
+        assert_eq!(app.snapshot().sas_phase, "idle");
+    }
+
+    #[test]
+    fn peer_lost_resets_in_flight_sas_phase_to_idle() {
+        // Peer's reaper revoked us mid-verification (its human never
+        // confirmed) → our session dies → PeerLost must clear the stale
+        // "local_confirmed" now, not wait for GhostTimeout.
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasLocalConfirmed, &wall());
+        assert_eq!(app.snapshot().sas_phase, "local_confirmed");
+        app.handle(Event::PeerLost, &wall());
+        assert_eq!(app.snapshot().sas_phase, "idle");
+    }
+
+    #[test]
+    fn peer_lost_keeps_peer_rejected_sas_phase() {
+        // A peer reject tears the session down too; the follow-up PeerLost
+        // must not clobber the "peer_rejected" verdict the UI displays.
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPeerRejected, &wall());
+        app.handle(Event::PeerLost, &wall());
+        assert_eq!(app.snapshot().sas_phase, "peer_rejected");
     }
 }

@@ -119,6 +119,31 @@ pub enum Event {
         hash: String,
         allow: bool,
     },
+    /// Wire-level mutual SAS confirmation (`sas-confirm` capability): a
+    /// fresh TOFU pairing just inserted a `PendingPair` (handshake
+    /// completed, nobody has confirmed the 6 SAS words yet). Sets
+    /// `State.sas_phase` to `"showing"` unconditionally — a new pairing
+    /// always overwrites any leftover phase from a previous attempt.
+    SasPairingStarted,
+    /// The local user confirmed the SAS words (`fluxctl pair confirm
+    /// --accept`). Moves `sas_phase` to `"confirmed"` if the peer already
+    /// confirmed (or is a legacy build treated as auto-confirmed), else to
+    /// `"local_confirmed"`.
+    SasLocalConfirmed,
+    /// The peer confirmed the SAS words — either via an inbound
+    /// `Msg::PairConfirm { accept: true }`, or because its `Hello` did not
+    /// advertise the `sas-confirm` capability (legacy build, auto-treated
+    /// as confirmed so a new build never waits forever on an old one).
+    /// Moves `sas_phase` to `"confirmed"` if the local side already
+    /// confirmed, else to `"peer_confirmed"`.
+    SasPeerConfirmed,
+    /// The peer explicitly rejected the pairing (inbound
+    /// `Msg::PairConfirm { accept: false }`). Sets `sas_phase` to
+    /// `"peer_rejected"` unconditionally.
+    SasPeerRejected,
+    /// The pending reaper revoked an unconfirmed pair after the 90s
+    /// pairing window expired. Resets `sas_phase` to `"idle"`.
+    SasReset,
 }
 
 /// Side-effect commands the daemon must execute. The FSM never performs

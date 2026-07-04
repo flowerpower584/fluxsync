@@ -115,6 +115,14 @@ pub type DiscoveryCache = Arc<Mutex<HashMap<[u8; 32], ResolvedPeer>>>;
 /// purged (unpair / revoke / vault wipe) — same trust-removal paths.
 pub type BackoffMap = Arc<Mutex<HashMap<[u8; 32], PeerBackoff>>>;
 
+/// FS-052 wire mutual confirm (`sas-confirm` capability): peer-ids the
+/// local user already accepted (`CmdOp::PairConfirm { accept: true }`)
+/// before that peer's `Hello` — and therefore its negotiated caps — had
+/// arrived. The `Msg::Hello` handler in `dispatch_inbound_frame` flushes
+/// (and removes) the deferred `Msg::PairConfirm { accept: true }` send the
+/// moment it learns the peer actually supports the capability.
+pub type DeferredSasConfirm = Arc<Mutex<HashSet<[u8; 32]>>>;
+
 /// PR2: cache TTL. mdns-sd re-resolves periodically so an honest peer
 /// is refreshed well before this; the TTL only fires for peers that
 /// physically left the LAN.
@@ -309,6 +317,11 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // from the Noise handshake hash so `fluxctl pair pending` /
     // `fluxctl pair confirm` can surface and resolve them.
     let pending_pairs: PendingSet = Arc::new(Mutex::new(HashMap::new()));
+
+    // FS-052 wire mutual confirm: peer-ids whose local `--accept` send is
+    // deferred until their `Hello` (and therefore negotiated caps) arrives.
+    // See `DeferredSasConfirm`.
+    let deferred_sas_confirm: DeferredSasConfirm = Arc::new(Mutex::new(HashSet::new()));
 
     // PR2: PIN-method pairing state. `pin_advert` holds the current
     // PIN + expiry; `disc_cache` lets `PairFromPin` resolve an
@@ -552,6 +565,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let outbox_for_recv = outbox.clone();
         let pending_pulls_for_recv = pending_pulls.clone();
         let state_rx_for_recv = state_watch_tx.subscribe();
+        let deferred_sas_confirm_for_recv = deferred_sas_confirm.clone();
         tasks.spawn(async move {
             transport_recv_loop(
                 transport,
@@ -573,6 +587,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 outbox_for_recv,
                 pending_pulls_for_recv,
                 state_rx_for_recv,
+                deferred_sas_confirm_for_recv,
             )
             .await
         });
@@ -588,8 +603,9 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let transport_r = transport.clone();
         let kd = keystore_dir.clone();
         let s = shutdown.clone();
+        let event_tx_r = event_tx.clone();
         tasks.spawn(async move {
-            handshake::run_pending_reaper(pending, trusted_r, transport_r, kd, s).await;
+            handshake::run_pending_reaper(pending, trusted_r, transport_r, kd, s, event_tx_r).await;
             Ok(())
         });
     }
@@ -900,6 +916,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &shutdown,
                             &outbox,
                             &mut seq_store,
+                            &deferred_sas_confirm,
                         ).await;
                     }
                 }
@@ -1407,6 +1424,7 @@ async fn handle_driver_cmd(
     shutdown: &CancellationToken,
     outbox: &SharedOutbox,
     seq_store: &mut Option<SeqStore>,
+    deferred_sas_confirm: &DeferredSasConfirm,
 ) {
     let DriverCmd::Run { op, reply, req_id } = cmd else {
         return;
@@ -2052,7 +2070,92 @@ async fn handle_driver_cmd(
             if removed_pending.is_none() {
                 return reply_err(reply, req_id, "no pending pair with that peer_id");
             }
-            if !accept {
+            if accept {
+                // FS-052 wire mutual confirm: tell the peer our human said
+                // yes — but only if we know it understands `Msg::PairConfirm`.
+                // Caps unknown (Hello not arrived yet) → defer the send to
+                // the `Msg::Hello` handler; known-legacy → nothing to send,
+                // and the peer counts as confirmed (the Hello handler
+                // already fired `SasPeerConfirmed` when its caps arrived).
+                let (hello_seen, supports_sas) = {
+                    let meta = peer_meta.lock().await;
+                    meta.get(&arr).map_or((false, false), |m| {
+                        (m.hello_seen, m.caps.iter().any(|c| c == "sas-confirm"))
+                    })
+                };
+                if hello_seen {
+                    if supports_sas {
+                        let frame = Frame {
+                            version: PROTOCOL_VERSION,
+                            msg: Msg::PairConfirm(fluxsync_proto::PairConfirm { accept: true }),
+                        };
+                        if let Ok(bytes) = fluxsync_proto::encode(&frame) {
+                            if let Err(e) = transport.send_encrypted_to(arr, &bytes).await {
+                                tracing::warn!(
+                                    peer = ?&arr[..6],
+                                    error = %e,
+                                    "sas-confirm: PairConfirm(accept) send failed"
+                                );
+                            }
+                        }
+                    } else {
+                        // Legacy peer: defensively count it as confirmed in
+                        // case its Hello landed before the pending insert and
+                        // the Hello handler's legacy path never fired.
+                        let actions = app.handle(Event::SasPeerConfirmed, &**wall);
+                        dispatch(
+                            actions,
+                            app,
+                            transport,
+                            trusted,
+                            keystore_dir,
+                            state_watch_tx,
+                            logs_bcast_tx,
+                            log_tail,
+                            last_written_hashes,
+                            metrics,
+                            inflight,
+                            peer_meta,
+                            outbox,
+                            seq_store,
+                        )
+                        .await;
+                    }
+                } else {
+                    deferred_sas_confirm.lock().await.insert(arr);
+                }
+                let actions = app.handle(Event::SasLocalConfirmed, &**wall);
+                dispatch(
+                    actions,
+                    app,
+                    transport,
+                    trusted,
+                    keystore_dir,
+                    state_watch_tx,
+                    logs_bcast_tx,
+                    log_tail,
+                    last_written_hashes,
+                    metrics,
+                    inflight,
+                    peer_meta,
+                    outbox,
+                    seq_store,
+                )
+                .await;
+            } else {
+                // FS-052 wire mutual confirm: best-effort tell the peer our
+                // human said NO while the session is still alive — the
+                // ManualUnpair teardown below sends Bye and drops it. A
+                // legacy peer fails to decode the unknown variant and just
+                // logs a warn; the Revoke/Bye that follow still clean it up.
+                deferred_sas_confirm.lock().await.remove(&arr);
+                let frame = Frame {
+                    version: PROTOCOL_VERSION,
+                    msg: Msg::PairConfirm(fluxsync_proto::PairConfirm { accept: false }),
+                };
+                if let Ok(bytes) = fluxsync_proto::encode(&frame) {
+                    let _ = transport.send_encrypted_to(arr, &bytes).await;
+                }
                 let removed_trusted = trusted.lock().await.remove(&arr);
                 // DIR-P2-04a: same rationale as `CmdOp::Revoke` — per the
                 // comment above, this rejection IS a revoke, so purge the
@@ -2627,6 +2730,7 @@ async fn transport_recv_loop(
     outbox: SharedOutbox,
     pending_pulls: PendingPulls,
     state_rx: watch::Receiver<State>,
+    deferred_sas_confirm: DeferredSasConfirm,
 ) -> Result<()> {
     let mut buf = vec![0u8; 65535];
     let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
@@ -2903,7 +3007,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &backoff, &peer_meta, keystore_dir.as_ref(), &outbox, &pending_pulls, &state_rx).await,
+                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &backoff, &peer_meta, keystore_dir.as_ref(), &outbox, &pending_pulls, &state_rx, &deferred_sas_confirm).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -4224,15 +4328,18 @@ async fn dispatch_inbound_frame(
     outbox: &SharedOutbox,
     pending_pulls: &PendingPulls,
     state_rx: &watch::Receiver<State>,
+    deferred_sas_confirm: &DeferredSasConfirm,
 ) {
     // FS-052 strict gate (VULN-002 fix): if the active session's peer
     // landed via TOFU and has not been verbally confirmed yet, drop all
     // data-bearing frames (`ClipboardItem`, `Chunk`) until the user runs
     // `fluxctl pair confirm --accept`. Hello / Heartbeat / Ack / Nak /
     // Bye keep flowing so the link stays diagnosable and the FSM still
-    // reacts to peer disconnects. Matches the design intent stated in
-    // `docs/THREAT-MODEL.md` §3 row B-S: *"a hard gate that blocks
-    // Msg::Item processing until the user runs --accept"*.
+    // reacts to peer disconnects — and `PairConfirm` MUST flow too, since
+    // its whole purpose is to resolve exactly this pending window. Matches
+    // the design intent stated in `docs/THREAT-MODEL.md` §3 row B-S: *"a
+    // hard gate that blocks Msg::Item processing until the user runs
+    // --accept"*.
     let blocks_until_confirmed = matches!(frame.msg, Msg::ClipboardItem(_) | Msg::Chunk(_));
     if blocks_until_confirmed && pending_pairs.lock().await.contains_key(&peer_id) {
         tracing::warn!(
@@ -4542,7 +4649,14 @@ async fn dispatch_inbound_frame(
                 }
                 tracing::info!(peer = ?&peer_id[..6], "Revoke: peer unpaired us; trust entry removed");
             }
-            pending_pairs.lock().await.remove(&peer_id);
+            // FS-052 wire mutual confirm: a Revoke mid-pairing removes the
+            // pending entry here, so the reaper would never fire the
+            // `SasReset` for it — reset the phase now instead of leaving a
+            // stale "showing"/"local_confirmed" in State.
+            if pending_pairs.lock().await.remove(&peer_id).is_some() {
+                let _ = event_tx.try_send(Event::SasReset);
+            }
+            deferred_sas_confirm.lock().await.remove(&peer_id);
             transport.drop_session_for(peer_id).await;
             // FluxMesh Phase 3: drop it from the mesh `peers` list too.
             if peer_meta.lock().await.remove(&peer_id).is_some() {
@@ -4590,8 +4704,64 @@ async fn dispatch_inbound_frame(
                     e.caps.clone_from(&caps);
                     changed = true;
                 }
+                // FS-052 wire mutual confirm: from here on, `caps` is real
+                // negotiated data, not "Hello not seen yet".
+                e.hello_seen = true;
                 if changed {
                     let _ = event_tx.try_send(Event::MeshPeersChanged);
+                }
+            }
+            // FS-052 wire mutual confirm: now that the peer's caps are known,
+            // resolve the two Hello-dependent cases for a fresh-pair peer
+            // (identified by a live `PendingPair` entry or a deferred local
+            // accept — an already-confirmed reconnect has neither, so it
+            // never enters the SAS states here).
+            {
+                let peer_supports_sas = caps.iter().any(|c| c == "sas-confirm");
+                let has_pending = pending_pairs.lock().await.contains_key(&peer_id);
+                let had_deferred = deferred_sas_confirm.lock().await.remove(&peer_id);
+                // A deferred accept is only flushable while no NEW pending
+                // pair exists for this peer: a live pending entry means a
+                // fresh pairing (with fresh SAS words) superseded the earlier
+                // confirm, so replaying it would confirm words the local
+                // human never compared.
+                let flush_deferred = had_deferred && !has_pending;
+                let is_fresh_pair = had_deferred || has_pending;
+                if is_fresh_pair {
+                    if peer_supports_sas {
+                        // The local user accepted before this Hello arrived —
+                        // flush the deferred Msg::PairConfirm{accept:true} now.
+                        if flush_deferred {
+                            let frame = Frame {
+                                version: PROTOCOL_VERSION,
+                                msg: Msg::PairConfirm(fluxsync_proto::PairConfirm {
+                                    accept: true,
+                                }),
+                            };
+                            if let Ok(bytes) = fluxsync_proto::encode(&frame) {
+                                if let Err(e) =
+                                    transport.send_encrypted_to(peer_id, &bytes).await
+                                {
+                                    tracing::warn!(
+                                        peer = ?&peer_id[..6],
+                                        error = %e,
+                                        "sas-confirm: deferred PairConfirm send failed"
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Legacy peer (no `sas-confirm` cap): treat it as
+                        // having confirmed, so this build never waits forever
+                        // on an old one. The app moves sas_phase to
+                        // "confirmed" if the local user already confirmed,
+                        // "peer_confirmed" otherwise.
+                        tracing::info!(
+                            peer = ?&peer_id[..6],
+                            "sas-confirm: peer is a legacy build — treating as confirmed"
+                        );
+                        let _ = event_tx.try_send(Event::SasPeerConfirmed);
+                    }
                 }
             }
             // resync-1: offer our outbox to this peer once negotiated. Hello
@@ -4743,6 +4913,84 @@ async fn dispatch_inbound_frame(
                 );
             }
         }
+        Msg::PairConfirm(pc) => {
+            // FS-052 wire mutual confirm (`sas-confirm` capability). The
+            // frame arrived over the established Noise session, so the
+            // sender is authenticated — it can only resolve its OWN pairing.
+            if pc.accept {
+                // Peer's human confirmed the 6 SAS words. If our own pending
+                // entry still exists, give the local human one natural
+                // refresh of the 90s window — the peer side is engaged, so
+                // the local user deserves the full window to compare words
+                // instead of whatever remained of the original one.
+                let had_pending = {
+                    let mut g = pending_pairs.lock().await;
+                    if let Some(p) = g.get_mut(&peer_id) {
+                        p.expires_at = Instant::now() + handshake::PAIRING_WINDOW;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                // Only move sas_phase while a SAS flow is actually live —
+                // our own pending entry, or the local user already confirmed
+                // (pending removed, phase advanced). An accept landing on an
+                // idle reconnect (e.g. a peer flushing a deferred confirm
+                // from a long-finished pairing) must NOT drag an
+                // already-trusted link back into the SAS states.
+                let in_sas_flow = matches!(
+                    state_rx.borrow().sas_phase.as_str(),
+                    "showing" | "local_confirmed" | "peer_confirmed" | "confirmed"
+                );
+                if had_pending || in_sas_flow {
+                    tracing::info!(
+                        peer = ?&peer_id[..6],
+                        "sas-confirm: peer confirmed the pairing"
+                    );
+                    let _ = event_tx.try_send(Event::SasPeerConfirmed);
+                } else {
+                    tracing::debug!(
+                        peer = ?&peer_id[..6],
+                        "sas-confirm: ignoring PairConfirm(accept) outside a SAS flow"
+                    );
+                }
+            } else {
+                // Peer's human explicitly rejected — same effect as a local
+                // reject: purge pending + trust (+ discovery/backoff/deferred
+                // residue), persist, and tear the session down.
+                tracing::warn!(
+                    peer = ?&peer_id[..6],
+                    "sas-confirm: peer REJECTED the pairing; revoking trust"
+                );
+                pending_pairs.lock().await.remove(&peer_id);
+                deferred_sas_confirm.lock().await.remove(&peer_id);
+                let removed = trusted.lock().await.remove(&peer_id);
+                disc_cache.lock().await.remove(&peer_id);
+                backoff.lock().await.remove(&peer_id);
+                if removed.is_some() {
+                    if let Some(dir) = keystore_dir {
+                        if let Err(e) = save_peers_with_retry(dir, trusted, transport).await {
+                            tracing::error!(
+                                "sas-confirm: failed to persist peer removal after reject: {e}"
+                            );
+                        }
+                    }
+                }
+                transport.drop_session_for(peer_id).await;
+                if peer_meta.lock().await.remove(&peer_id).is_some() {
+                    let _ = event_tx.try_send(Event::MeshPeersChanged);
+                }
+                // Surface "peer_rejected" BEFORE the PeerLost teardown so a
+                // state subscriber never sees a disconnect with a stale
+                // "showing"/"local_confirmed" phase in between.
+                let _ = event_tx.try_send(Event::SasPeerRejected);
+                if transport.cached_peer_id().await == Some(peer_id)
+                    && !try_primary_failover(transport, event_tx, peer_meta).await
+                {
+                    let _ = event_tx.try_send(Event::PeerLost);
+                }
+            }
+        }
     }
 }
 
@@ -4844,6 +5092,12 @@ struct PeerMeta {
     caps: Vec<String>,
     battery: u8,
     charging: bool,
+    /// FS-052 wire mutual confirm: true once this peer's `Msg::Hello` has
+    /// been processed at least once, so `caps` (possibly empty) is known
+    /// to be real negotiated data rather than "not seen yet". Lets
+    /// `CmdOp::PairConfirm` tell "peer caps unknown, defer the wire send"
+    /// apart from "peer caps known and empty/legacy".
+    hello_seen: bool,
 }
 
 impl PeerMeta {
@@ -4857,6 +5111,7 @@ impl PeerMeta {
             caps: Vec::new(),
             battery: 255,
             charging: false,
+            hello_seen: false,
         }
     }
 }
@@ -5982,6 +6237,7 @@ mod tests {
             &outbox,
             &Arc::new(Mutex::new(HashMap::new())),
             &state_rx,
+            &Arc::new(Mutex::new(std::collections::HashSet::new())),
         )
         .await;
 
@@ -6074,6 +6330,7 @@ mod tests {
             &outbox,
             &Arc::new(Mutex::new(HashMap::new())),
             &state_rx,
+            &Arc::new(Mutex::new(std::collections::HashSet::new())),
         )
         .await;
 
@@ -6092,6 +6349,193 @@ mod tests {
         assert!(
             matches!(event_rx.try_recv(), Ok(Event::PeerLost)),
             "Msg::Revoke must emit Event::PeerLost"
+        );
+    }
+
+    // ── sas-confirm (FS-052 wire mutual confirm) ─────────────────
+
+    fn test_pending_pair(expires_at: std::time::Instant) -> crate::handshake::PendingPair {
+        crate::handshake::PendingPair {
+            static_pub: [0x42u8; 32],
+            name: "pending-peer".into(),
+            sas_words: std::array::from_fn(|i| format!("word{i}")),
+            from: "127.0.0.1:1".parse().unwrap(),
+            expires_at,
+        }
+    }
+
+    /// Inbound `Msg::PairConfirm { accept: true }` while our own pending
+    /// entry still exists must refresh its 90s window (the peer's human is
+    /// engaged) and emit `Event::SasPeerConfirmed`. Trust is untouched.
+    #[tokio::test]
+    async fn inbound_pair_confirm_accept_refreshes_pending_and_emits_peer_confirmed() {
+        use super::{dispatch_inbound_frame, Event, Reassembly};
+        use crate::handshake::tofu_trusted_peer;
+        use crate::metrics::MetricsTracker;
+        use crate::transport::Transport;
+        use fluxsync_proto::{Frame, Msg, PairConfirm, PROTOCOL_VERSION};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind loopback transport");
+        let transport = Arc::new(transport);
+        let peer_id = [8u8; 32];
+        transport.set_cached_peer_id(peer_id).await;
+
+        let (event_tx, mut event_rx) = mpsc::channel(1024);
+        let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let trusted: crate::handshake::TrustedSet = Arc::new(Mutex::new(HashMap::new()));
+        trusted
+            .lock()
+            .await
+            .insert(peer_id, tofu_trusted_peer(peer_id));
+        let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
+        // Nearly-expired entry: the refresh must push it back out to ~90s.
+        let soon = Instant::now() + Duration::from_secs(5);
+        pending_pairs
+            .lock()
+            .await
+            .insert(peer_id, test_pending_pair(soon));
+        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
+            &fluxsync_core::Config::default(),
+        ));
+
+        dispatch_inbound_frame(
+            Frame {
+                version: PROTOCOL_VERSION,
+                msg: Msg::PairConfirm(PairConfirm { accept: true }),
+            },
+            peer_id,
+            &Arc::new(Mutex::new(super::SeenSet::default())),
+            &event_tx,
+            &transport,
+            &reassembly,
+            &Arc::new(Mutex::new(MetricsTracker::new())),
+            &Arc::new(Mutex::new(HashMap::new())),
+            &pending_pairs,
+            &trusted,
+            &Arc::new(Mutex::new(HashMap::new())),
+            &Arc::new(Mutex::new(HashMap::new())),
+            &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            None,
+            &Arc::new(Mutex::new(super::Outbox::new())),
+            &Arc::new(Mutex::new(HashMap::new())),
+            &state_rx,
+            &Arc::new(Mutex::new(std::collections::HashSet::new())),
+        )
+        .await;
+
+        let refreshed = pending_pairs
+            .lock()
+            .await
+            .get(&peer_id)
+            .expect("pending entry must survive an accept")
+            .expires_at;
+        assert!(
+            refreshed > Instant::now() + Duration::from_secs(80),
+            "accept must refresh the pending window to ~90s"
+        );
+        assert!(
+            trusted.lock().await.contains_key(&peer_id),
+            "accept must not touch the trust store"
+        );
+        assert!(
+            matches!(event_rx.try_recv(), Ok(Event::SasPeerConfirmed)),
+            "accept must emit Event::SasPeerConfirmed"
+        );
+    }
+
+    /// Inbound `Msg::PairConfirm { accept: false }` is a wire-level reject:
+    /// same effect as a local reject — pending + trust purged, session
+    /// dropped — plus `Event::SasPeerRejected` so the UI can say why.
+    #[tokio::test]
+    async fn inbound_pair_confirm_reject_revokes_trust_and_emits_peer_rejected() {
+        use super::{dispatch_inbound_frame, Event, Reassembly};
+        use crate::handshake::tofu_trusted_peer;
+        use crate::metrics::MetricsTracker;
+        use crate::transport::Transport;
+        use fluxsync_proto::{Frame, Msg, PairConfirm, PROTOCOL_VERSION};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind loopback transport");
+        let transport = Arc::new(transport);
+        let peer_id = [9u8; 32];
+        transport.set_cached_peer_id(peer_id).await;
+
+        let (event_tx, mut event_rx) = mpsc::channel(1024);
+        let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let trusted: crate::handshake::TrustedSet = Arc::new(Mutex::new(HashMap::new()));
+        trusted
+            .lock()
+            .await
+            .insert(peer_id, tofu_trusted_peer(peer_id));
+        let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
+        pending_pairs
+            .lock()
+            .await
+            .insert(peer_id, test_pending_pair(Instant::now() + Duration::from_secs(60)));
+        let deferred: super::DeferredSasConfirm =
+            Arc::new(Mutex::new(std::collections::HashSet::new()));
+        deferred.lock().await.insert(peer_id);
+        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
+            &fluxsync_core::Config::default(),
+        ));
+
+        dispatch_inbound_frame(
+            Frame {
+                version: PROTOCOL_VERSION,
+                msg: Msg::PairConfirm(PairConfirm { accept: false }),
+            },
+            peer_id,
+            &Arc::new(Mutex::new(super::SeenSet::default())),
+            &event_tx,
+            &transport,
+            &reassembly,
+            &Arc::new(Mutex::new(MetricsTracker::new())),
+            &Arc::new(Mutex::new(HashMap::new())),
+            &pending_pairs,
+            &trusted,
+            &Arc::new(Mutex::new(HashMap::new())),
+            &Arc::new(Mutex::new(HashMap::new())),
+            &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            None,
+            &Arc::new(Mutex::new(super::Outbox::new())),
+            &Arc::new(Mutex::new(HashMap::new())),
+            &state_rx,
+            &deferred,
+        )
+        .await;
+
+        assert!(
+            !pending_pairs.lock().await.contains_key(&peer_id),
+            "reject must remove the pending entry"
+        );
+        assert!(
+            !trusted.lock().await.contains_key(&peer_id),
+            "reject must revoke the sender from the trust store"
+        );
+        assert!(
+            !deferred.lock().await.contains(&peer_id),
+            "reject must clear any deferred local accept"
+        );
+        assert!(
+            matches!(event_rx.try_recv(), Ok(Event::SasPeerRejected)),
+            "reject must emit Event::SasPeerRejected first"
+        );
+        assert!(
+            matches!(event_rx.try_recv(), Ok(Event::PeerLost)),
+            "reject must emit Event::PeerLost after the teardown"
         );
     }
 
@@ -6369,6 +6813,7 @@ mod tests {
             &outbox,
             &pending_pulls,
             &state_rx,
+            &Arc::new(Mutex::new(std::collections::HashSet::new())),
         )
         .await;
 

@@ -6,9 +6,9 @@
 
 use fluxsync_proto::{
     decode, encode, Ack, BatteryStatus, Chunk, ClipboardItem, Frame, HandshakeInit, HandshakeResp,
-    Heartbeat, Hello, Kind, Msg, Nak, ResyncOffer, ResyncPull, MAX_CAP_LEN, MAX_HELLO_CAPS,
-    MAX_HELLO_NAME, MAX_HELLO_PLATFORM, MAX_NAK_MISSING, MAX_RESYNC_HASHES, PROTOCOL_VERSION,
-    RESYNC_HASH_LEN,
+    Heartbeat, Hello, Kind, Msg, Nak, PairConfirm, ResyncOffer, ResyncPull, MAX_CAP_LEN,
+    MAX_HELLO_CAPS, MAX_HELLO_NAME, MAX_HELLO_PLATFORM, MAX_NAK_MISSING, MAX_RESYNC_HASHES,
+    PROTOCOL_VERSION, RESYNC_HASH_LEN,
 };
 use proptest::prelude::*;
 
@@ -192,6 +192,7 @@ fn arb_msg() -> impl Strategy<Value = Msg> {
         arb_hello().prop_map(Msg::Hello),
         arb_resync_hashes().prop_map(|hashes| Msg::ResyncOffer(ResyncOffer { hashes })),
         arb_resync_hashes().prop_map(|hashes| Msg::ResyncPull(ResyncPull { hashes })),
+        any::<bool>().prop_map(|accept| Msg::PairConfirm(PairConfirm { accept })),
     ]
 }
 

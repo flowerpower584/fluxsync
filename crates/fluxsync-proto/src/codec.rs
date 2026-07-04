@@ -580,6 +580,20 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_pair_confirm_accept() {
+        let f = frame(Msg::PairConfirm(crate::PairConfirm { accept: true }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
+    fn round_trip_pair_confirm_reject() {
+        let f = frame(Msg::PairConfirm(crate::PairConfirm { accept: false }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
+    #[test]
     fn rejects_resync_hash_non_hex() {
         let f = frame(Msg::ResyncOffer(crate::ResyncOffer {
             hashes: vec!["g".repeat(crate::RESYNC_HASH_LEN)],

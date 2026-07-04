@@ -58,6 +58,25 @@ pub enum Msg {
     /// hold, so the sender knows which items to re-transmit as ordinary
     /// `ClipboardItem`/`Chunk` flows.
     ResyncPull(ResyncPull),
+    /// `sas-confirm` capability: wire-level mutual SAS confirmation.
+    /// Sent when the local user resolves the 6-word verify screen via
+    /// `fluxctl pair confirm --accept`/`--reject`, so the peer's own
+    /// `sas_phase` reflects our decision instead of relying solely on its
+    /// local 90s pairing-window clock. `accept = false` doubles as an
+    /// explicit rejection: the receiver revokes the sender from its
+    /// trusted set and tears down the session, mirroring a local reject.
+    ///
+    /// Deliberately the LAST variant of `Msg`: new variants are always
+    /// appended, never inserted, so discriminant order stays stable for
+    /// any positional (non-name-tagged) codec this protocol might carry.
+    PairConfirm(PairConfirm),
+}
+
+/// Payload for [`Msg::PairConfirm`]. See its doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairConfirm {
+    pub accept: bool,
 }
 
 /// Post-handshake greeting. The Noise IK handshake itself doesn't carry

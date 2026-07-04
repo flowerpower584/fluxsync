@@ -35,6 +35,15 @@ let pairMethod = null; // 'qr' | 'pin' | null
 let pendingPeerId = null; // hex peer_id captured for pair_confirm
 let pinCountdownTimer = null;
 
+// SAS mutual-confirmation (verify screen). `verifyLocalConfirmed` is true
+// once WE tapped "Words match" and are waiting on the peer; `lastSasPhase`
+// mirrors the newest `sas_phase` seen on the `state-update` channel so a
+// tap can tell "peer already confirmed" from "still waiting" without a
+// second round trip. See `handleSasPhase` below.
+let verifyLocalConfirmed = false;
+let lastSasPhase = 'idle';
+let verifyFailTimer = null;
+
 // TOFU placeholder the daemon projects into `peer_name` between handshake
 // completion and the `Msg::Hello` that carries the peer's real device name
 // (see `fluxsyncd::handshake::TOFU_PLACEHOLDER_NAME`). Never a real identity.
@@ -83,9 +92,12 @@ backBtn.addEventListener('click', () => {
 function resetState() {
   if (unlistenPair) { unlistenPair(); unlistenPair = null; }
   if (pinCountdownTimer) { clearInterval(pinCountdownTimer); pinCountdownTimer = null; }
+  if (verifyFailTimer) { clearTimeout(verifyFailTimer); verifyFailTimer = null; }
   pairMethod = null;
   pendingPeerId = null;
   pinAttempts = 0; // QA #3: never leave the PIN flow permanently locked out.
+  verifyLocalConfirmed = false;
+  lastSasPhase = 'idle';
 }
 
 $('done-btn').addEventListener('click', () => {
@@ -179,9 +191,15 @@ function showPaired(peerName, peerPlatform) {
 // an in-progress QR/PIN/verify flow, only correct/expire a terminal one.
 (async function watchPairedScreenAgainstState() {
   await listen('state-update', (event) => {
+    const data = event.payload || {};
+
+    // SAS mutual-confirmation (verify screen, defined further below). Runs
+    // unconditionally, BEFORE the paired-screen gate, so `lastSasPhase`
+    // stays current no matter which screen is active.
+    handleSasPhase(data);
+
     const pairedScreen = document.querySelector('.screen[data-screen="paired"]');
     if (!pairedScreen || !pairedScreen.classList.contains('active')) return;
-    const data = event.payload || {};
     const peerName = data.peer_name || '';
     const peerPlatform = data.peer_platform || '';
     if (!peerName) {
@@ -433,6 +451,18 @@ function showPinError(msg) {
 
 async function enterVerifyScreen(peerDisplayName) {
   showScreen('verify');
+  // Fresh SAS round: a stale `verifyLocalConfirmed`/`lastSasPhase` from a
+  // prior attempt (e.g. unpair immediately followed by a new pair, which
+  // does not route through `resetState()`) would let the next tap
+  // wrongly fast-path into `finalizePaired()`. Also clear any leftover
+  // inline UI state — this WebView is reused across opens (Bug B above).
+  verifyLocalConfirmed = false;
+  lastSasPhase = 'idle';
+  if (verifyFailTimer) { clearTimeout(verifyFailTimer); verifyFailTimer = null; }
+  $('verify-accept-btn').disabled = false;
+  $('verify-reject-btn').disabled = false;
+  $('verify-peer-note').style.display = 'none';
+  showVerifyWaiting(false);
   $('verify-error').style.display = 'none';
   // Poll pair_pending briefly: the daemon writes the entry from the
   // responder's transport_recv path, which races with the
@@ -527,18 +557,22 @@ async function resolveVerify(accept) {
   try {
     await invoke('fluxsync_pair_confirm', { peerId: pendingPeerId, accept });
     if (accept) {
-      // The real name arrives via `Msg::Hello`, asynchronously — by the time
-      // the user matched 6 SAS words it has very likely already landed in
-      // State. Fetch fresh rather than trust anything captured earlier in
-      // this flow (verify-screen entry only has the TOFU placeholder).
-      let peerName = '';
-      let peerPlatform = '';
-      try {
-        const st = await invoke('fluxsync_status');
-        peerName = (st && st.data && st.data.peer_name) || '';
-        peerPlatform = (st && st.data && st.data.peer_platform) || '';
-      } catch (_) {}
-      showPaired(peerName, peerPlatform);
+      verifyLocalConfirmed = true;
+      $('verify-peer-note').style.display = 'none';
+      if (lastSasPhase === 'confirmed') {
+        // The peer had already confirmed and our own confirm's daemon-side
+        // effect already reached us via `state-update` — no wait needed.
+        await finalizePaired();
+      } else {
+        // Mutual confirm not settled yet (peer hasn't tapped, or its
+        // confirmation hasn't reached us). Park on a calm waiting state —
+        // `showVerifyWaiting` hides the action row entirely, so the
+        // `finally` block's re-enable below is harmless. `handleSasPhase`
+        // (same `state-update` channel) advances us to Paired, a
+        // rejection message, or a timeout message from here.
+        showVerifyWaiting(true);
+        return;
+      }
     } else {
       resetState();
       showScreen('entry');
@@ -549,6 +583,93 @@ async function resolveVerify(accept) {
   } finally {
     accBtn.disabled = false;
     rejBtn.disabled = false;
+  }
+}
+
+// The real name arrives via `Msg::Hello`, asynchronously — by the time both
+// sides have confirmed SAS it has very likely already landed in State. Fetch
+// fresh rather than trust anything captured earlier in this flow
+// (verify-screen entry only ever has the TOFU placeholder).
+async function finalizePaired() {
+  let peerName = '';
+  let peerPlatform = '';
+  try {
+    const st = await invoke('fluxsync_status');
+    peerName = (st && st.data && st.data.peer_name) || '';
+    peerPlatform = (st && st.data && st.data.peer_platform) || '';
+  } catch (_) {}
+  showPaired(peerName, peerPlatform);
+}
+
+// ─── SAS mutual-confirmation state machine (verify screen) ──────
+//
+// Driven off `sas_phase` on the SAME `state-update` channel the
+// paired-screen watchdog above already listens on — no parallel listener.
+// Daemon contract:
+//   idle            no SAS exchange in flight
+//   showing         words shown on both sides, nobody confirmed yet
+//   peer_confirmed  the OTHER device tapped "match" first
+//   local_confirmed WE tapped "match" first, waiting on the peer
+//   confirmed       both sides confirmed -> proceed to Paired
+//   peer_rejected   the other device tapped "don't match"
+//
+// `verifyLocalConfirmed` distinguishes a genuine peer-timeout bounce
+// (sas_phase -> idle AFTER we confirmed, with the peer gone) from an
+// ordinary pre-tap flap, which must stay silent — same tolerate-the-flap
+// philosophy as the pairing-success flap guard in `watchForPair` above.
+function verifyScreenActive() {
+  const s = document.querySelector('.screen[data-screen="verify"]');
+  return !!s && s.classList.contains('active');
+}
+
+function showVerifyWaiting(show) {
+  const actions = $('verify-actions');
+  const waiting = $('verify-waiting');
+  if (actions) actions.style.display = show ? 'none' : 'flex';
+  if (waiting) waiting.style.display = show ? 'flex' : 'none';
+}
+
+function failVerify(message) {
+  if (verifyFailTimer) { clearTimeout(verifyFailTimer); verifyFailTimer = null; }
+  $('verify-peer-note').style.display = 'none';
+  $('verify-waiting').style.display = 'none';
+  $('verify-accept-btn').disabled = true;
+  $('verify-reject-btn').disabled = true;
+  $('verify-error').style.display = 'block';
+  $('verify-error').textContent = message;
+  verifyFailTimer = setTimeout(() => {
+    verifyFailTimer = null;
+    resetState();
+    showScreen('entry');
+  }, 2000);
+}
+
+function handleSasPhase(data) {
+  const phase = data.sas_phase || '';
+  if (phase) lastSasPhase = phase;
+  if (!verifyScreenActive()) return;
+
+  if (phase === 'peer_confirmed') {
+    if (!verifyLocalConfirmed) $('verify-peer-note').style.display = 'block';
+    return;
+  }
+  if (phase === 'confirmed') {
+    $('verify-peer-note').style.display = 'none';
+    finalizePaired();
+    return;
+  }
+  if (phase === 'peer_rejected') {
+    failVerify('The other device rejected the words. Pairing cancelled.');
+    return;
+  }
+  if (phase === 'idle' && verifyLocalConfirmed) {
+    // We confirmed; the peer never did within its 90s window (or the link
+    // dropped: Event::PeerLost also resets the gate to "idle"). After a
+    // local confirm, "idle" can only mean the SAS flow died — a fresh
+    // pairing would report "showing". Do NOT gate on peer_name emptying:
+    // on PeerLost it may still be populated (it only clears at
+    // GhostTimeout), which would strand the user on the waiting spinner.
+    failVerify('The other device did not confirm in time.');
   }
 }
 

@@ -87,10 +87,22 @@ pub struct State {
     /// (pre-doctor) deserializing as the common case (mDNS on).
     #[serde(default = "default_mdns_enabled")]
     pub mdns_enabled: bool,
+    /// Wire-level mutual SAS confirmation (`sas-confirm` capability):
+    /// `"idle"` | `"showing"` | `"peer_confirmed"` | `"local_confirmed"` |
+    /// `"confirmed"` | `"peer_rejected"`. Driven by `Event::SasPairingStarted`
+    /// / `SasLocalConfirmed` / `SasPeerConfirmed` / `SasPeerRejected` /
+    /// `SasReset` (see `App::handle`). `#[serde(default = ...)]` keeps older
+    /// state snapshots (pre-sas-confirm) deserializing as `"idle"`.
+    #[serde(default = "default_sas_phase")]
+    pub sas_phase: String,
 }
 
 fn default_mdns_enabled() -> bool {
     true
+}
+
+fn default_sas_phase() -> String {
+    String::from("idle")
 }
 
 /// One clipboard item parked by the firewall's `Ask` rule, surfaced to the UI
@@ -303,6 +315,7 @@ impl State {
             pending: Vec::new(),
             vault_wipe_gen: 0,
             mdns_enabled: config.mdns_enabled,
+            sas_phase: default_sas_phase(),
         }
     }
 
@@ -368,6 +381,21 @@ mod tests {
     }
 
     #[test]
+    fn initial_state_sas_phase_is_idle() {
+        let s = State::initial(&Config::default());
+        assert_eq!(s.sas_phase, "idle");
+    }
+
+    #[test]
+    fn sas_phase_defaults_to_idle_on_old_json() {
+        // Pre-sas-confirm snapshot: no `sas_phase` key at all.
+        let mut v = serde_json::to_value(State::initial(&Config::default())).unwrap();
+        v.as_object_mut().unwrap().remove("sas_phase");
+        let s: State = serde_json::from_value(v).unwrap();
+        assert_eq!(s.sas_phase, "idle");
+    }
+
+    #[test]
     fn set_self_battery_rejects_over_100() {
         let mut s = State::initial(&Config::default());
         assert!(s.set_self_battery(0, false).is_ok());
@@ -406,6 +434,7 @@ mod tests {
             "firewall",
             "pending",
             "mdns_enabled",
+            "sas_phase",
         ] {
             assert!(j.get(k).is_some(), "missing key {k} in JSON shape");
         }

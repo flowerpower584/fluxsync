@@ -14,6 +14,7 @@ import org.json.JSONObject
  * {
  *   "phase": "Idle" | "Discovering" | "Linked" | "Paused" | "Error",
  *   "status": "Inactive" | "Active",
+ *   "sas_phase": "idle" | "showing" | "peer_confirmed" | "local_confirmed" | "confirmed" | "peer_rejected",
  *   "peer_name": "",
  *   "peer_battery": 0,
  *   "peer_charging": false,
@@ -30,6 +31,8 @@ import org.json.JSONObject
 data class DaemonState(
     val phase: String,
     val status: String,
+    /** Wire-level mutual SAS confirmation state, drives the pair-verify screen. */
+    val sasPhase: String,
     val active: Boolean,
     val peerName: String,
     val peerPlatform: String,
@@ -58,6 +61,7 @@ data class DaemonState(
             DaemonState(
                 phase = o.optString("phase", "idle"),
                 status = o.optString("status", "inactive"),
+                sasPhase = o.optString("sas_phase", "idle"),
                 // The daemon's `status` is a derived label
                 // (inactive/syncing/paused/critical) — never literally
                 // "Active". The UI's Online switch should mirror the

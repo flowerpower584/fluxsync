@@ -15,7 +15,7 @@ pub use codec::{decode, encode};
 pub use error::ProtoError;
 pub use types::{
     Ack, BatteryStatus, Chunk, ClipboardItem, Frame, HandshakeInit, HandshakeResp, Heartbeat,
-    Hello, Kind, Msg, Nak, PeerInfo, ResyncOffer, ResyncPull,
+    Hello, Kind, Msg, Nak, PairConfirm, PeerInfo, ResyncOffer, ResyncPull,
 };
 
 /// Wire-format version. Bumped on any breaking change to the CBOR shapes.
@@ -101,9 +101,10 @@ pub fn validate_resync_hashes(hashes: &[String]) -> bool {
 /// Capability tags this build understands. `Hello.caps` negotiation takes
 /// the intersection of the peer's caps with this list — see
 /// [`negotiate_caps`]; everything else is ignored (docs/PROTOCOL.md). Ships
-/// with `core-1` (baseline) and `resync-1` (resync-on-reconnect, §6.2 of
-/// `docs/PROTOCOL.md`).
-pub const SUPPORTED_CAPS: &[&str] = &["core-1", "resync-1"];
+/// with `core-1` (baseline), `resync-1` (resync-on-reconnect, §6.2 of
+/// `docs/PROTOCOL.md`), and `sas-confirm` (wire-level mutual SAS
+/// confirmation via `Msg::PairConfirm`).
+pub const SUPPORTED_CAPS: &[&str] = &["core-1", "resync-1", "sas-confirm"];
 
 /// Negotiate the working capability set with a peer: the intersection of
 /// what they sent in `Hello.caps` and what this build understands

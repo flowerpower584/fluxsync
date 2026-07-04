@@ -185,6 +185,9 @@ pub async fn run_initiator(
                 expires_at: now + PAIRING_WINDOW,
             },
         );
+        // FS-052 wire mutual confirm: a fresh pairing always overwrites any
+        // leftover `sas_phase` from a previous attempt with the peer.
+        let _ = event_tx.try_send(Event::SasPairingStarted);
     }
 
     let _ = event_tx.try_send(Event::PeerSeen {
@@ -422,6 +425,9 @@ pub async fn run_responder(
                 expires_at: now + PAIRING_WINDOW,
             },
         );
+        // FS-052 wire mutual confirm: a fresh pairing always overwrites any
+        // leftover `sas_phase` from a previous attempt with the peer.
+        let _ = event_tx.try_send(Event::SasPairingStarted);
     }
 
     // Install before sending msg2 so a duplicate inbound HandshakeInit
@@ -497,6 +503,7 @@ pub async fn run_pending_reaper(
     transport: std::sync::Arc<crate::transport::Transport>,
     keystore_dir: Option<std::path::PathBuf>,
     shutdown: tokio_util::sync::CancellationToken,
+    event_tx: mpsc::Sender<Event>,
 ) {
     let mut tick = tokio::time::interval(PENDING_REAPER_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -524,6 +531,12 @@ pub async fn run_pending_reaper(
                 if expired_pending.is_empty() {
                     continue;
                 }
+                // FS-052 wire mutual confirm: the user did not confirm (or
+                // reject) in time — reset `sas_phase` to "idle" regardless
+                // of whether the persist step below ultimately succeeds, so
+                // the UI reflects the lost pairing immediately rather than
+                // showing a stale "showing"/"local_confirmed".
+                let _ = event_tx.try_send(Event::SasReset);
                 let expired: Vec<[u8; 32]> =
                     expired_pending.iter().map(|(id, _)| *id).collect();
                 let removed_trust: Vec<([u8; 32], TrustedPeer)> = {

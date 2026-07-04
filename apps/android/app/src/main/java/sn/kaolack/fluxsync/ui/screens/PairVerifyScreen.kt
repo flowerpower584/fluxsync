@@ -33,6 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import sn.kaolack.fluxsync.ui.theme.FsAccent
@@ -65,6 +66,14 @@ fun PairVerifyScreen(
     var words by remember { mutableStateOf<List<String>>(emptyList()) }
     var failed by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
+    // Wire-level mutual SAS confirmation: set once we've tapped "They match"
+    // and are holding for the peer's own confirmation.
+    var waitingForPeer by remember { mutableStateOf(false) }
+    var rejectedByPeer by remember { mutableStateOf(false) }
+    var peerTimedOut by remember { mutableStateOf(false) }
+
+    val daemonState by vm.state.collectAsStateWithLifecycle()
+    val sasPhase = daemonState?.sasPhase ?: "idle"
 
     // Poll pair_pending: run_initiator inserts the entry once the handshake
     // completes, which races the navigation into this screen.
@@ -104,6 +113,39 @@ fun PairVerifyScreen(
         // reject/retry path rather than silently skipping a gate that the
         // daemon would later reap (which would kill the link).
         failed = true
+    }
+
+    // The peer can reject the words at any point up to the moment both
+    // sides confirm — including before our own tap. Terminal regardless of
+    // [waitingForPeer].
+    LaunchedEffect(sasPhase) {
+        if (sasPhase == "peer_rejected") {
+            rejectedByPeer = true
+        }
+    }
+
+    // After our own tap: hold on the waiting screen until the peer's
+    // confirmation lands ("confirmed") or the flow dies. While waiting,
+    // "idle" alone means the flow died — the 90s pairing window expired
+    // (SasReset) or the peer's side dropped (PeerLost resets the waiting
+    // phases ~9s in, possibly while peerName is still populated; a fresh
+    // pairing would set "showing", never "idle"). Do NOT also require the
+    // peer to look gone: PeerLost fires before GhostTimeout clears
+    // peerName, so that window would leave the spinner up forever.
+    LaunchedEffect(sasPhase, waitingForPeer) {
+        if (!waitingForPeer) return@LaunchedEffect
+        when (sasPhase) {
+            "confirmed" -> onConfirmed()
+            "idle" -> peerTimedOut = true
+        }
+    }
+
+    // Give the user a beat to read the failure line before leaving.
+    LaunchedEffect(rejectedByPeer, peerTimedOut) {
+        if (rejectedByPeer || peerTimedOut) {
+            delay(1800)
+            onRejected()
+        }
     }
 
     Column(Modifier.fillMaxSize().background(FsDarkBg)) {
@@ -152,6 +194,18 @@ fun PairVerifyScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,
                 )
+                rejectedByPeer -> Text(
+                    "The other device rejected the words. Pairing cancelled.",
+                    color = FsCrit,
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
+                peerTimedOut -> Text(
+                    "The other device did not confirm in time.",
+                    color = FsCrit,
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                )
                 words.isEmpty() -> {
                     CircularProgressIndicator(color = FsDarkMuted)
                     Spacer(Modifier.height(12.dp))
@@ -187,56 +241,105 @@ fun PairVerifyScreen(
                             }
                         }
                     }
+                    when {
+                        waitingForPeer -> {
+                            Spacer(Modifier.height(16.dp))
+                            CircularProgressIndicator(
+                                color = FsDarkMuted,
+                                modifier = Modifier.size(20.dp).align(Alignment.CenterHorizontally),
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                "Waiting for the other device…",
+                                color = FsDarkMuted,
+                                fontFamily = FsSans,
+                                fontSize = 11.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        // Peer confirmed before we tapped — quiet hint only,
+                        // no navigation yet (mutual confirmation required).
+                        sasPhase == "peer_confirmed" -> {
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                "Other device confirmed",
+                                color = FsDarkMuted,
+                                fontFamily = FsSans,
+                                fontSize = 10.5.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
                 }
             }
         }
 
         Spacer(Modifier.weight(1f))
-        Column(Modifier.fillMaxWidth().padding(20.dp)) {
-            // Accept — only once words + peer_id are loaded.
-            val canAccept = !busy && peerId != null && words.isNotEmpty()
-            Box(
-                Modifier.fillMaxWidth()
-                    .clip(RoundedCornerShape(FsRadius.Seg))
-                    .background(if (canAccept) FsAccent else FsDarkBorderStrong)
-                    .clickable(enabled = canAccept) {
-                        busy = true
-                        peerId?.let { vm.pairConfirm(it, true) }
-                        onConfirmed()
-                    }
-                    .padding(vertical = 12.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "They match",
-                    color = if (canAccept) FsOnAccent else FsDarkMuted,
-                    fontFamily = FsSans,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.5.sp,
-                )
+        // Buttons hidden once we're holding for the peer or the flow already
+        // ended (peer rejected / timed out) — nothing left for the user to
+        // tap; the LaunchedEffects above drive navigation from here.
+        if (!waitingForPeer && !rejectedByPeer && !peerTimedOut) {
+            Column(Modifier.fillMaxWidth().padding(20.dp)) {
+                // Accept — only once words + peer_id are loaded.
+                val canAccept = !busy && peerId != null && words.isNotEmpty()
+                Box(
+                    Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(FsRadius.Seg))
+                        .background(if (canAccept) FsAccent else FsDarkBorderStrong)
+                        .clickable(enabled = canAccept) {
+                            busy = true
+                            peerId?.let { vm.pairConfirm(it, true) }
+                            // Mutual confirmation: only the peer's own tap
+                            // moves sas_phase to "confirmed". If that already
+                            // happened (defensive — the wire protocol can't
+                            // reach "confirmed" before our own tap in
+                            // practice) skip the wait; otherwise hold on the
+                            // waiting state until it lands.
+                            if (sasPhase == "confirmed") {
+                                onConfirmed()
+                            } else {
+                                waitingForPeer = true
+                            }
+                        }
+                        .padding(vertical = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "They match",
+                        color = if (canAccept) FsOnAccent else FsDarkMuted,
+                        fontFamily = FsSans,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.5.sp,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                // Reject — always available; also the escape hatch on failure.
+                Box(
+                    Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(FsRadius.Seg))
+                        .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(FsRadius.Seg))
+                        .clickable(enabled = !busy) {
+                            busy = true
+                            peerId?.let { vm.pairConfirm(it, false) }
+                            onRejected()
+                        }
+                        .padding(vertical = 11.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "They don't match",
+                        color = FsCrit,
+                        fontFamily = FsSans,
+                        fontWeight = FontWeight.W600,
+                        fontSize = 12.sp,
+                    )
+                }
             }
-            Spacer(Modifier.height(8.dp))
-            // Reject — always available; also the escape hatch on failure.
-            Box(
-                Modifier.fillMaxWidth()
-                    .clip(RoundedCornerShape(FsRadius.Seg))
-                    .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(FsRadius.Seg))
-                    .clickable(enabled = !busy) {
-                        busy = true
-                        peerId?.let { vm.pairConfirm(it, false) }
-                        onRejected()
-                    }
-                    .padding(vertical = 11.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "They don't match",
-                    color = FsCrit,
-                    fontFamily = FsSans,
-                    fontWeight = FontWeight.W600,
-                    fontSize = 12.sp,
-                )
-            }
+        } else {
+            Spacer(Modifier.height(20.dp))
         }
     }
 }

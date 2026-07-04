@@ -209,6 +209,9 @@
   .verify-note{
     font-size:13px;color:var(--muted);text-align:center;line-height:1.5;
   }
+  .verify-hint{
+    font-size:12px;color:var(--muted-2);text-align:center;font-family:var(--mono);
+  }
   .verify-actions{
     display:flex;gap:10px;
   }
@@ -322,11 +325,16 @@
         <div class="w" style="color:var(--muted-3)">—</div>
       </div>
 
+      <p class="verify-hint" id="verify-peer-note" style="display:none">Other device confirmed</p>
+
       <div id="verify-error" class="err" style="display:none"></div>
       <div class="spacer"></div>
-      <div class="verify-actions">
+      <div class="verify-actions" id="verify-actions">
         <button class="btn danger" id="verify-reject-btn">Don't match</button>
         <button class="btn primary" id="verify-accept-btn">Words match</button>
+      </div>
+      <div class="wait" id="verify-waiting" style="display:none;justify-content:center">
+        <span class="pulse"></span><span>Waiting for the other device…</span>
       </div>
     </div>
 
