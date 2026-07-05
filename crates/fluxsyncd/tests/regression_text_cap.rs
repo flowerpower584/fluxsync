@@ -336,3 +336,90 @@ async fn over_cap_image_push_is_rejected_not_truncated() {
     shutdown_a.cancel();
     let _ = h_a.await;
 }
+
+/// Exact-boundary companion to the over-cap tests above: a text of exactly
+/// `MAX_PAYLOAD` bytes is accepted, `MAX_PAYLOAD + 1` bytes is rejected.
+/// Single daemon, IPC-level only (asserts the `CmdResponse`, not delivery to
+/// a peer) — a two-daemon 16 MiB round trip is unnecessarily slow for what
+/// is purely a boundary check on the IPC handler's size guard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exact_boundary_text_push_accepted_and_rejected() {
+    let _ = tracing_subscriber::fmt::try_init();
+    install_panic_hook();
+
+    let id_a = Identity::generate();
+    let port_a = pick_free_udp_port().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ipc_a = dir.path().join("a.sock");
+
+    let mut cfg_a = DaemonConfig::new(id_a, port_a, ipc_a.clone());
+    cfg_a.udp_bind = "127.0.0.1".into();
+    cfg_a.disable_clipboard = true;
+    cfg_a.disable_mdns = true;
+    cfg_a.peer_name_self = "device-a".into();
+
+    let shutdown_a = CancellationToken::new();
+    let s_a = shutdown_a.clone();
+    let h_a = tokio::spawn(async move { run(cfg_a, s_a).await });
+
+    let up = wait_until(Duration::from_secs(3), || async {
+        if !ipc_a.exists() {
+            return false;
+        }
+        let resp = ipc_send_recv(&ipc_a, CmdRequest { id: 1, op: fluxsyncd::cmd::CmdOp::Status }).await;
+        matches!(resp.data, Some(CmdData::State(_)))
+    })
+    .await;
+    assert!(up, "daemon A IPC did not come up in 3s");
+
+    // Exactly MAX_PAYLOAD bytes, no leading/trailing whitespace so the
+    // handler's `.trim()` doesn't change the length: must be ACCEPTED.
+    let at_cap_text = "A".repeat(MAX_PAYLOAD);
+    let at_cap_resp = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 100,
+            op: fluxsyncd::cmd::CmdOp::Push { text: at_cap_text },
+        },
+    )
+    .await;
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a panic was captured by the test panic hook"
+    );
+    assert!(
+        at_cap_resp.ok,
+        "expected exactly-MAX_PAYLOAD push to be accepted, got ok=false err={:?}",
+        at_cap_resp.err
+    );
+
+    // MAX_PAYLOAD + 1 bytes: must be REJECTED.
+    let over_cap_text = "A".repeat(MAX_PAYLOAD + 1);
+    let over_cap_resp = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 101,
+            op: fluxsyncd::cmd::CmdOp::Push { text: over_cap_text },
+        },
+    )
+    .await;
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a panic was captured by the test panic hook"
+    );
+    assert!(
+        !over_cap_resp.ok,
+        "expected MAX_PAYLOAD+1 push to be rejected, got ok=true"
+    );
+    let err = over_cap_resp
+        .err
+        .as_deref()
+        .expect("expected an error message on the rejected push");
+    assert!(
+        err.contains("too large"),
+        "expected a 'too large' rejection error, got: {err:?}"
+    );
+
+    shutdown_a.cancel();
+    let _ = h_a.await;
+}

@@ -394,6 +394,7 @@ mod tests {
     #[test]
     fn linked_frame_received_writes_clipboard_and_acks() {
         let ev = Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [2; 32],
             kind: Kind::Text,
             payload: "Bonjour".to_string().into_bytes(),
@@ -417,6 +418,7 @@ mod tests {
     #[test]
     fn non_linked_frame_received_still_acks() {
         let ev = Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [7; 32],
             kind: Kind::Text,
             payload: "early".to_string().into_bytes(),

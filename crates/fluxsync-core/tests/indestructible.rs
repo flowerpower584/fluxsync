@@ -328,6 +328,7 @@ fn clipboard_peer_to_local_writes_and_acks() {
     let mut app = linked_app();
     let a = app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: h(2),
             kind: Kind::Text,
             payload: "Bonjour".to_string().into_bytes(),
@@ -389,6 +390,7 @@ fn clipboard_cross_dedup_peer_then_local() {
     // Receive from peer
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: real,
             kind: Kind::Text,
             payload: "echo".to_string().into_bytes(),
@@ -425,6 +427,7 @@ fn se14_peer_supplied_hash_does_not_key_dedup() {
     let mut app = linked_app();
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [0xAA; 32], // hostile peer-supplied
             kind: Kind::Text,
             payload: b"real".to_vec(),
@@ -440,6 +443,7 @@ fn se14_peer_supplied_hash_does_not_key_dedup() {
     // dedup is keyed by payload digest now.
     let a = app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [0xAA; 32],
             kind: Kind::Text,
             payload: b"fake".to_vec(),
@@ -480,6 +484,7 @@ fn clipboard_history_capped_at_50() {
     for i in 0..60u8 {
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: h(i),
                 kind: Kind::Text,
                 payload: format!("item-{i}").into_bytes(),
@@ -502,6 +507,7 @@ fn clipboard_history_newest_first() {
     for i in 0..5u8 {
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: h(i),
                 kind: Kind::Text,
                 payload: format!("msg-{i}").into_bytes(),
@@ -764,6 +770,7 @@ fn emit_state_on_every_meaningful_event() {
 
     let a = app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: h(99),
             kind: Kind::Text,
             payload: "test".to_string().into_bytes(),
@@ -819,6 +826,7 @@ fn stress_interleaved_clipboard_and_battery() {
         } else {
             app.handle(
                 Event::FrameReceivedClipboard {
+                    peer_id: [0u8; 32],
                     hash,
                     kind: Kind::Text,
                     payload: format!("remote-{i}").into_bytes(),

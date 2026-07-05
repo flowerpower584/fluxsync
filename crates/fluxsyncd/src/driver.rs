@@ -38,8 +38,8 @@ use crate::history_store::{self, VaultEntry};
 use crate::outbox::{Entry as OutboxEntry, Outbox};
 use crate::seq_store::SeqStore;
 use fluxsync_core::{
-    dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, DeviceId, Event, EventId,
-    HistoryItem, LogEntry, LogLevel, PeerInfo, SeenSet, State, WallClock,
+    dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, Decision, DeviceId, Direction,
+    Event, EventId, HistoryItem, LogEntry, LogLevel, PeerInfo, SeenSet, State, WallClock,
 };
 use fluxsync_crypto::gen_pair_pin;
 use fluxsync_crypto::{fingerprint, Identity};
@@ -57,7 +57,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -429,6 +429,17 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // ResyncPull, so the receive path can tell "I requested this catch-up
     // item" apart from a fresh copy. See `PendingPulls`'s doc comment.
     let pending_pulls: PendingPulls = Arc::new(Mutex::new(HashMap::new()));
+    // Outbox admission gate fix: an inbound item the firewall parks under
+    // `Ask` is not yet admitted to history, so it must not enter `outbox`
+    // yet either — but its (origin, seq) wire metadata is only known at
+    // receive time, and is lost by the time a later `ResolvePending`
+    // resolves it (`fluxsync_core`'s `PendingPayload` carries no such
+    // fields). This staging map bridges that gap: `complete_reassembled_item`
+    // / `dispatch_inbound_frame` park an `Ask`-decided item's full
+    // `OutboxEntry` here instead of in `outbox`, and `CmdOp::ResolvePending`
+    // promotes it into the real `outbox` on `allow: true` (or drops it
+    // otherwise). See `PendingOutboxStage`'s doc comment.
+    let outbox_stage: PendingOutboxStage = Arc::new(Mutex::new(HashMap::new()));
 
     // ── Test path: install session + jump to Linked ────────────────
     if let Some(tp) = test_pair {
@@ -564,6 +575,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let backoff_for_recv = backoff.clone();
         let outbox_for_recv = outbox.clone();
         let pending_pulls_for_recv = pending_pulls.clone();
+        let outbox_stage_for_recv = outbox_stage.clone();
         let state_rx_for_recv = state_watch_tx.subscribe();
         let deferred_sas_confirm_for_recv = deferred_sas_confirm.clone();
         tasks.spawn(async move {
@@ -586,6 +598,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 lan_only_handshakes,
                 outbox_for_recv,
                 pending_pulls_for_recv,
+                outbox_stage_for_recv,
                 state_rx_for_recv,
                 deferred_sas_confirm_for_recv,
             )
@@ -840,6 +853,13 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         });
     }
 
+    // FIX3 (synchronous security-wipe disk clear): tracks the last
+    // `vault_wipe_gen` this loop has already reacted to, so it can tell a
+    // fresh bump apart from one it already handled. Seeded from the current
+    // snapshot (0 at a fresh boot) — same rationale as the vault
+    // persister's own `initial_wipe_gen` above.
+    let mut last_wipe_gen_sync: u64 = app.snapshot().vault_wipe_gen;
+
     // ── Main event loop ────────────────────────────────────────────
     loop {
         tokio::select! {
@@ -857,6 +877,34 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 if !actions.is_empty() {
                     tracing::debug!(?event, ?actions, phase=?app.snapshot().phase, "FSM transition");
                 }
+                // FIX1 (P0 parked-payload leak): the silent-secondary-timeout
+                // path (`heartbeat_loop`) has no direct access to `app` or
+                // `outbox_stage`, so it routes its `Event::PeerRevoked`
+                // through `event_tx` instead of calling `app.handle`
+                // inline like `CmdOp::Revoke` does. Purge here too so both
+                // producers of that event converge on the same cleanup.
+                purge_dropped_pending_from_outbox_stage(&actions, &outbox_stage).await;
+                // FIX3: a security trigger (untrusted-peer, ghost-timeout,
+                // peer-swap — the only events reaching this arm that bump
+                // `vault_wipe_gen`; `CmdOp::ClearHistory` also bumps it but is
+                // handled entirely in `handle_driver_cmd`, never here, so it
+                // can't misfire this block) just cleared `App`'s in-memory
+                // history synchronously inside `app.handle` above. Mirror
+                // that to disk and purge the outbox HERE — before `dispatch`
+                // below runs `Action::EmitState` and publishes the new state
+                // to subscribers — so a crash right after this point leaves
+                // disk wiped (safe) rather than memory wiped with the
+                // secret still recoverable from disk or re-offered via
+                // resync. The persister's own gen-check stays as
+                // belt-and-braces (see `persist_history_change`).
+                sync_security_wipe_if_needed(
+                    &app,
+                    &mut last_wipe_gen_sync,
+                    &outbox,
+                    &outbox_stage,
+                    keystore_dir.as_ref(),
+                )
+                .await;
                 dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta, &outbox, &mut seq_store).await;
             }
             Some(driver_cmd) = cmd_rx.recv() => {
@@ -915,11 +963,27 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &mdns_ctx,
                             &shutdown,
                             &outbox,
+                            &outbox_stage,
                             &mut seq_store,
                             &deferred_sas_confirm,
                         ).await;
                     }
                 }
+                // `CmdOp::ClearHistory` (handled inside `handle_driver_cmd`,
+                // above) also bumps `vault_wipe_gen` — it is a user-requested
+                // "clear history" action with its own already-correct,
+                // SELECTIVE outbox purge (`outbox.remove_many` on exactly the
+                // cleared hashes), not a security wipe, and must NOT also
+                // trigger `sync_security_wipe_if_needed`'s blanket
+                // `clear_all`. `App`'s `vault_wipe_gen` is one shared counter
+                // across both `tokio::select!` arms, though, so without this
+                // resync the event-loop arm's NEXT event (an unrelated
+                // battery tick, say) would see the gen it didn't itself bump
+                // and wipe the outbox anyway as collateral damage. Re-sync
+                // the tracked baseline to whatever `app` holds now so only a
+                // bump made BY the event-loop arm's own `app.handle` (the
+                // real security triggers) is ever observed as "new".
+                last_wipe_gen_sync = app.snapshot().vault_wipe_gen;
             }
         }
     }
@@ -980,6 +1044,78 @@ async fn gate_outbound(
             }
         })
         .collect()
+}
+
+/// FIX3 (synchronous security-wipe disk clear): if `app`'s `vault_wipe_gen`
+/// has advanced past `*last_wipe_gen` since the last call, synchronously
+/// clear the resync outbox — both the real `SharedOutbox` and its
+/// `Ask`-staged entries (FIX2) — and the on-disk vault, AWAITING both
+/// before returning. Returns whether a wipe actually ran.
+///
+/// Callers MUST run this after `app.handle` but before the resulting
+/// `Action`s are `dispatch`ed — `dispatch`'s `Action::EmitState` is what
+/// publishes the new state to IPC/watch subscribers, and this must finish
+/// first so nobody can observe "history cleared" while the outbox or
+/// `history.enc` still hold the wiped secret. See the call site in `run()`'s
+/// main event loop.
+///
+/// Factored out of that loop (rather than left inline) so it is
+/// independently unit-testable — see the tests below — the same rationale
+/// `persist_history_change` is its own function for.
+async fn sync_security_wipe_if_needed(
+    app: &App,
+    last_wipe_gen: &mut u64,
+    outbox: &SharedOutbox,
+    outbox_stage: &PendingOutboxStage,
+    keystore_dir: Option<&PathBuf>,
+) -> bool {
+    let gen_now = app.snapshot().vault_wipe_gen;
+    if gen_now == *last_wipe_gen {
+        return false;
+    }
+    *last_wipe_gen = gen_now;
+    outbox.lock().await.clear_all();
+    outbox_stage.lock().await.clear();
+    if let Some(dir) = keystore_dir {
+        let dir = dir.clone();
+        match tokio::task::spawn_blocking(move || history_store::clear(&dir)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(
+                error = %e,
+                "synchronous security-wipe disk clear failed; persister will retry"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "synchronous security-wipe disk clear task join failed"
+            ),
+        }
+    }
+    true
+}
+
+/// FIX1 (P0 parked-payload leak): scan `actions` for the `Action::
+/// PendingDropped` signal `App::handle` emits when `Event::PeerRevoked`
+/// drops a peer's parked `Ask` items (`App::drop_pending_for`), and purge
+/// the matching `PendingOutboxStage` entries too — otherwise a revoked
+/// peer's staged (not-yet-admitted-to-history) outbox entry has no other
+/// trigger to clear it once the `state.pending` row it mirrored is gone,
+/// and leaks in the stage map forever. Idempotent: removing an
+/// already-absent hash is a no-op. Called at both places `Event::
+/// PeerRevoked` can be produced: `CmdOp::Revoke` (direct `app.handle` call)
+/// and `run()`'s main event loop (the silent-secondary-timeout path in
+/// `heartbeat_loop` only has an `event_tx`, so it routes through there).
+async fn purge_dropped_pending_from_outbox_stage(
+    actions: &[Action],
+    outbox_stage: &PendingOutboxStage,
+) {
+    let mut stage = outbox_stage.lock().await;
+    for action in actions {
+        if let Action::PendingDropped { hashes } = action {
+            for hash in hashes {
+                stage.remove(hash);
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
@@ -1182,6 +1318,14 @@ async fn dispatch(
                 // History/vault/relay/ack already happened normally.
                 metrics.lock().await.on_resync_apply_suppressed();
             }
+            // FIX1: already handled by the caller BEFORE this `actions` vec
+            // reached `dispatch` — see
+            // `purge_dropped_pending_from_outbox_stage`'s call sites. It has
+            // to run before `Action::EmitState` below publishes the new
+            // (pending-item-shrunk) state, so it can't wait until this loop
+            // reaches it here.
+            #[allow(clippy::match_same_arms)] // empty body, but for an unrelated reason than the arm below
+            Action::PendingDropped { .. } => {}
             Action::WriteClipboard { kind, payload } => {
                 // DIR-P1-09: this is the "item apply" chokepoint — a
                 // logical inbound item accepted and written to the local
@@ -1423,6 +1567,7 @@ async fn handle_driver_cmd(
     mdns_ctx: &MdnsCtx,
     shutdown: &CancellationToken,
     outbox: &SharedOutbox,
+    outbox_stage: &PendingOutboxStage,
     seq_store: &mut Option<SeqStore>,
     deferred_sas_confirm: &DeferredSasConfirm,
 ) {
@@ -1538,7 +1683,24 @@ async fn handle_driver_cmd(
         }
         CmdOp::ResolvePending { hash, allow } => {
             tracing::info!(%hash, allow, "IPC: resolve-pending");
-            let actions = app.handle(Event::ResolvePending { hash, allow }, &**wall);
+            let actions = app.handle(Event::ResolvePending { hash: hash.clone(), allow }, &**wall);
+            // Outbox admission gate fix: a staged inbound item (see
+            // `PendingOutboxStage`) is only admitted now if `App::handle`
+            // actually re-emitted its held `WriteClipboard` — not merely
+            // because the caller passed `allow: true`. A denied item, an
+            // unknown/already-resolved hash, or an OUTBOUND approval
+            // (`SendItem` instead) must never promote anything, and either
+            // way the staged entry (if any) must not survive this call.
+            let admitted_inbound =
+                allow && actions.iter().any(|a| matches!(a, Action::WriteClipboard { .. }));
+            if let Ok(bytes) = decode_hex32(&hash) {
+                match outbox_stage.lock().await.remove(&bytes) {
+                    Some(entry) if admitted_inbound => {
+                        outbox.lock().await.insert(bytes, entry);
+                    }
+                    _ => {}
+                }
+            }
             // An approved OUTBOUND item re-emits SendItem; route it through the
             // same SAS gate as a normal push so an unconfirmed peer can't be fed
             // the held secret.
@@ -1995,30 +2157,39 @@ async fn handle_driver_cmd(
             if peer_meta.lock().await.remove(&arr).is_some() {
                 let _ = event_tx.try_send(Event::MeshPeersChanged);
             }
+            // FIX1 (P0 parked-payload leak): drop this peer's Ask-parked
+            // pending items (both directions) whether it was the primary or
+            // a secondary — nobody is left to deliver an inbound item to,
+            // or to receive an outbound one. Unlike `Event::PeerLost` (a
+            // transient disconnect, which must NOT drop pending — see its
+            // doc comment), a revoke is permanent, so this always runs,
+            // independent of the primary-failover branch below.
+            let mut revoke_actions = app.handle(Event::PeerRevoked { peer_id: arr }, &**wall);
+            purge_dropped_pending_from_outbox_stage(&revoke_actions, outbox_stage).await;
             // If the revoked peer was the primary, rebind State: fail over to a
             // live secondary if one exists, else walk Linked → Discovering
             // (CloseSession touches only the session, not the trust store).
             let active = app.snapshot().peer_id;
             if active == arr && !try_primary_failover(transport, event_tx, peer_meta).await {
-                let actions = app.handle(Event::PeerLost, &**wall);
-                dispatch(
-                    actions,
-                    app,
-                    transport,
-                    trusted,
-                    keystore_dir,
-                    state_watch_tx,
-                    logs_bcast_tx,
-                    log_tail,
-                    last_written_hashes,
-                    metrics,
-                    inflight,
-                    peer_meta,
-                    outbox,
-                    seq_store,
-                )
-                .await;
+                revoke_actions.extend(app.handle(Event::PeerLost, &**wall));
             }
+            dispatch(
+                revoke_actions,
+                app,
+                transport,
+                trusted,
+                keystore_dir,
+                state_watch_tx,
+                logs_bcast_tx,
+                log_tail,
+                last_written_hashes,
+                metrics,
+                inflight,
+                peer_meta,
+                outbox,
+                seq_store,
+            )
+            .await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::SetLaunchAtLogin { value: _ } => {
@@ -2729,6 +2900,7 @@ async fn transport_recv_loop(
     lan_only_handshakes: bool,
     outbox: SharedOutbox,
     pending_pulls: PendingPulls,
+    outbox_stage: PendingOutboxStage,
     state_rx: watch::Receiver<State>,
     deferred_sas_confirm: DeferredSasConfirm,
 ) -> Result<()> {
@@ -3007,7 +3179,7 @@ async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &backoff, &peer_meta, keystore_dir.as_ref(), &outbox, &pending_pulls, &state_rx, &deferred_sas_confirm).await,
+                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &backoff, &peer_meta, keystore_dir.as_ref(), &outbox, &pending_pulls, &outbox_stage, &state_rx, &deferred_sas_confirm).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -3106,10 +3278,21 @@ async fn persist_history_change(
     // the in-memory history for safety; mirror it on disk. Delete the
     // encrypted vault and forget cached favorites so a pinned secret can't
     // be re-appended by rebuild() and the file can't outlive the wipe.
-    // The disk clear is async relative to the in-memory wipe; a crash in
-    // that sub-second window can leave history.enc on disk until the next
-    // boot rehydrates+re-wipes it (residual, low-severity: the secret is
-    // the user's own, on the user's own device).
+    //
+    // FIX3: this is now belt-and-braces. The main event loop (see the
+    // `vault_wipe_gen` before/after check around `Some(event) =
+    // event_rx.recv()` in `run()`) already performs this exact disk clear
+    // SYNCHRONOUSLY, inline, before the wiping event's new state is even
+    // published to subscribers — this async path only re-runs the same
+    // (idempotent) clear as a backstop. CORRECTION to a previous version of
+    // this comment: a crash landing in the gap between the in-memory wipe
+    // and either clear reaching disk is NOT auto-healed on the next boot —
+    // boot only loads+restores whatever `history.enc` exists (see `run()`'s
+    // vault rehydrate, well before `initial_wipe_gen` is even seeded) and
+    // never re-wipes it, so a stray file from that gap survives until some
+    // later, unrelated wipe trigger clears it. Residual, low-severity (the
+    // user's own secret, on the user's own device), and now far less likely
+    // to matter thanks to the synchronous path above.
     if wipe_gen != *last_wipe_gen {
         ctx.entries.clear();
         // DIR-P2-04a: a security wipe means this peer relationship is no
@@ -3475,19 +3658,26 @@ async fn clipboard_watcher_loop(
                                 last_written_hashes.lock().await.contains(&hash);
                             last_seen_hash = Some(hash);
                             if !already {
-                                let (reply_tx, _reply_rx) = oneshot::channel();
-                                if cmd_tx
-                                    .send(DriverCmd::Run {
-                                        op: CmdOp::Push { text },
-                                        reply: reply_tx,
-                                        req_id: 0,
-                                    })
-                                    .is_err()
-                                {
-                                    tracing::error!("clipboard_watcher_loop: failed to send Push command");
-                                    return Ok(());
+                                if text.len() > MAX_PAYLOAD {
+                                    tracing::warn!(
+                                        size = text.len(),
+                                        "clipboard text exceeds 16 MiB cap; skipped"
+                                    );
+                                } else {
+                                    let (reply_tx, _reply_rx) = oneshot::channel();
+                                    if cmd_tx
+                                        .send(DriverCmd::Run {
+                                            op: CmdOp::Push { text },
+                                            reply: reply_tx,
+                                            req_id: 0,
+                                        })
+                                        .is_err()
+                                    {
+                                        tracing::error!("clipboard_watcher_loop: failed to send Push command");
+                                        return Ok(());
+                                    }
+                                    tracing::debug!("clipboard_watcher_loop: Push command sent");
                                 }
-                                tracing::debug!("clipboard_watcher_loop: Push command sent");
                             }
                         }
                     }
@@ -3652,6 +3842,14 @@ async fn heartbeat_loop(
                             );
                             transport.drop_session_for(peer_id).await;
                             secondary_missed.remove(&peer_id);
+                            // FIX1 (P0 parked-payload leak): a silently
+                            // timed-out secondary is gone just as surely as
+                            // an explicitly revoked one — drop its parked
+                            // `Ask` items too (see `Event::PeerRevoked`'s
+                            // doc comment). This loop has no `app`, so it
+                            // routes through `event_tx` like
+                            // `MeshPeersChanged` below already does.
+                            let _ = event_tx.try_send(Event::PeerRevoked { peer_id });
                             let _ = event_tx.try_send(Event::MeshPeersChanged);
                         }
                     } else {
@@ -4219,7 +4417,9 @@ async fn complete_reassembled_item(
     lamport: u64,
     payload: Vec<u8>,
     outbox: &SharedOutbox,
+    outbox_stage: &PendingOutboxStage,
     pending_pulls: &PendingPulls,
+    state_rx: &watch::Receiver<State>,
 ) {
     ack_source(transport, source, hash).await;
     let eid = EventId::new(DeviceId::from(origin), event_seq);
@@ -4227,21 +4427,37 @@ async fn complete_reassembled_item(
         // Already seen this item on the mesh — don't re-apply or re-loop it.
         return;
     }
-    // Resync-on-reconnect (resync-1): first sight of this item — keep a
-    // resend copy under its original (origin, seq) so it can later be
-    // offered to a peer that reconnects after missing it. Sensitive items
-    // must never enter the outbox (see `crate::outbox`'s security invariant).
+    // Resync-on-reconnect (resync-1): first sight of this item. Outbox
+    // admission gate fix: `Event::FrameReceivedClipboard` (sent below) has
+    // not been through the firewall yet, so we mirror its Pass/Ask/Block
+    // decision here ourselves rather than inserting unconditionally — the
+    // outbox must only ever hold items admitted to history (see
+    // `crate::outbox`'s security invariant). Sensitive items are excluded
+    // outright, matching the same invariant.
     if !sensitive {
-        outbox.lock().await.insert(
-            hash,
-            OutboxEntry {
-                payload: payload.clone(),
-                kind,
-                origin,
-                seq: event_seq,
-                created: Instant::now(),
-            },
-        );
+        let decision = state_rx
+            .borrow()
+            .firewall
+            .decide(kind, sensitive, Direction::Inbound);
+        let staged = OutboxEntry {
+            payload: payload.clone(),
+            kind,
+            origin,
+            seq: event_seq,
+            created: Instant::now(),
+        };
+        match decision {
+            Decision::Pass => {
+                outbox.lock().await.insert(hash, staged);
+            }
+            Decision::Defer => {
+                // Parked under `Ask`: not admitted yet. Stage it so
+                // `CmdOp::ResolvePending{allow: true}` can promote it later —
+                // see `PendingOutboxStage`'s doc comment.
+                outbox_stage.lock().await.insert(hash, staged);
+            }
+            Decision::Block => {}
+        }
     }
     let frames = build_item_frames(lamport, hash, kind, &payload, sensitive, origin, event_seq);
     forward_frames(transport, inflight, source, origin, hash, frames).await;
@@ -4259,6 +4475,12 @@ async fn complete_reassembled_item(
         sensitive,
         lamport,
         resync,
+        // FIX1: `source` is the direct sender of THIS hop (see `ack_source`
+        // above, which acks the same peer) — not necessarily the item's
+        // mesh `origin` for a forwarded/relayed item. That's the right peer
+        // to tag a parked `Ask` item with: it's who we'd need to hear from
+        // again, and whose revoke should drop this item.
+        peer_id: source,
     });
 }
 
@@ -4327,6 +4549,7 @@ async fn dispatch_inbound_frame(
     keystore_dir: Option<&std::path::PathBuf>,
     outbox: &SharedOutbox,
     pending_pulls: &PendingPulls,
+    outbox_stage: &PendingOutboxStage,
     state_rx: &watch::Receiver<State>,
     deferred_sas_confirm: &DeferredSasConfirm,
 ) {
@@ -4398,7 +4621,8 @@ async fn dispatch_inbound_frame(
 
                     complete_reassembled_item(
                         transport, inflight, mesh_seen, event_tx, peer_id, origin, event_seq,
-                        item.hash, kind, sensitive, lamport, full_payload, outbox, pending_pulls,
+                        item.hash, kind, sensitive, lamport, full_payload, outbox, outbox_stage,
+                        pending_pulls, state_rx,
                     )
                     .await;
                 }
@@ -4416,17 +4640,30 @@ async fn dispatch_inbound_frame(
                     // small enough to arrive as a single `ClipboardItem`
                     // frame and never touch `complete_reassembled_item`
                     // (that path only runs for chunked/reassembled items).
+                    // Outbox admission gate fix: same Pass/Ask/Block mirror as
+                    // `complete_reassembled_item` — see its doc comment.
                     if !item.sensitive {
-                        outbox.lock().await.insert(
-                            item.hash,
-                            OutboxEntry {
-                                payload: item.payload.clone(),
-                                kind: item.kind,
-                                origin: item.origin,
-                                seq: item.event_seq,
-                                created: Instant::now(),
-                            },
-                        );
+                        let decision =
+                            state_rx
+                                .borrow()
+                                .firewall
+                                .decide(item.kind, item.sensitive, Direction::Inbound);
+                        let staged = OutboxEntry {
+                            payload: item.payload.clone(),
+                            kind: item.kind,
+                            origin: item.origin,
+                            seq: item.event_seq,
+                            created: Instant::now(),
+                        };
+                        match decision {
+                            Decision::Pass => {
+                                outbox.lock().await.insert(item.hash, staged);
+                            }
+                            Decision::Defer => {
+                                outbox_stage.lock().await.insert(item.hash, staged);
+                            }
+                            Decision::Block => {}
+                        }
                     }
                     if let Ok(bytes) = fluxsync_proto::encode(&Frame {
                         version: PROTOCOL_VERSION,
@@ -4448,6 +4685,10 @@ async fn dispatch_inbound_frame(
                         sensitive: item.sensitive,
                         lamport: item.lamport,
                         resync,
+                        // FIX1: `peer_id` here is the direct session peer
+                        // this single-frame item arrived on (see the
+                        // `ack_source`-equivalent handling above).
+                        peer_id,
                     });
                 }
             }
@@ -4508,7 +4749,8 @@ async fn dispatch_inbound_frame(
 
                 complete_reassembled_item(
                     transport, inflight, mesh_seen, event_tx, peer_id, origin, event_seq,
-                    c.item_id, kind, sensitive, lamport, full_payload, outbox, pending_pulls,
+                    c.item_id, kind, sensitive, lamport, full_payload, outbox, outbox_stage,
+                    pending_pulls, state_rx,
                 )
                 .await;
             }
@@ -5049,6 +5291,29 @@ type SharedOutbox = Arc<Mutex<Outbox>>;
 /// Deliberately explicit tracking — never inferred from Lamport tick (0 on
 /// resync sends) or item age, both of which a legitimate item can also have.
 type PendingPulls = Arc<Mutex<HashMap<[u8; 32], HashMap<[u8; 32], Instant>>>>;
+
+/// Outbox admission gate: `OutboxEntry`s staged for an inbound item the
+/// firewall parked under `Ask`, keyed by content hash, awaiting
+/// `CmdOp::ResolvePending`. Never touched for a `Pass` (inserted straight
+/// into `SharedOutbox`) or a `Block` (dropped, nothing staged) — see
+/// `complete_reassembled_item` / `dispatch_inbound_frame`. An entry here is
+/// always resolved one way or another by the same `ResolvePending` that
+/// resolves the matching `fluxsync_core::State.pending` row, so this never
+/// outlives the user's decision; a security wipe additionally clears it
+/// alongside `SharedOutbox` (see the `vault_wipe_gen` handling in `run()`).
+///
+/// `(origin, seq)` ordering note: an inbound item's `origin`/`event_seq` are
+/// wire-carried, sender-assigned values (the origin device's own monotonic
+/// counter) — they identify the ORIGINATING event, not this device's
+/// admission of it, so they are captured unmodified at receive time and
+/// preserved as-is through staging to promotion; there is nothing to
+/// reassign at admission time. The outbound side is the mirror image and
+/// needed no change: `next_local_event_id()` is only called inside
+/// `dispatch`'s `Action::SendItem` arm, which for an `Ask`-deferred push
+/// already only fires once `ResolvePending{allow: true}` re-emits it — i.e.
+/// outbound seq allocation already happens at admission time, not at the
+/// original (parked) push.
+type PendingOutboxStage = Arc<Mutex<HashMap<[u8; 32], OutboxEntry>>>;
 
 /// How long a `ResyncPull` we sent stays "pending" before we give up
 /// expecting it and would treat a same-hash arrival as a fresh item instead.
@@ -5732,13 +5997,27 @@ async fn ipc_accept_loop(
     shutdown: CancellationToken,
 ) -> Result<()> {
     let mut clients = JoinSet::new();
+    // Bounds the number of concurrently-connected IPC clients so N local
+    // processes can't each hold a up-to-64-MiB in-flight line and scale the
+    // daemon's memory with connection count. Acquiring blocks (backpressure)
+    // once the bound is hit rather than dropping the connection — this is a
+    // local trusted socket, so a slow-to-accept client is preferable to a
+    // rejected one.
+    let accept_permits = Arc::new(Semaphore::new(32));
     loop {
         tokio::select! {
             biased;
             () = shutdown.cancelled() => break,
-            accept = server.accept() => {
-                let conn = match accept {
-                    Ok(c) => c,
+            // Acquiring the permit and accepting the connection live in the
+            // same arm so a shutdown mid-wait (whether blocked on the
+            // semaphore or on the accept itself) still cancels promptly.
+            accepted = async {
+                let permit = accept_permits.clone().acquire_owned().await.expect("semaphore never closed");
+                let conn = server.accept().await?;
+                Ok::<_, std::io::Error>((permit, conn))
+            } => {
+                let (permit, conn) = match accepted {
+                    Ok(pc) => pc,
                     Err(e) => { tracing::warn!(error = %e, "ipc accept"); continue; }
                 };
                 let cmd_tx = cmd_tx.clone();
@@ -5747,6 +6026,7 @@ async fn ipc_accept_loop(
                 let log_tail = log_tail.clone();
                 let client_shutdown = shutdown.clone();
                 clients.spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = handle_ipc_client(conn, cmd_tx, state_rx, logs_bcast_rx, log_tail, client_shutdown).await {
                         tracing::debug!(error = %e, "ipc client end");
                     }
@@ -6163,6 +6443,149 @@ mod tests {
         let _ = persister.await;
     }
 
+    /// FIX3: `sync_security_wipe_if_needed` (the driver's inline,
+    /// synchronous belt for the vault persister's async braces) must, by
+    /// the time it RETURNS — no polling needed — have both fully cleared
+    /// the resync outbox (real + `Ask`-staged) and deleted `history.enc`
+    /// from disk, exactly once per `vault_wipe_gen` advance. A call with no
+    /// gen change must touch neither.
+    #[tokio::test]
+    async fn sync_security_wipe_if_needed_clears_outbox_and_disk_synchronously() {
+        use super::{sync_security_wipe_if_needed, Outbox, OutboxEntry, PendingOutboxStage};
+        use crate::history_store;
+        use fluxsync_core::{App, Config, Event, HistoryItem, HistorySource, StubWallClock};
+        use fluxsync_proto::Kind;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use std::time::Instant;
+        use tokio::sync::Mutex;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = [0x22u8; 32];
+        // Seed a real on-disk vault, exactly like a running persister would
+        // have already written before the wipe.
+        let entry = history_store::VaultEntry {
+            item: HistoryItem {
+                kind: Kind::Text,
+                preview: "pre-wipe secret".into(),
+                time: "12:00".into(),
+                source: HistorySource::Local,
+                sensitive: false,
+                lamport: 1,
+                hash: "cc".repeat(32),
+                favorite: false,
+                resync: false,
+            },
+            created_ms: 1_000,
+        };
+        history_store::save(
+            dir.path(),
+            &key,
+            &[entry],
+            1_000,
+            history_store::DEFAULT_TTL_SECS,
+            history_store::DEFAULT_DISK_CAP,
+        )
+        .expect("seed on-disk vault");
+        assert!(
+            dir.path().join("history.enc").exists(),
+            "precondition: vault file must exist before the wipe"
+        );
+
+        let outbox = Arc::new(Mutex::new(Outbox::new()));
+        outbox.lock().await.insert(
+            [1u8; 32],
+            OutboxEntry {
+                payload: b"held item".to_vec(),
+                kind: Kind::Text,
+                origin: [9u8; 32],
+                seq: 1,
+                created: Instant::now(),
+            },
+        );
+        let outbox_stage: PendingOutboxStage = Arc::new(Mutex::new(HashMap::new()));
+        outbox_stage.lock().await.insert(
+            [2u8; 32],
+            OutboxEntry {
+                payload: b"staged item".to_vec(),
+                kind: Kind::Text,
+                origin: [9u8; 32],
+                seq: 2,
+                created: Instant::now(),
+            },
+        );
+
+        let mut app = App::new(Config::default());
+        let wall = StubWallClock::new("12:00", 1_000);
+        let mut last_wipe_gen = app.snapshot().vault_wipe_gen;
+        let dir_buf = dir.path().to_path_buf();
+
+        // No gen change yet: must be a complete no-op.
+        let wiped = sync_security_wipe_if_needed(
+            &app,
+            &mut last_wipe_gen,
+            &outbox,
+            &outbox_stage,
+            Some(&dir_buf),
+        )
+        .await;
+        assert!(!wiped, "must not fire when vault_wipe_gen hasn't advanced");
+        assert!(
+            outbox.lock().await.get([1u8; 32]).is_some(),
+            "an unrelated call must not touch the outbox"
+        );
+        assert!(
+            dir.path().join("history.enc").exists(),
+            "an unrelated call must not touch disk"
+        );
+
+        // Bump vault_wipe_gen. `ClearHistory` is the simplest reliable way to
+        // do this in a unit test; this test only exercises the driver's
+        // REACTION to the bump, not which fluxsync_core events cause one —
+        // that is fluxsync_core::app's own test coverage (and
+        // regression_vault_security_wipe.rs's TEST 1 for the real security
+        // triggers specifically).
+        app.handle(Event::ClearHistory { include_favorites: true }, &wall);
+        assert_eq!(app.snapshot().vault_wipe_gen, 1);
+
+        let wiped = sync_security_wipe_if_needed(
+            &app,
+            &mut last_wipe_gen,
+            &outbox,
+            &outbox_stage,
+            Some(&dir_buf),
+        )
+        .await;
+        assert!(wiped, "must fire once vault_wipe_gen advances");
+        assert_eq!(last_wipe_gen, 1, "must record the new generation");
+        assert!(
+            outbox.lock().await.is_empty(),
+            "the real outbox must be fully cleared"
+        );
+        assert!(
+            outbox_stage.lock().await.is_empty(),
+            "Ask-staged entries must be fully cleared too"
+        );
+        assert!(
+            !dir.path().join("history.enc").exists(),
+            "history.enc must already be gone from disk by the time this call \
+             returns — no polling/sleep needed, proving the clear is synchronous"
+        );
+
+        // A second call at the same (already-recorded) generation must be a
+        // no-op again — it must not re-run the disk clear or error out on an
+        // already-missing file.
+        let wiped_again = sync_security_wipe_if_needed(
+            &app,
+            &mut last_wipe_gen,
+            &outbox,
+            &outbox_stage,
+            Some(&dir_buf),
+        )
+        .await;
+        assert!(!wiped_again, "must not re-fire for a generation already handled");
+    }
+
     /// Phase 5: reassembly is namespaced per source peer, so two paired peers
     /// sending the same item_id get DISTINCT reassembly slots (no cross-peer
     /// chunk overwrite), while a given (peer, item_id) pair is stable.
@@ -6235,6 +6658,7 @@ mod tests {
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
             &outbox,
+            &Arc::new(Mutex::new(HashMap::new())),
             &Arc::new(Mutex::new(HashMap::new())),
             &state_rx,
             &Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -6328,6 +6752,7 @@ mod tests {
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
             &outbox,
+            &Arc::new(Mutex::new(HashMap::new())),
             &Arc::new(Mutex::new(HashMap::new())),
             &state_rx,
             &Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -6425,6 +6850,7 @@ mod tests {
             None,
             &Arc::new(Mutex::new(super::Outbox::new())),
             &Arc::new(Mutex::new(HashMap::new())),
+            &Arc::new(Mutex::new(HashMap::new())),
             &state_rx,
             &Arc::new(Mutex::new(std::collections::HashSet::new())),
         )
@@ -6511,6 +6937,7 @@ mod tests {
             &Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             None,
             &Arc::new(Mutex::new(super::Outbox::new())),
+            &Arc::new(Mutex::new(HashMap::new())),
             &Arc::new(Mutex::new(HashMap::new())),
             &state_rx,
             &deferred,
@@ -6623,6 +7050,13 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(1024);
         let outbox = Arc::new(Mutex::new(Outbox::new()));
         let pending_pulls = Arc::new(Mutex::new(HashMap::new()));
+        let outbox_stage = Arc::new(Mutex::new(HashMap::new()));
+        // Default (disabled) firewall decides Pass for any non-sensitive
+        // item, so this exercises the immediate-insert branch of the
+        // Pass/Ask/Block mirror in `complete_reassembled_item`.
+        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
+            &fluxsync_core::Config::default(),
+        ));
 
         let sensitive_hash = [0xAAu8; 32];
         complete_reassembled_item(
@@ -6639,7 +7073,9 @@ mod tests {
             0,
             b"secret".to_vec(),
             &outbox,
+            &outbox_stage,
             &pending_pulls,
+            &state_rx,
         )
         .await;
         assert!(
@@ -6662,7 +7098,9 @@ mod tests {
             0,
             b"hello".to_vec(),
             &outbox,
+            &outbox_stage,
             &pending_pulls,
+            &state_rx,
         )
         .await;
         assert!(
@@ -6695,6 +7133,10 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(1024);
         let outbox = Arc::new(Mutex::new(Outbox::new()));
         let pending_pulls = Arc::new(Mutex::new(HashMap::new()));
+        let outbox_stage = Arc::new(Mutex::new(HashMap::new()));
+        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
+            &fluxsync_core::Config::default(),
+        ));
 
         let sensitive_hash = [0xCCu8; 32];
         complete_reassembled_item(
@@ -6711,7 +7153,9 @@ mod tests {
             0,
             b"fake-png-secret".to_vec(),
             &outbox,
+            &outbox_stage,
             &pending_pulls,
+            &state_rx,
         )
         .await;
         assert!(
@@ -6734,12 +7178,138 @@ mod tests {
             0,
             b"fake-png-plain".to_vec(),
             &outbox,
+            &outbox_stage,
             &pending_pulls,
+            &state_rx,
         )
         .await;
         assert!(
             outbox.lock().await.get(plain_hash).is_some(),
             "non-sensitive image must enter the outbox"
+        );
+    }
+
+    /// FIX1 (P0 parked-payload leak), integration point (b): a revoked
+    /// peer's `PendingOutboxStage` entry — staged by the REAL
+    /// `complete_reassembled_item` admission-gate path when the firewall
+    /// parks an inbound item under `Ask` — must be purged by
+    /// `purge_dropped_pending_from_outbox_stage` once `fluxsync_core`
+    /// reports it dropped via `Event::PeerRevoked`'s `Action::
+    /// PendingDropped`. A DIFFERENT peer's staged entry must survive.
+    ///
+    /// This can't be proven as a daemon-level black-box IPC test: an
+    /// already-purged pending row and a leaked-but-orphaned
+    /// `PendingOutboxStage` entry are externally indistinguishable (neither
+    /// is ever promoted without a live `state.pending` row to approve, and
+    /// that row is gone in both cases) — the leak is a pure process-memory
+    /// residency issue. So this drives the exact real functions instead:
+    /// the daemon's own staging path (`complete_reassembled_item`) plus the
+    /// core's own revoke path (`App::handle(Event::PeerRevoked)`) plus the
+    /// daemon's own purge helper, wired together exactly as `run()`'s main
+    /// loop and `CmdOp::Revoke` do.
+    #[tokio::test]
+    async fn revoke_purges_only_that_peers_staged_outbox_entry() {
+        use super::{complete_reassembled_item, purge_dropped_pending_from_outbox_stage, Outbox};
+        use crate::transport::Transport;
+        use fluxsync_core::{
+            Action, App, Config, Event, FirewallPolicy, Rule, SeenSet, StubWallClock,
+        };
+        use fluxsync_proto::Kind;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::{mpsc, Mutex};
+
+        const PEER_A: [u8; 32] = [0xAAu8; 32];
+        const PEER_B: [u8; 32] = [0xBBu8; 32];
+        let hash_a = [1u8; 32];
+        let hash_b = [2u8; 32];
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind loopback transport");
+        let transport = Arc::new(transport);
+        let inflight = Arc::new(Mutex::new(HashMap::new()));
+        let mesh_seen = Arc::new(Mutex::new(SeenSet::default()));
+        let (event_tx, _event_rx) = mpsc::channel(1024);
+        let outbox = Arc::new(Mutex::new(Outbox::new()));
+        let pending_pulls = Arc::new(Mutex::new(HashMap::new()));
+        let outbox_stage = Arc::new(Mutex::new(HashMap::new()));
+
+        let firewall = FirewallPolicy {
+            enabled: true,
+            text: Rule::Ask,
+            ..FirewallPolicy::default()
+        };
+        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
+            &Config { firewall: firewall.clone(), ..Config::default() },
+        ));
+
+        // Real staging path: both items are Ask-deferred, so both land in
+        // `outbox_stage`, neither in the real `outbox`.
+        complete_reassembled_item(
+            &transport, &inflight, &mesh_seen, &event_tx, PEER_A, PEER_A, 1, hash_a, Kind::Text,
+            false, 0, b"secret-a".to_vec(), &outbox, &outbox_stage, &pending_pulls, &state_rx,
+        )
+        .await;
+        complete_reassembled_item(
+            &transport, &inflight, &mesh_seen, &event_tx, PEER_B, PEER_B, 1, hash_b, Kind::Text,
+            false, 0, b"secret-b".to_vec(), &outbox, &outbox_stage, &pending_pulls, &state_rx,
+        )
+        .await;
+        assert_eq!(
+            outbox_stage.lock().await.len(),
+            2,
+            "precondition: both peers' Ask-deferred items must be staged"
+        );
+        assert!(
+            outbox.lock().await.is_empty(),
+            "precondition: neither is admitted to the real outbox yet"
+        );
+
+        // Real core-side park: mirrors what the main loop's `app.handle`
+        // would have done with the `Event::FrameReceivedClipboard` that
+        // `complete_reassembled_item` sent via `event_tx` above.
+        let mut app = App::new(Config { firewall, ..Config::default() });
+        let wall = StubWallClock::new("12:00", 1_000);
+        // Distinct payloads per peer — the core content-dedup ring keys on
+        // the PAYLOAD, not the hash param, so two identical payloads here
+        // would make the second `handle` call a no-op duplicate and never
+        // reach the firewall park at all.
+        for (peer_id, hash, text) in [(PEER_A, hash_a, "irrelevant-a"), (PEER_B, hash_b, "irrelevant-b")] {
+            app.handle(
+                Event::FrameReceivedClipboard {
+                    peer_id,
+                    hash,
+                    kind: Kind::Text,
+                    payload: text.as_bytes().to_vec(),
+                    preview: text.into(),
+                    sensitive: false,
+                    lamport: 1,
+                    resync: false,
+                },
+                &wall,
+            );
+        }
+        assert_eq!(app.snapshot().pending.len(), 2, "precondition: both parked");
+
+        // Real revoke path + real purge helper.
+        let actions = app.handle(Event::PeerRevoked { peer_id: PEER_A }, &wall);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::PendingDropped { hashes } if hashes == &[hash_a])),
+            "PeerRevoked must report exactly A's dropped hash"
+        );
+        purge_dropped_pending_from_outbox_stage(&actions, &outbox_stage).await;
+
+        let stage = outbox_stage.lock().await;
+        assert!(
+            stage.get(&hash_a).is_none(),
+            "FIXED: A's revoked staged outbox entry must be purged"
+        );
+        assert!(
+            stage.get(&hash_b).is_some(),
+            "B's staged outbox entry must survive A's revoke"
         );
     }
 
@@ -6777,6 +7347,7 @@ mod tests {
         let peer_meta = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
         let outbox = Arc::new(Mutex::new(Outbox::new()));
         let pending_pulls = Arc::new(Mutex::new(HashMap::new()));
+        let outbox_stage = Arc::new(Mutex::new(HashMap::new()));
         let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
             &fluxsync_core::Config::default(),
         ));
@@ -6812,6 +7383,7 @@ mod tests {
             None,
             &outbox,
             &pending_pulls,
+            &outbox_stage,
             &state_rx,
             &Arc::new(Mutex::new(std::collections::HashSet::new())),
         )
@@ -6826,5 +7398,56 @@ mod tests {
         assert_eq!(entry.origin, [3u8; 32]);
         assert_eq!(entry.seq, 5);
         assert_eq!(entry.payload, b"hello resync");
+    }
+
+    /// `read_line_capped`'s bound is on the total line length AS READ FROM
+    /// THE WIRE, delimiter included (`bytes.len() + take > max` — the check
+    /// counts the newline). So a line whose content+`\n` together total
+    /// exactly `MAX_IPC_LINE` bytes is the largest accepted line, and one
+    /// byte more (content of `MAX_IPC_LINE` bytes, i.e. one longer, plus the
+    /// same trailing `\n`) is the smallest rejected one.
+    #[tokio::test]
+    async fn read_line_capped_accepts_exactly_the_cap() {
+        use super::{read_line_capped, MAX_IPC_LINE};
+
+        // Content is MAX_IPC_LINE - 1 bytes so content + '\n' == MAX_IPC_LINE.
+        let mut data = vec![b'a'; MAX_IPC_LINE - 1];
+        data.push(b'\n');
+        let mut reader = tokio::io::BufReader::new(data.as_slice());
+        let mut out = String::new();
+
+        let n = read_line_capped(&mut reader, &mut out, MAX_IPC_LINE)
+            .await
+            .expect("a line totalling exactly MAX_IPC_LINE bytes must be accepted");
+
+        assert_eq!(n, MAX_IPC_LINE, "accepted line must report its full byte count");
+        assert_eq!(out.len(), MAX_IPC_LINE);
+    }
+
+    /// One byte over the cap must be rejected with `InvalidData`, and the
+    /// caller's connection-teardown contract holds: `read_line_capped` never
+    /// returns a truncated `Ok` for an over-cap line. `handle_ipc_client`
+    /// propagates the `Err` via `?` and drops the connection on it, so a
+    /// caller must never be able to mistake a partial write into `out` for a
+    /// valid (if truncated) line — this asserts `out` is left untouched.
+    #[tokio::test]
+    async fn read_line_capped_rejects_one_byte_over_the_cap() {
+        use super::{read_line_capped, MAX_IPC_LINE};
+
+        // Content is MAX_IPC_LINE bytes so content + '\n' == MAX_IPC_LINE + 1.
+        let mut data = vec![b'a'; MAX_IPC_LINE];
+        data.push(b'\n');
+        let mut reader = tokio::io::BufReader::new(data.as_slice());
+        let mut out = String::new();
+
+        let err = read_line_capped(&mut reader, &mut out, MAX_IPC_LINE)
+            .await
+            .expect_err("a line totalling MAX_IPC_LINE + 1 bytes must be rejected");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            out.is_empty(),
+            "on error, read_line_capped must never have written a truncated line into `out`"
+        );
     }
 }

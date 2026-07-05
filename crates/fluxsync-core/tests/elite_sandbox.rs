@@ -37,6 +37,7 @@ mod elite_sandbox {
         // Advance the local Lamport clock far ahead.
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [1; 32],
                 kind: Kind::Text,
                 payload: "recent".to_string().into_bytes(),
@@ -53,6 +54,7 @@ mod elite_sandbox {
         // A frame from far in the past must NOT be rejected.
         let actions = app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [2; 32],
                 kind: Kind::Text,
                 payload: "old retransmit".to_string().into_bytes(),
@@ -93,6 +95,7 @@ mod elite_sandbox {
         let hash = [123u8; 32];
         let actions = app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash,
                 kind: Kind::Text,
                 payload: "First".to_string().into_bytes(),
@@ -111,6 +114,7 @@ mod elite_sandbox {
         // Receive the SAME item again (duplicate)
         let actions2 = app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash,
                 kind: Kind::Text,
                 payload: "First".to_string().into_bytes(),

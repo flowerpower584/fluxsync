@@ -675,6 +675,7 @@ fn test_20_full_offline_online_cycle_end_to_end() {
 
     let a_actions = a.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [0x02; 32],
             kind: Kind::Text,
             payload: "from android".to_string().into_bytes(),

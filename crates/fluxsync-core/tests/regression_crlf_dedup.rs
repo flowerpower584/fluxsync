@@ -96,6 +96,7 @@ fn crlf_inbound_then_lf_readback_is_suppressed() {
     //    pass the real CRLF payload.
     let inbound = app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [0; 32],
             kind: Kind::Text,
             payload: crlf.as_bytes().to_vec(),
@@ -156,6 +157,7 @@ fn control_identical_readback_is_suppressed() {
 
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [0; 32],
             kind: Kind::Text,
             payload: text.as_bytes().to_vec(),

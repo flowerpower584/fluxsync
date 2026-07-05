@@ -30,6 +30,10 @@ struct PendingPayload {
     payload: Vec<u8>,
     sensitive: bool,
     hash: [u8; 32],
+    /// FIX1 (P0 parked-payload leak): the peer this item is tied to — the
+    /// sender for an Inbound item, `None` for an Outbound one (see
+    /// `PendingItem::peer_id`, the serializable mirror of this field).
+    peer_id: Option<[u8; 32]>,
 }
 
 const HISTORY_SOFT_CAP: usize = 50;
@@ -216,7 +220,7 @@ impl App {
     /// KEPT so a held/blocked peer stops retransmitting (same contract as the
     /// dedup-suppress path).
     fn apply_firewall(&mut self, event: &Event, actions: &mut Vec<Action>) {
-        let (kind, sensitive, dir, hash, payload, preview) = match event {
+        let (kind, sensitive, dir, hash, payload, preview, peer_id) = match event {
             Event::LocalClipboardChange {
                 kind,
                 sensitive,
@@ -224,15 +228,24 @@ impl App {
                 payload,
                 preview,
                 ..
-            } => (*kind, *sensitive, Direction::Outbound, *hash, payload, preview),
+            } => (*kind, *sensitive, Direction::Outbound, *hash, payload, preview, None),
             Event::FrameReceivedClipboard {
                 kind,
                 sensitive,
                 hash,
                 payload,
                 preview,
+                peer_id,
                 ..
-            } => (*kind, *sensitive, Direction::Inbound, *hash, payload, preview),
+            } => (
+                *kind,
+                *sensitive,
+                Direction::Inbound,
+                *hash,
+                payload,
+                preview,
+                Some(*peer_id),
+            ),
             _ => return,
         };
         match self.config.firewall.decide(kind, sensitive, dir) {
@@ -240,7 +253,7 @@ impl App {
             Decision::Block => Self::strip_sync_action(dir, actions),
             Decision::Defer => {
                 Self::strip_sync_action(dir, actions);
-                self.park_pending(dir, kind, sensitive, hash, payload, preview);
+                self.park_pending(dir, kind, sensitive, hash, payload, preview, peer_id);
             }
         }
     }
@@ -256,6 +269,7 @@ impl App {
     /// Park an `Ask`-held item: record the display half in `state.pending` and
     /// the payload half in `pending_payloads`, both keyed by hex content hash.
     /// Re-parking the same hash is a no-op (idempotent on retransmits).
+    #[allow(clippy::too_many_arguments)] // one field per `PendingPayload`/`PendingItem` column.
     fn park_pending(
         &mut self,
         dir: Direction,
@@ -264,6 +278,7 @@ impl App {
         hash: [u8; 32],
         payload: &[u8],
         preview: &str,
+        peer_id: Option<[u8; 32]>,
     ) {
         let key = hex32(&hash);
         if self.pending_payloads.contains_key(&key) {
@@ -277,6 +292,7 @@ impl App {
                 payload: payload.to_vec(),
                 sensitive,
                 hash,
+                peer_id,
             },
         );
         self.state.pending.push(PendingItem {
@@ -285,6 +301,7 @@ impl App {
             preview: preview.trim().to_string(),
             sensitive,
             direction: dir,
+            peer_id: peer_id.map(|p| hex32(&p)),
         });
     }
 
@@ -320,9 +337,47 @@ impl App {
     /// on is gone there is nobody to deliver them to. Without this they leak:
     /// repeated park+unpair cycles accumulate orphaned rows in memory and in
     /// every client's UI forever (no code path else clears them).
-    fn drop_pending(&mut self) {
+    ///
+    /// Wipe-ALL sibling of [`App::drop_pending_for`] — kept for the four
+    /// existing callers (manual unpair, untrusted-peer-seen, ghost-timeout,
+    /// FS-046 peer-swap), all of which tear down the ENTIRE peer
+    /// relationship, not just one peer among several.
+    fn drop_pending_all(&mut self) {
         self.state.pending.clear();
         self.pending_payloads.clear();
+    }
+
+    /// FIX1 (P0 parked-payload leak): drop only the parked `Ask` items tied
+    /// to `peer_id` — the selective sibling of [`App::drop_pending_all`].
+    /// Used when exactly one peer is revoked or times out (`Event::
+    /// PeerRevoked`) rather than every trusted peer being torn down: an item
+    /// a DIFFERENT peer sent (or is awaiting approval to receive) must
+    /// survive. An Outbound (locally-copied) item is never tied to a
+    /// specific peer in today's single-primary-peer model
+    /// (`PendingPayload::peer_id` is `None` for it) and so is never dropped
+    /// here — only `drop_pending_all` clears those.
+    ///
+    /// Returns the raw content hashes of every dropped item so the daemon
+    /// can also purge its `PendingOutboxStage` (see `Action::PendingDropped`
+    /// and `driver.rs`'s `purge_dropped_pending_from_outbox_stage`) — that
+    /// staged outbox entry has no other trigger to clear it once the
+    /// matching `pending` row is gone.
+    fn drop_pending_for(&mut self, peer_id: [u8; 32]) -> Vec<[u8; 32]> {
+        let mut dropped_hashes = Vec::new();
+        let mut dropped_keys = Vec::new();
+        self.pending_payloads.retain(|key, p| {
+            if p.peer_id == Some(peer_id) {
+                dropped_hashes.push(p.hash);
+                dropped_keys.push(key.clone());
+                false
+            } else {
+                true
+            }
+        });
+        self.state
+            .pending
+            .retain(|p| !dropped_keys.contains(&p.hash));
+        dropped_hashes
     }
 
     // ── FluxMesh coordinator API (Phase 1 foundation) ───────────────────
@@ -462,6 +517,10 @@ impl App {
         // relay, and the Ack all stay intact — see the arm below and the
         // strip site right after `apply_firewall`.
         let mut suppress_resync_apply = false;
+        // FIX1 (P0 parked-payload leak): filled by `Event::PeerRevoked`
+        // below, read post-transition to append `Action::PendingDropped` so
+        // the daemon can purge the matching `PendingOutboxStage` entries.
+        let mut pending_dropped: Vec<[u8; 32]> = Vec::new();
         match &event {
             Event::ToggleOn => self.state.on = true,
             Event::ToggleOff => self.state.on = false,
@@ -482,7 +541,7 @@ impl App {
                     if self.last_paired_peer_id != [0u8; 32] && *peer_id != self.last_paired_peer_id
                     {
                         self.state.history.clear();
-                        self.drop_pending();
+                        self.drop_pending_all();
                         self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
                     }
                     self.last_paired_peer_id = *peer_id;
@@ -540,6 +599,7 @@ impl App {
                 sensitive,
                 lamport,
                 resync,
+                ..
             } => {
                 suppress_resync_apply = *resync;
                 // Strip leading/trailing whitespace from the preview
@@ -556,12 +616,24 @@ impl App {
                 // CRLF-canonicalize text payloads (not binary images) so an
                 // LF/CRLF line-ending difference can't defeat dedup and
                 // ping-pong the item back to the peer.
+                //
+                // FIX2: `String::from_utf8_lossy` used to replace any
+                // invalid byte with U+FFFD, so two DISTINCT invalid-UTF-8
+                // payloads that only differ in their invalid byte(s) (e.g.
+                // `[0xFF, b'h', b'e', ...]` vs `[0xFE, b'h', b'e', ...]`)
+                // canonicalized to the IDENTICAL lossy string and collided
+                // in the ring — the second was silently dropped as a
+                // duplicate (still Ack'd, never delivered). Hash the RAW
+                // bytes instead whenever the payload isn't valid UTF-8, so
+                // distinct invalid payloads can never collide; valid UTF-8
+                // text still canonicalizes exactly as before.
                 let computed = if matches!(kind, Kind::Image) {
                     DedupRing::hash(payload)
                 } else {
-                    DedupRing::hash(
-                        crate::canon_text(&String::from_utf8_lossy(payload)).as_bytes(),
-                    )
+                    match std::str::from_utf8(payload) {
+                        Ok(text) => DedupRing::hash(crate::canon_text(text).as_bytes()),
+                        Err(_) => DedupRing::hash(payload),
+                    }
                 };
 
                 // Dedup by content hash. `observe` returns false when this
@@ -650,7 +722,7 @@ impl App {
                 self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
                 self.state.history.clear();
-                self.drop_pending();
+                self.drop_pending_all();
                 self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
                 self.state.sas_phase = "idle".to_string();
             }
@@ -664,7 +736,7 @@ impl App {
                 self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
                 self.state.history.clear();
-                self.drop_pending();
+                self.drop_pending_all();
                 self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
                 self.state.sas_phase = "idle".to_string();
             }
@@ -685,7 +757,7 @@ impl App {
                 // History is deliberately KEPT (same-device reconnect resumes
                 // it), but parked Ask items are dropped: the peer they targeted
                 // is gone, so they would otherwise leak forever.
-                self.drop_pending();
+                self.drop_pending_all();
                 self.state.sas_phase = "idle".to_string();
             }
             Event::SasPairingStarted => {
@@ -737,6 +809,9 @@ impl App {
                 // instead of risking a stale-cache favorite resurrection.
                 self.state.vault_wipe_gen += 1;
             }
+            Event::PeerRevoked { peer_id } => {
+                pending_dropped = self.drop_pending_for(*peer_id);
+            }
             _ => {}
         }
 
@@ -759,6 +834,15 @@ impl App {
         // No-op while the firewall is disabled (the default) → behaviour
         // identical to pre-firewall.
         self.apply_firewall(&event, &mut actions);
+
+        // FIX1 (P0 parked-payload leak): tell the daemon which content
+        // hashes just left the pending queues so it can purge the matching
+        // `PendingOutboxStage` staged entries too (see `Event::PeerRevoked`).
+        if !pending_dropped.is_empty() {
+            actions.push(Action::PendingDropped {
+                hashes: pending_dropped,
+            });
+        }
 
         // resync-1: an item delivered in response to OUR ResyncPull must
         // never silently replace the user's current OS clipboard — it is
@@ -845,6 +929,7 @@ impl App {
                 | Event::SasPeerConfirmed
                 | Event::SasPeerRejected
                 | Event::SasReset
+                | Event::PeerRevoked { .. }
         ) && !actions.contains(&Action::EmitState)
         {
             actions.push(Action::EmitState);
@@ -881,9 +966,38 @@ impl App {
     /// before the daemon serves any state, so the first snapshot already
     /// carries the restored list. `items` are newest-first; the list is
     /// capped to the in-memory soft cap.
+    ///
+    /// FIX3 (dedup ring rehydration): also seeds `self.dedup` from the
+    /// restored items, so a genuine echo round-trip received right after a
+    /// restart (before any live copy re-primes the ring) is still deduped
+    /// instead of ping-ponging once. `history_store::VaultEntry` persists
+    /// only the display `HistoryItem` (kind/preview/hash/…), never the raw
+    /// payload — `preview` is a truncated label, not the original bytes — so
+    /// there is nothing to recompute a fresh canon/raw-bytes digest (FIX2)
+    /// from. The persisted `hash` field IS already the correct ring key,
+    /// though: for a `HistorySource::Local` item it is `hex32` of the exact
+    /// same digest `self.dedup.observe` was seeded with at capture time (see
+    /// the `Event::LocalClipboardChange` arm above); for a
+    /// `HistorySource::Remote` item it is the sender's own equivalent
+    /// digest for that content. So the stored hash is used as-is rather
+    /// than recomputed — recomputation is not just unnecessary here, it is
+    /// impossible without the original payload.
+    ///
+    /// Capacity-respecting: only the newest `self.dedup.capacity()` items
+    /// are seeded (history is already newest-first, so `take` keeps the
+    /// newest when there are more favorites than the ring can hold), fed
+    /// oldest-of-that-set first so the ring's FIFO eviction order after
+    /// restart matches a normal live run (the true oldest gets evicted
+    /// first on the next new item, not an arbitrary one).
     pub fn restore_history(&mut self, mut items: Vec<HistoryItem>) {
         cap_history_keeping_favorites(&mut items);
         self.state.history = items;
+        let capacity = self.dedup.capacity();
+        for item in self.state.history.iter().take(capacity).rev() {
+            if let Some(bytes) = hex32_decode(&item.hash) {
+                self.dedup.observe(ContentHash::from_blake3(bytes));
+            }
+        }
     }
 
     fn phase_for_policy_ext(&self, fsm_next: Phase) -> Phase {
@@ -935,6 +1049,28 @@ fn hex32(bytes: &[u8; 32]) -> String {
         s.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap());
     }
     s
+}
+
+/// FIX3 (dedup ring rehydration): inverse of `hex32`. `None` on any
+/// malformed input (wrong length, non-hex digit) — a persisted hash that
+/// fails to parse is simply not seeded into the ring rather than panicking;
+/// restored history is best-effort, never boot-fatal.
+fn hex32_decode(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        let hi = (chunk[0] as char).to_digit(16)?;
+        let lo = (chunk[1] as char).to_digit(16)?;
+        // Each nibble is 0..=15, so the combined byte is always 0..=255 —
+        // lossless despite the lint.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            out[i] = ((hi << 4) | lo) as u8;
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -1020,6 +1156,7 @@ mod tests {
         // Populate history (an item the mesh already synced).
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [1; 32],
                 kind: Kind::Text,
                 payload: b"hi".to_vec(),
@@ -1431,6 +1568,7 @@ mod tests {
         );
         let actions = app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [4; 32],
                 kind: Kind::Text,
                 payload: "Bonjour".to_string().into_bytes(),
@@ -1472,6 +1610,7 @@ mod tests {
         // A first frame advances our Lamport clock far ahead.
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [1; 32],
                 kind: Kind::Text,
                 payload: "recent".to_string().into_bytes(),
@@ -1487,6 +1626,7 @@ mod tests {
         // accepted — Noise nonces and content-hash dedup cover replay.
         let actions = app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [2; 32],
                 kind: Kind::Text,
                 payload: "old retransmit".to_string().into_bytes(),
@@ -1530,6 +1670,7 @@ mod tests {
         for i in 0..60u8 {
             app.handle(
                 Event::FrameReceivedClipboard {
+                    peer_id: [0u8; 32],
                     hash: [i; 32],
                     kind: Kind::Text,
                     payload: format!("item-{i}").into_bytes(),
@@ -1704,6 +1845,7 @@ mod tests {
         app.set_firewall(fw_text(Rule::Ask));
         let acts = app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [8; 32],
                 kind: Kind::Text,
                 payload: b"from peer".to_vec(),
@@ -1785,6 +1927,7 @@ mod tests {
         app.set_firewall(fw_text(Rule::Deny));
         let acts = app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [5; 32],
                 kind: Kind::Text,
                 payload: b"from peer".to_vec(),
@@ -1812,6 +1955,7 @@ mod tests {
         app.set_firewall(fw_text(Rule::Allow));
         let acts = app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [6; 32],
                 kind: Kind::Text,
                 payload: b"from peer".to_vec(),

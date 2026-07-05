@@ -95,6 +95,7 @@ fn the_time_paradox_test() {
     // Peer sends a frame with Lamport 100
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [1; 32],
             kind: Kind::Text,
             payload: "Future".to_string().into_bytes(),
@@ -111,6 +112,7 @@ fn the_time_paradox_test() {
     // Peer sends a frame with Lamport 10 (THE PAST!)
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [2; 32],
             kind: Kind::Text,
             payload: "Past".to_string().into_bytes(),
@@ -203,6 +205,7 @@ fn history_spam_test() {
     for i in 0..1000 {
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [i as u8; 32],
                 kind: Kind::Text,
                 payload: format!("item {i}").into_bytes(),
@@ -272,6 +275,7 @@ fn the_duplicate_history_bug_test() {
     // Receive same item twice (e.g. retry because ACK lost)
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash,
             kind: Kind::Text,
             payload: "Duplicate Content".to_string().into_bytes(),
@@ -286,6 +290,7 @@ fn the_duplicate_history_bug_test() {
 
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash,
             kind: Kind::Text,
             payload: "Duplicate Content".to_string().into_bytes(),
@@ -323,6 +328,7 @@ fn the_out_of_order_history_test() {
     // Message 2 arrives first (Network jitter)
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [2; 32],
             kind: Kind::Text,
             payload: "Message 2".to_string().into_bytes(),
@@ -338,6 +344,7 @@ fn the_out_of_order_history_test() {
     // Message 1 arrives later
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [1; 32],
             kind: Kind::Text,
             payload: "Message 1".to_string().into_bytes(),
@@ -426,6 +433,7 @@ fn memory_and_cpu_stress_test() {
     for i in 0..50 {
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [i as u8; 32],
                 kind: Kind::Text,
                 payload: large_string.clone().into_bytes(),

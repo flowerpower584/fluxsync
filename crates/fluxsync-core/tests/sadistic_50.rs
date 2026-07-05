@@ -183,6 +183,7 @@ fn test_06_duplicate_hash_poisoning() {
     let hash = [0xEE; 32];
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash,
             kind: Kind::Text,
             payload: "Real".to_string().into_bytes(),
@@ -196,6 +197,7 @@ fn test_06_duplicate_hash_poisoning() {
     );
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash,
             kind: Kind::Text,
             payload: "Fake/Poison".to_string().into_bytes(),
@@ -236,6 +238,7 @@ fn test_07_clipboard_bomb_performance() {
     for i in 0..50 {
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [i as u8; 32],
                 kind: Kind::Text,
                 payload: bomb.clone().into_bytes(),
@@ -306,6 +309,7 @@ fn test_09_lamport_jump_to_max() {
     // Receive item from "Future" (u64 max)
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [1; 32],
             kind: Kind::Text,
             payload: "End of Time".to_string().into_bytes(),
@@ -350,6 +354,7 @@ fn test_10_negative_lamport_regression() {
 
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [1; 32],
             kind: Kind::Text,
             payload: "A".to_string().into_bytes(),
@@ -364,6 +369,7 @@ fn test_10_negative_lamport_regression() {
     // Malicious peer tries to reset clock to 0
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [2; 32],
             kind: Kind::Text,
             payload: "B".to_string().into_bytes(),
@@ -464,6 +470,7 @@ fn test_15_empty_payload_integrity() {
     app.handle(Event::HandshakeOk, &wall);
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [0; 32],
             kind: Kind::Text,
             payload: Vec::new(),
@@ -501,6 +508,7 @@ fn test_16_history_rotation_at_limit() {
     for i in 0..50 {
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [i as u8; 32],
                 kind: Kind::Text,
                 payload: format!("Old {i}").into_bytes(),
@@ -519,6 +527,7 @@ fn test_16_history_rotation_at_limit() {
     // Add 1 more item. Should evict "Old 0"
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [99; 32],
             kind: Kind::Text,
             payload: "Fresh".to_string().into_bytes(),
@@ -555,6 +564,7 @@ fn test_17_dedup_collision_resistance() {
     let hash = [0xDE; 32];
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash,
             kind: Kind::Text,
             payload: "Content A".to_string().into_bytes(),
@@ -568,6 +578,7 @@ fn test_17_dedup_collision_resistance() {
     );
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash,
             kind: Kind::Text,
             payload: "Content B".to_string().into_bytes(),
@@ -604,6 +615,7 @@ fn test_18_lamport_clock_causality_violation() {
     // Send 3 items with decreasing Lamport clocks (impossible in a real system)
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [1; 32],
             kind: Kind::Text,
             payload: "T3".to_string().into_bytes(),
@@ -617,6 +629,7 @@ fn test_18_lamport_clock_causality_violation() {
     );
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [2; 32],
             kind: Kind::Text,
             payload: "T2".to_string().into_bytes(),
@@ -630,6 +643,7 @@ fn test_18_lamport_clock_causality_violation() {
     );
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [3; 32],
             kind: Kind::Text,
             payload: "T1".to_string().into_bytes(),
@@ -695,6 +709,7 @@ fn test_20_null_byte_in_preview() {
     let malicious = "Hello\0World\0Sadistic".to_string();
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [1; 32],
             kind: Kind::Text,
             payload: malicious.clone().into_bytes(),
@@ -726,6 +741,7 @@ fn test_21_large_history_unpair_repair_cycle() {
     for i in 0..10 {
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [i; 32],
                 kind: Kind::Text,
                 payload: format!("P1-{i}").into_bytes(),
@@ -825,6 +841,7 @@ fn test_25_local_clipboard_same_as_peer_ack_loop_prevention() {
     // 1. Receive from peer
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash,
             kind: Kind::Text,
             payload: "Shared".to_string().into_bytes(),
@@ -955,6 +972,7 @@ fn test_30_simulated_sha256_poisoning_in_history() {
     // Peer sends same hash with "Poison"
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash,
             kind: Kind::Text,
             payload: "Poison".to_string().into_bytes(),
@@ -1049,6 +1067,7 @@ fn test_34_manual_unpair_resets_lamport_clock() {
 
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [1; 32],
             kind: Kind::Text,
             payload: "X".to_string().into_bytes(),
@@ -1084,6 +1103,7 @@ fn test_35_very_long_preview_truncation() {
     let long_preview = "A".repeat(1_000_000); // 1MB
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [1; 32],
             kind: Kind::Text,
             payload: long_preview.clone().into_bytes(),
@@ -1121,6 +1141,7 @@ fn test_36_malformed_wall_clock_time() {
 
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: [1; 32],
             kind: Kind::Text,
             payload: "X".to_string().into_bytes(),
@@ -1200,6 +1221,7 @@ fn test_39_sensitive_data_then_replay_attack() {
     // 2. Malicious peer tries to REPLAY the same secret but via FrameReceived (which doesn't check sensitivity!)
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash: real,
             kind: Kind::Text,
             payload: "MOCK_STRIPE_KEY_REDACTED".to_string().into_bytes(),
@@ -1329,6 +1351,7 @@ fn test_46_dedup_eviction_and_reentry() {
     let hash = [0x99; 32];
     app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash,
             kind: Kind::Text,
             payload: "A".to_string().into_bytes(),
@@ -1345,6 +1368,7 @@ fn test_46_dedup_eviction_and_reentry() {
     for i in 0..50 {
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [i as u8; 32],
                 kind: Kind::Text,
                 payload: "B".to_string().into_bytes(),
@@ -1361,6 +1385,7 @@ fn test_46_dedup_eviction_and_reentry() {
     // Now re-send hash [0x99]. It should be accepted again.
     let actions = app.handle(
         Event::FrameReceivedClipboard {
+            peer_id: [0u8; 32],
             hash,
             kind: Kind::Text,
             payload: "A".to_string().into_bytes(),
@@ -1392,6 +1417,7 @@ fn test_47_frozen_wall_clock() {
     for i in 0..10 {
         app.handle(
             Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
                 hash: [i as u8; 32],
                 kind: Kind::Text,
                 payload: "X".to_string().into_bytes(),

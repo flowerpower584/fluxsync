@@ -74,6 +74,15 @@ pub enum Event {
         /// OS clipboard on their behalf. See `App::handle`'s post-transition
         /// `Action::WriteClipboard` strip.
         resync: bool,
+        /// FIX1 (P0 parked-payload leak): the peer id of the session this
+        /// frame arrived on. The driver knows this at every dispatch site —
+        /// including the reassembled-chunk path, where it's the direct
+        /// sender of this hop, not necessarily the item's mesh `origin`.
+        /// Threaded through so a firewall `Ask` park (`apply_firewall`) can
+        /// tag the parked item with the peer that sent it, letting a later
+        /// `Event::PeerRevoked` drop only that peer's parked items instead of
+        /// every pending item in the daemon (see `App::drop_pending_for`).
+        peer_id: [u8; 32],
     },
     Reconnect,
     /// FluxMesh Phase 3: a non-primary mesh peer joined, left, or updated its
@@ -144,6 +153,16 @@ pub enum Event {
     /// The pending reaper revoked an unconfirmed pair after the 90s
     /// pairing window expired. Resets `sas_phase` to `"idle"`.
     SasReset,
+    /// FIX1 (P0 parked-payload leak): `peer_id` was revoked (explicit
+    /// `CmdOp::Revoke`, primary or secondary) or timed out (silent-secondary
+    /// heartbeat failure). Drops only THIS peer's parked `Ask` items via
+    /// `App::drop_pending_for` — unlike `PeerLost` (a transient disconnect,
+    /// which must leave pending Asks alone so a wifi blip doesn't destroy a
+    /// user's in-flight decision), a revoke/timeout is permanent: nobody is
+    /// left to deliver an inbound item to, or to receive an outbound one.
+    PeerRevoked {
+        peer_id: [u8; 32],
+    },
 }
 
 /// Side-effect commands the daemon must execute. The FSM never performs
@@ -195,6 +214,13 @@ pub enum Action {
     /// touch the OS clipboard. History insertion, the vault persist it
     /// triggers, mesh relay, and the Ack are unaffected; see `App::handle`.
     ResyncApplySuppressed,
+    /// FIX1 (P0 parked-payload leak): `Event::PeerRevoked` dropped these
+    /// content hashes from the pending queues via `drop_pending_for`. Signal
+    /// only — the FSM never touches I/O — so the daemon can also purge the
+    /// matching `PendingOutboxStage` staged entries (see `driver.rs`'s
+    /// `purge_dropped_pending_from_outbox_stage`); without this they would
+    /// otherwise outlive the `state.pending` row they mirrored.
+    PendingDropped { hashes: Vec<[u8; 32]> },
 }
 
 /// A friendly log entry. Routed both to `tracing` (structured) and to the

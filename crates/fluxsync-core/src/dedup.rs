@@ -105,6 +105,14 @@ impl DedupRing {
         self.inner.is_empty()
     }
 
+    /// Configured capacity (see [`DedupRing::new`]). Exposed so a caller
+    /// seeding the ring from persisted state (`App::restore_history`) can
+    /// bound how many entries it feeds in without duplicating the constant.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Compute a BLAKE3 hash of `bytes` for use with `observe`. Centralized
     /// so producers can't accidentally use a different hash.
     #[must_use]

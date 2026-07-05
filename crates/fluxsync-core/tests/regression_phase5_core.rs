@@ -59,6 +59,7 @@ fn local_change(n: u8, lamport: u64) -> Event {
 
 fn inbound_text(n: u8, lamport: u64) -> Event {
     Event::FrameReceivedClipboard {
+        peer_id: [0u8; 32],
         hash: [n; 32],
         kind: Kind::Text,
         payload: format!("peer-{n}").into_bytes(),

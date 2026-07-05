@@ -18,6 +18,16 @@
 //! retention beyond the single send — callers must filter `sensitive` items
 //! out before calling [`Outbox::insert`]. This module does not and cannot
 //! enforce that itself; it trusts the caller.
+//!
+//! **This buffer only ever holds items already admitted to history.** A
+//! clipboard firewall (`Ask`/`Block`) decision runs before an item is
+//! recorded to `State.history` (see `fluxsync_core::App::handle`); callers
+//! must mirror that gate here — insert on an immediate `Pass`, or on a
+//! deferred `Ask` item only once the user approves it via
+//! `ResolvePending{allow: true}`, and never for a `Block`/denied item. See
+//! `driver.rs`'s `complete_reassembled_item`, `dispatch_inbound_frame`, and
+//! `CmdOp::ResolvePending` handling for where that gate is enforced, and
+//! `Outbox::insert`'s doc comment below for the exact contract.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -27,8 +37,11 @@ use std::time::{Duration, Instant};
 pub const MAX_ITEMS: usize = 16;
 
 /// Maximum combined payload bytes retained at once. Oldest evicted first
-/// once exceeded, same as [`MAX_ITEMS`].
-pub const MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+/// once exceeded, same as [`MAX_ITEMS`]. Must be >= `fluxsync_proto::MAX_PAYLOAD`
+/// — otherwise a single legal max-size item would immediately self-evict via
+/// `evict_over_caps` right after its own insert, silently breaking resync for
+/// every item near the size cap.
+pub const MAX_TOTAL_BYTES: usize = 2 * fluxsync_proto::MAX_PAYLOAD;
 
 /// Default retention window: an item older than this is dropped lazily
 /// (on the next insert or read) rather than proactively. 24 hours — long
@@ -102,6 +115,11 @@ impl Outbox {
     /// entry — removes it (so the re-insert both replaces the entry and
     /// moves it to newest), then appends the new entry and evicts the
     /// oldest entries until both [`MAX_ITEMS`] and [`MAX_TOTAL_BYTES`] hold.
+    ///
+    /// Contract (see the module doc's security invariant): callers must only
+    /// call this for an item already admitted to `State.history` — an
+    /// immediate firewall `Pass`, or a parked `Ask` item once the user
+    /// approves it. Never call this for a `Block`ed or denied item.
     pub fn insert(&mut self, hash: [u8; 32], entry: Entry) {
         self.purge_expired();
         self.remove(hash);
@@ -200,8 +218,25 @@ impl Outbox {
             };
             if let Some(e) = self.entries.remove(&oldest) {
                 self.total_bytes = self.total_bytes.saturating_sub(e.payload.len());
+                tracing::debug!(
+                    hash = ?hex::encode(oldest),
+                    bytes = e.payload.len(),
+                    remaining = self.order.len(),
+                    "outbox: evicted oldest entry over cap"
+                );
             }
         }
+    }
+
+    /// Unconditionally drop every entry. Used on a security wipe
+    /// (untrusted-peer, ghost-timeout, peer-swap) — see `driver.rs`'s
+    /// `vault_wipe_gen` handling — where the whole outbox must not outlive
+    /// the in-memory/on-disk history it mirrors, not just the hashes that
+    /// happened to be in `State.history` at the time.
+    pub fn clear_all(&mut self) {
+        self.order.clear();
+        self.entries.clear();
+        self.total_bytes = 0;
     }
 }
 

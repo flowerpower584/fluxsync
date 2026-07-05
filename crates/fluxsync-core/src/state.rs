@@ -118,6 +118,18 @@ pub struct PendingItem {
     pub sensitive: bool,
     /// Inbound (awaiting apply) or Outbound (awaiting send).
     pub direction: Direction,
+    /// FIX1 (P0 parked-payload leak): hex-encoded id of the peer this item
+    /// is tied to — the sender, for an Inbound item. `None` for an Outbound
+    /// item (locally copied; not tied to a specific peer in today's
+    /// single-primary-peer model) or for an older daemon build that hadn't
+    /// stamped one yet. Lets `App::drop_pending_for` selectively clear one
+    /// revoked peer's parked items without wiping every other peer's.
+    /// `#[serde(default)]` keeps older State JSON (pre-this-field)
+    /// deserializing; clients that don't recognize the key ignore it
+    /// (verified tolerant: macOS/linux tray JS, Android's `org.json`-based
+    /// `parsePending`).
+    #[serde(default)]
+    pub peer_id: Option<String>,
 }
 
 /// One mesh peer in the `State.peers` list (FluxMesh Phase 3). A flat
