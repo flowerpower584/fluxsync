@@ -551,6 +551,7 @@ impl FluxsyncHandle {
     /// paired device linked. Drives the per-secondary "Unpair" button in
     /// the mesh peer list. `unpair` (above) tears down only the active
     /// primary; this is the surgical single-peer version.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn revoke(&self, peer_id: String) -> Result<(), FluxError> {
         self.runtime
             .block_on(send_cmd(
@@ -762,6 +763,47 @@ async fn wait_for_socket(path: &PathBuf, deadline: std::time::Duration) -> anyho
 /// fires) would block the Android UI thread indefinitely → ANR.
 const IPC_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The daemon caps inbound IPC lines at 64 MiB (`fluxsyncd`'s `MAX_IPC_LINE`
+/// in `driver.rs`). Mirror that cap on the client side so a wedged or
+/// hostile daemon response can't grow our read buffer unbounded — this
+/// matters most for `state`/`logs` subscriber loops, which stay connected
+/// and read continuously.
+const MAX_IPC_LINE: usize = 64 * 1024 * 1024;
+
+/// Capped line read, mirroring `fluxsyncd`'s own `read_line_capped`: reads
+/// up to `MAX_IPC_LINE` bytes looking for a newline, erroring out instead of
+/// growing `out` forever if the peer never sends one.
+async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    out: &mut String,
+) -> std::io::Result<usize> {
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            break; // EOF
+        }
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        if bytes.len() + take > MAX_IPC_LINE {
+            reader.consume(take);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "IPC response line exceeds max length",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if done {
+            break;
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(&bytes));
+    Ok(bytes.len())
+}
+
 async fn send_cmd(path: &PathBuf, request: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let round_trip = async {
         let stream = UnixStream::connect(path).await?;
@@ -772,7 +814,7 @@ async fn send_cmd(path: &PathBuf, request: serde_json::Value) -> anyhow::Result<
         write.flush().await?;
         let mut reader = BufReader::new(read);
         let mut buf = String::new();
-        reader.read_line(&mut buf).await?;
+        read_line_capped(&mut reader, &mut buf).await?;
         let v: serde_json::Value = serde_json::from_str(buf.trim())?;
         if !v
             .get("ok")
@@ -833,7 +875,7 @@ async fn state_subscribe_once(
         buf.clear();
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
-            res = reader.read_line(&mut buf) => {
+            res = read_line_capped(&mut reader, &mut buf) => {
                 let n = res?;
                 if n == 0 { return Ok(()); }
                 if let Ok(mut g) = last_state.lock() {
@@ -886,7 +928,7 @@ async fn logs_subscribe_once(
         buf.clear();
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
-            res = reader.read_line(&mut buf) => {
+            res = read_line_capped(&mut reader, &mut buf) => {
                 let n = res?;
                 if n == 0 { return Ok(()); }
                 let raw = buf.trim().to_string();

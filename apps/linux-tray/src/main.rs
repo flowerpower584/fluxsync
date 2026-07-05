@@ -21,6 +21,42 @@ fn ipc_path() -> PathBuf {
     PathBuf::from(home).join(".fluxsync/sock")
 }
 
+/// The daemon caps inbound IPC lines at 64 MiB (`fluxsyncd`'s `MAX_IPC_LINE`
+/// in `driver.rs`). Mirror that cap here so a wedged or hostile daemon
+/// response can't grow our read buffer unbounded.
+const MAX_IPC_LINE: usize = 64 * 1024 * 1024;
+
+/// Capped line read, mirroring `fluxsyncd`'s own `read_line_capped`: reads
+/// up to `MAX_IPC_LINE` bytes looking for a newline, erroring out instead of
+/// growing `out` forever if the peer never sends one.
+fn read_line_capped<R: BufRead>(reader: &mut R, out: &mut String) -> std::io::Result<usize> {
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            break; // EOF
+        }
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        if bytes.len() + take > MAX_IPC_LINE {
+            reader.consume(take);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "IPC response line exceeds max length",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if done {
+            break;
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(&bytes));
+    Ok(bytes.len())
+}
+
 /// One NDJSON request → one NDJSON reply. Returns `None` if the daemon
 /// is unreachable or the reply does not parse.
 fn ipc(path: &Path, req: &str) -> Option<Value> {
@@ -32,8 +68,9 @@ fn ipc(path: &Path, req: &str) -> Option<Value> {
     stream.write_all(req.as_bytes()).ok()?;
     stream.write_all(b"\n").ok()?;
     stream.flush().ok()?;
+    let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
+    read_line_capped(&mut reader, &mut line).ok()?;
     serde_json::from_str(line.trim()).ok()
 }
 

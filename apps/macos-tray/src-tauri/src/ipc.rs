@@ -14,6 +14,76 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 #[cfg(unix)]
 use tokio::net::UnixStream;
 
+/// The daemon caps inbound IPC lines at 64 MiB (`fluxsyncd`'s `MAX_IPC_LINE`
+/// in `driver.rs`). Mirror that cap on the client side so a wedged or
+/// hostile daemon response can't grow our read buffer unbounded.
+const MAX_IPC_LINE: usize = 64 * 1024 * 1024;
+
+/// Sync capped line read, for the boot-time version guard which runs
+/// before the tokio runtime exists. Mirrors `read_line_capped` below.
+#[cfg(unix)]
+fn read_line_capped_sync<R: std::io::BufRead>(reader: &mut R, out: &mut String) -> std::io::Result<usize> {
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            break; // EOF
+        }
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        if bytes.len() + take > MAX_IPC_LINE {
+            reader.consume(take);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "IPC response line exceeds max length",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if done {
+            break;
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(&bytes));
+    Ok(bytes.len())
+}
+
+/// Async capped line read, mirroring `fluxsyncd`'s own `read_line_capped`:
+/// reads up to `MAX_IPC_LINE` bytes looking for a newline, erroring out
+/// instead of growing `out` forever if the peer never sends one.
+async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    out: &mut String,
+) -> std::io::Result<usize> {
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            break; // EOF
+        }
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        if bytes.len() + take > MAX_IPC_LINE {
+            reader.consume(take);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "IPC response line exceeds max length",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if done {
+            break;
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(&bytes));
+    Ok(bytes.len())
+}
+
 /// Default IPC socket path. Honors `FLUXSYNC_IPC_PATH` so contributors
 /// can point the tray at a non-default daemon during development.
 fn ipc_path() -> Result<PathBuf> {
@@ -124,7 +194,7 @@ fn is_daemon_alive() -> bool {
 /// tokio runtime is wired up — so it can't reuse the async `one_shot`.
 #[cfg(unix)]
 fn ipc_cmd_blocking(op: &str) -> Result<Value> {
-    use std::io::{BufRead, Write};
+    use std::io::Write;
 
     let path = ipc_path()?;
     let mut stream = std::os::unix::net::UnixStream::connect(&path)
@@ -138,7 +208,7 @@ fn ipc_cmd_blocking(op: &str) -> Result<Value> {
 
     let mut reader = std::io::BufReader::new(stream);
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    read_line_capped_sync(&mut reader, &mut line)?;
     serde_json::from_str(line.trim()).with_context(|| format!("parse daemon response: {line:?}"))
 }
 
@@ -455,7 +525,7 @@ async fn one_shot_inner(request: Value) -> Result<Value> {
     write.flush().await?;
     let mut reader = BufReader::new(read);
     let mut buf = String::new();
-    reader.read_line(&mut buf).await?;
+    read_line_capped(&mut reader, &mut buf).await?;
     let v: Value = serde_json::from_str(buf.trim())
         .with_context(|| format!("parse daemon response: {buf:?}"))?;
     if !v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
@@ -483,7 +553,7 @@ where
     let mut line = String::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line).await? == 0 {
+        if read_line_capped(&mut reader, &mut line).await? == 0 {
             return Ok(());
         }
         if let Ok(v) = serde_json::from_str::<Value>(line.trim()) {

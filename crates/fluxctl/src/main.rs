@@ -477,11 +477,18 @@ async fn main() -> Result<()> {
         },
     };
 
+    // Every subcommand above shares one response shape (`CmdResponse`:
+    // `{id, ok, data, err}`), so the exit-code decision lives here once
+    // instead of in each renderer. A daemon-side rejection (oversized
+    // push, bad firewall rule, etc.) must make the process exit non-zero
+    // so scripts piping `fluxctl` don't see false success.
+    let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
+
     if args.json {
         if let Ok(s) = serde_json::to_string_pretty(&value) {
             println!("{s}");
         }
-        return Ok(());
+        return if ok { Ok(()) } else { Err(anyhow!(daemon_err(&value))) };
     }
 
     match kind {
@@ -497,7 +504,20 @@ async fn main() -> Result<()> {
         Kind::FirewallPending => render_firewall_pending(&value),
         Kind::Ack(action) => render::render_ack(&value, action),
     }
-    Ok(())
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!(daemon_err(&value)))
+    }
+}
+
+/// Pull the daemon's error string out of an `ok: false` `CmdResponse`,
+/// falling back to a generic message if the response is malformed.
+fn daemon_err(resp: &Value) -> String {
+    resp.get("err")
+        .and_then(Value::as_str)
+        .unwrap_or("daemon rejected request")
+        .to_string()
 }
 
 /// Fetch the current firewall policy object from the daemon's State, so a
@@ -768,6 +788,47 @@ fn validate_ipc_socket(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The daemon caps inbound IPC lines at 64 MiB (`fluxsyncd`'s `MAX_IPC_LINE`
+/// in `driver.rs`). Mirror that cap on the client side of the same
+/// connection so a wedged or hostile daemon can't grow our read buffer
+/// unbounded while we wait for a newline.
+const MAX_IPC_LINE: usize = 64 * 1024 * 1024;
+
+/// Capped line read, mirroring `fluxsyncd`'s own `read_line_capped`: reads
+/// up to `max` bytes looking for a newline, erroring out instead of growing
+/// `out` forever if the peer never sends one.
+async fn read_line_capped<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    out: &mut String,
+    max: usize,
+) -> std::io::Result<usize> {
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            break; // EOF
+        }
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        if bytes.len() + take > max {
+            reader.consume(take);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "IPC response line exceeds max length",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if done {
+            break;
+        }
+    }
+    out.push_str(&String::from_utf8_lossy(&bytes));
+    Ok(bytes.len())
+}
+
 #[cfg(unix)]
 async fn one_shot(path: &Path, request: Value) -> Result<Value> {
     use tokio::net::UnixStream;
@@ -782,7 +843,7 @@ async fn one_shot(path: &Path, request: Value) -> Result<Value> {
     write.flush().await?;
     let mut reader = BufReader::new(read);
     let mut buf = String::new();
-    reader.read_line(&mut buf).await?;
+    read_line_capped(&mut reader, &mut buf, MAX_IPC_LINE).await?;
     let v: Value = serde_json::from_str(buf.trim())?;
     Ok(v)
 }
@@ -800,7 +861,7 @@ async fn one_shot(path: &Path, request: Value) -> Result<Value> {
     write.flush().await?;
     let mut reader = BufReader::new(read);
     let mut buf = String::new();
-    reader.read_line(&mut buf).await?;
+    read_line_capped(&mut reader, &mut buf, MAX_IPC_LINE).await?;
     let v: Value = serde_json::from_str(buf.trim())?;
     Ok(v)
 }
@@ -813,4 +874,40 @@ fn default_ipc_path() -> PathBuf {
         return PathBuf::from(home).join(".fluxsync").join("sock");
     }
     PathBuf::from("./fluxsync.sock")
+}
+
+#[cfg(test)]
+mod ipc_read_tests {
+    use super::{read_line_capped, MAX_IPC_LINE};
+    use tokio::io::BufReader;
+
+    #[tokio::test]
+    async fn reads_a_normal_line() {
+        let mut reader = BufReader::new(std::io::Cursor::new(b"hello\n".to_vec()));
+        let mut buf = String::new();
+        let n = read_line_capped(&mut reader, &mut buf, MAX_IPC_LINE)
+            .await
+            .unwrap();
+        assert_eq!(n, 6);
+        assert_eq!(buf, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn errors_when_line_exceeds_cap() {
+        let mut reader = BufReader::new(std::io::Cursor::new(b"0123456789\n".to_vec()));
+        let mut buf = String::new();
+        let err = read_line_capped(&mut reader, &mut buf, 5).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn eof_without_newline_returns_partial_line() {
+        let mut reader = BufReader::new(std::io::Cursor::new(b"no newline".to_vec()));
+        let mut buf = String::new();
+        let n = read_line_capped(&mut reader, &mut buf, MAX_IPC_LINE)
+            .await
+            .unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(buf, "no newline");
+    }
 }
