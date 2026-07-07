@@ -146,10 +146,13 @@ pub enum Event {
     /// The local user confirmed the SAS words (`fluxctl pair confirm
     /// --accept`). Moves `sas_phase` to `"confirmed"` if the peer already
     /// confirmed (or is a legacy build treated as auto-confirmed), else to
-    /// `"local_confirmed"`. Not peer-scoped: there is only ever one local
-    /// confirm action available at a time, targeting whichever peer
-    /// `State.sas_peer` already names.
-    SasLocalConfirmed,
+    /// `"local_confirmed"`. `peer_id` must match `State.sas_peer` or the
+    /// transition is ignored — same peer-scoping as `SasPeerConfirmed`/
+    /// `SasPeerRejected` (L3 fix). Without this, confirming pairing with one
+    /// peer while a second pairing with a different peer is also in flight
+    /// could advance the WRONG peer's phase if `sas_peer` had since been
+    /// overwritten by the second pairing's `SasPairingStarted`.
+    SasLocalConfirmed { peer_id: [u8; 32] },
     /// The peer confirmed the SAS words — either via an inbound
     /// `Msg::PairConfirm { accept: true }`, or because its `Hello` did not
     /// advertise the `sas-confirm` capability (legacy build, auto-treated

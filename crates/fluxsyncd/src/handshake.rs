@@ -211,16 +211,18 @@ pub async fn run_initiator(
 
 /// DIR-P2-03: planned session rekey. Runs the same Noise IK exchange as
 /// [`run_initiator`] against a peer that is already trusted *and* already
-/// linked, but — unlike `run_initiator`, which only ever fills an empty
-/// session slot — this **replaces** the live session once the new one is
-/// fully established (make-before-break: the old session keeps serving
-/// heartbeats/clipboard traffic for the entire ~5s handshake round trip;
-/// only the final atomic install swaps the keys).
+/// linked — the primary or a FluxMesh secondary — but — unlike
+/// `run_initiator`, which only ever fills an empty session slot — this
+/// **replaces** the live session once the new one is fully established
+/// (make-before-break: the old session keeps serving heartbeats/clipboard
+/// traffic for the entire ~5s handshake round trip; only the final atomic
+/// install swaps the keys).
 ///
-/// `expected_generation` is `Transport::primary_session_generation()`
-/// snapshotted by the caller right before this call starts; the install at
-/// the end only commits if it is still current (see
-/// [`Transport::install_primary_session_if_generation`]), so a concurrent
+/// `expected_generation` is snapshotted by the caller (via
+/// `Transport::primary_session_generation()` for the primary, or
+/// `Transport::session_generation_for` for a secondary) right before this
+/// call starts; the install at the end only commits if it is still current
+/// (see [`Transport::install_session_if_generation_for`]), so a concurrent
 /// drop/failover/duplicate-reply loses cleanly instead of corrupting the
 /// link.
 ///
@@ -265,12 +267,12 @@ pub async fn run_rekey_initiator(
         return Ok(());
     }
     if !transport
-        .install_primary_session_if_generation(peer_id, session, expected_generation)
+        .install_session_if_generation_for(peer_id, session, expected_generation)
         .await
     {
-        // Something else (a concurrent drop, a primary failover, or a
-        // duplicate/late reply racing this one) already changed the
-        // primary session — discard the new one rather than clobber it.
+        // Something else (a concurrent drop, a primary failover/promotion,
+        // or a duplicate/late reply racing this one) already changed this
+        // peer's session — discard the new one rather than clobber it.
         tracing::debug!("rekey initiator: session changed mid-handshake; discarding new session");
         return Ok(());
     }
@@ -337,6 +339,21 @@ pub async fn run_responder(
         } else {
             (None, false)
         };
+
+    // FluxMesh bug fix: a peer that is not (or no longer) the primary can
+    // still be a known SECONDARY (in `extra`) with its own live-or-stale
+    // session — e.g. it crashed and is reconnecting before the ~9s
+    // ghost-timeout cleared its stale entry, or it's the responder side of
+    // a secondary rekey. Snapshot its generation the same early way as the
+    // primary case above so the commit below can generation-CAS-replace it
+    // instead of falling back to the empty-slot-only `try_install_session`,
+    // which would reject the install and leave the secondary dark until the
+    // ghost-timeout finally nulls its session out.
+    let secondary_generation = if rekey_generation.is_none() {
+        transport.session_generation_for(peer_id).await
+    } else {
+        None
+    };
 
     let mut newly_tofu = false;
     let entry = {
@@ -479,10 +496,31 @@ pub async fn run_responder(
                 return Ok(());
             }
             transport
-                .install_primary_session_if_generation(peer_id, session, expected)
+                .install_session_if_generation_for(peer_id, session, expected)
                 .await
         }
-        None => transport.try_install_session(peer_id, session).await,
+        None => match secondary_generation {
+            Some(expected) => {
+                // FluxMesh bug fix / H3 parity: same re-check as the primary
+                // rekey arm above — this replaces an already-known
+                // secondary's session, so a revoke/unpair racing this inbound
+                // handshake must not resurrect it.
+                if !trusted.lock().await.contains_key(&peer_id) {
+                    tracing::warn!(
+                        peer = ?&peer_id[..6],
+                        "H3: peer no longer trusted; aborting secondary reconnect (revoked mid-handshake)"
+                    );
+                    return Ok(());
+                }
+                transport
+                    .install_session_if_generation_for(peer_id, session, expected)
+                    .await
+            }
+            // Genuinely unknown peer (fresh TOFU or first-time secondary
+            // join): no existing generation to CAS against, so the original
+            // empty-slot-only install is exactly right.
+            None => transport.try_install_session(peer_id, session).await,
+        },
     };
     if !installed {
         tracing::debug!("responder: session install lost a concurrent race; not sending msg2");
@@ -587,18 +625,33 @@ pub async fn run_pending_reaper(
                     }
                     out
                 };
-                // Tear down the live session if it belongs to one of the
-                // revoked peers — otherwise the attacker's already-installed
-                // session would keep accepting Hello/Heartbeat frames.
-                let dropped_peer_id = {
-                    let cur = transport.cached_peer_id().await;
-                    match cur {
-                        Some(cur) if expired.contains(&cur) => {
-                            transport.drop_session().await;
-                            Some(cur)
+                // Tear down the live session for EVERY revoked peer, not just
+                // the primary — otherwise the attacker's already-installed
+                // session would keep accepting Hello/Heartbeat/clipboard
+                // frames. A secondary that TOFU-joined via `extra` and was
+                // never verbally confirmed is invisible to `cached_peer_id`
+                // (primary-only), so checking just the primary here used to
+                // leave an expired secondary's session live forever once its
+                // `pending_pairs` entry (the FS-052 gate's only other check)
+                // was reaped away below.
+                let dropped_peer_ids: Vec<[u8; 32]> = {
+                    let mut dropped = Vec::new();
+                    for id in &expired {
+                        let had_session = transport.has_session_for(*id).await;
+                        // Bug #16 fix: expiry-without-confirm revokes trust
+                        // (above) permanently, so purge the `extra` stub
+                        // unconditionally — not just when a session was
+                        // still live — otherwise a peer that already went
+                        // through ghost-timeout (stub with a nulled session)
+                        // before its pending window expired would leave that
+                        // now-untrusted stub behind forever (same rationale
+                        // as `CmdOp::Revoke`).
+                        transport.purge_peer(*id).await;
+                        if had_session {
+                            dropped.push(*id);
                         }
-                        _ => None,
                     }
+                    dropped
                 };
                 if let Some(dir) = keystore_dir.as_ref() {
                     if let Err(e) =
@@ -622,7 +675,7 @@ pub async fn run_pending_reaper(
                         tracing::error!(
                             error = %e,
                             count = expired.len(),
-                            dropped_session = ?dropped_peer_id.map(|p| hex_encode(&p)),
+                            dropped_sessions = ?dropped_peer_ids.iter().map(|p| hex_encode(p)).collect::<Vec<_>>(),
                             "FS-052: failed to persist pending-expiry revoke; in-memory revoke rolled back. Session was already dropped (peer must re-handshake) but trust will be retried next reaper tick."
                         );
                         continue;
@@ -766,6 +819,227 @@ mod tests {
         assert!(
             !transport.has_session_for(peer_id).await,
             "H3: a peer revoked mid-reconnect must never end up with an installed session"
+        );
+    }
+
+    /// FluxMesh bug fix (Bug #10b): a SECONDARY peer reconnecting after its
+    /// process crashed/restarted used to hit `run_responder`'s `None` arm,
+    /// which only ever tries the empty-slot-only `try_install_session` CAS —
+    /// rejected as long as the stale (but still `Some`) session from before
+    /// the crash survives, i.e. until the ~9s ghost-timeout finally cleared
+    /// it (no msg2, no reconnect until then). Drives the REAL `run_responder`
+    /// twice for the same already-trusted secondary peer, with an unrelated
+    /// PRIMARY already live on the same transport (so the peer under test
+    /// genuinely routes to `extra`, never evicting the primary) — the SECOND
+    /// call, arriving while the first session is still live, must replace it
+    /// immediately and send a fresh msg2, instead of being silently dropped.
+    #[tokio::test]
+    async fn secondary_reconnect_replaces_a_stale_session_without_waiting_for_ghost_timeout() {
+        use super::{peer_id_for, run_responder, PairingWindow, PendingSet, TrustedPeer, TrustedSet};
+        use crate::transport::{Transport, TYPE_HANDSHAKE_RESP};
+        use fluxsync_core::Event;
+        use fluxsync_crypto::{test_util::pair_for_test, Identity, Initiator};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::net::UdpSocket;
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.expect("bind transport");
+        let transport = Arc::new(transport);
+
+        // An unrelated PRIMARY already live — the peer under test must route
+        // to `extra`, never evict this one.
+        let unrelated = Identity::generate();
+        let (primary_sess, _) = pair_for_test(&unrelated, &Identity::generate()).unwrap();
+        let primary_id = [0xAAu8; 32];
+        transport.install_session(primary_id, primary_sess).await;
+        assert_eq!(transport.cached_peer_id().await, Some(primary_id));
+
+        let self_identity = Identity::generate();
+        let secondary_identity = Identity::generate();
+        let secondary_static = secondary_identity.public_key();
+        let secondary_id = peer_id_for(&secondary_static);
+
+        let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
+        trusted.lock().await.insert(
+            secondary_id,
+            TrustedPeer { static_pub: secondary_static, name: "secondary".into() },
+        );
+        let pending: PendingSet = Arc::new(Mutex::new(HashMap::new()));
+        let pairing_window: PairingWindow = Arc::new(Mutex::new(None));
+
+        let bare = UdpSocket::bind("127.0.0.1:0").await.expect("bind bare peer socket");
+        let bare_addr = bare.local_addr().expect("bare addr");
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(16);
+
+        // ── First handshake: establishes the secondary with a live session. ──
+        let (_init1, msg1_1) = Initiator::start(&secondary_identity, &self_identity.public_key())
+            .expect("build msg1 #1");
+        run_responder(
+            self_identity.clone(),
+            msg1_1,
+            bare_addr,
+            transport.clone(),
+            trusted.clone(),
+            pairing_window.clone(),
+            event_tx.clone(),
+            None,
+            pending.clone(),
+        )
+        .await
+        .expect("first responder step must succeed");
+        assert!(transport.has_session_for(secondary_id).await);
+        assert_eq!(transport.cached_peer_id().await, Some(primary_id), "must route to extra, not evict the primary");
+        let mut buf = [0u8; 2048];
+        let (n1, _from1) = bare.recv_from(&mut buf).await.expect("recv msg2 #1");
+        assert_eq!(buf[0], TYPE_HANDSHAKE_RESP);
+        let _ = n1;
+
+        let generation_before = transport
+            .session_generation_for(secondary_id)
+            .await
+            .expect("secondary must have a known generation after the first handshake");
+
+        // ── Second handshake: peer crashed/restarted and reconnects BEFORE
+        //    any teardown cleared the first (still-live) session — exactly
+        //    the original bug's race window.
+        let (_init2, msg1_2) = Initiator::start(&secondary_identity, &self_identity.public_key())
+            .expect("build msg1 #2");
+        run_responder(
+            self_identity,
+            msg1_2,
+            bare_addr,
+            transport.clone(),
+            trusted.clone(),
+            pairing_window.clone(),
+            event_tx,
+            None,
+            pending,
+        )
+        .await
+        .expect("second responder step must succeed and replace the stale session");
+
+        assert!(
+            transport.has_session_for(secondary_id).await,
+            "the secondary must still have a live session after the reconnect"
+        );
+        let generation_after = transport
+            .session_generation_for(secondary_id)
+            .await
+            .expect("secondary must still have a known generation");
+        assert!(
+            generation_after > generation_before,
+            "the stale session must be REPLACED (generation bumped), not silently kept"
+        );
+
+        // The fix's whole point: msg2 actually goes out this time, instead of
+        // `run_responder` returning early with "install lost a race" and the
+        // peer waiting on the ghost-timeout.
+        let (n2, _from2) = tokio::time::timeout(std::time::Duration::from_millis(500), bare.recv_from(&mut buf))
+            .await
+            .expect("a second msg2 must be sent immediately, not after a ghost-timeout wait")
+            .expect("recv msg2 #2");
+        assert_eq!(buf[0], TYPE_HANDSHAKE_RESP);
+        let _ = n2;
+    }
+
+    /// FluxMesh bug: `run_pending_reaper` used to tear down the live session
+    /// only when the expired peer was the PRIMARY (`cached_peer_id()`
+    /// membership check). A secondary that TOFU-joined into `extra` and was
+    /// never verbally confirmed is invisible to that primary-only check, so
+    /// once its `PendingSet`/`TrustedSet` entries were reaped away, its live
+    /// `extra` session — the FS-052 inbound gate's only other check — kept
+    /// accepting frames forever. This proves the reaper now drops the
+    /// session for EVERY expired id, primary or secondary, while leaving an
+    /// unrelated still-trusted, still-confirmed peer's session alone.
+    #[tokio::test(start_paused = true)]
+    async fn run_pending_reaper_drops_expired_secondary_session_not_just_primary() {
+        use super::{run_pending_reaper, tofu_trusted_peer, PendingPair, PendingSet, TrustedSet};
+        use crate::transport::Transport;
+        use fluxsync_core::Event;
+        use fluxsync_crypto::{test_util::pair_for_test, Identity};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use std::time::Instant;
+        use tokio::sync::{mpsc, Mutex};
+        use tokio_util::sync::CancellationToken;
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.expect("bind transport");
+        let transport = Arc::new(transport);
+
+        let me = Identity::generate();
+        let (sess_primary, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (sess_secondary, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (primary_id, secondary_id) = ([1u8; 32], [2u8; 32]);
+        // First install claims the primary slot; the second, arriving while
+        // the primary is still live, routes to `extra` (FluxMesh 2C-b).
+        transport.install_session(primary_id, sess_primary).await;
+        transport.install_session(secondary_id, sess_secondary).await;
+        assert_eq!(transport.cached_peer_id().await, Some(primary_id));
+
+        let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
+        trusted.lock().await.insert(primary_id, tofu_trusted_peer(primary_id));
+        trusted.lock().await.insert(secondary_id, tofu_trusted_peer(secondary_id));
+
+        // Only the SECONDARY is still awaiting confirmation, and its window
+        // is already expired — the primary is fully confirmed (no pending
+        // entry) and must be left alone.
+        let pending: PendingSet = Arc::new(Mutex::new(HashMap::new()));
+        pending.lock().await.insert(
+            secondary_id,
+            PendingPair {
+                static_pub: [0u8; 32],
+                name: "secondary".into(),
+                sas_words: [
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ],
+                from: "127.0.0.1:1".parse().unwrap(),
+                expires_at: Instant::now(),
+            },
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(16);
+        let shutdown = CancellationToken::new();
+        let reaper = tokio::spawn(run_pending_reaper(
+            pending.clone(),
+            trusted.clone(),
+            transport.clone(),
+            None,
+            shutdown.clone(),
+            event_tx,
+        ));
+
+        // Fast-forward tokio's (paused) clock past the reaper's tick
+        // interval — `PendingPair::expires_at` is a real `std::time::Instant`
+        // and is already in the past by the time any real work runs, so the
+        // only thing that needs advancing is the `tokio::time::interval`.
+        tokio::time::advance(super::PENDING_REAPER_INTERVAL + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        shutdown.cancel();
+        reaper.await.expect("reaper task panicked");
+
+        assert!(
+            !transport.has_session_for(secondary_id).await,
+            "FluxMesh bug: an expired SECONDARY's live session must be dropped by the reaper too, not just the primary's"
+        );
+        assert!(
+            transport.has_session_for(primary_id).await,
+            "the still-confirmed primary's session must be left untouched"
+        );
+        assert!(
+            !trusted.lock().await.contains_key(&secondary_id),
+            "the expired secondary must be revoked from the trusted set"
+        );
+        assert!(
+            trusted.lock().await.contains_key(&primary_id),
+            "the confirmed primary must remain trusted"
         );
     }
 }

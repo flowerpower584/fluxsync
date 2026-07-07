@@ -163,10 +163,32 @@ async fn pending_peer_ids(ipc: &PathBuf) -> Vec<String> {
     }
 }
 
+/// The hex peer ids currently in the persisted trust store, straight from
+/// `CmdOp::TrustList` — the authoritative observable for a revoke.
+async fn trusted_peer_ids(ipc: &PathBuf) -> Vec<String> {
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 12,
+            op: CmdOp::TrustList {},
+        },
+    )
+    .await;
+    match resp.data {
+        Some(CmdData::TrustList(entries)) => {
+            entries.into_iter().map(|e| e.peer_id_hex).collect()
+        }
+        // `CmdData` is `#[serde(untagged)]`: an empty `TrustList` round-trips
+        // as `[]`, indistinguishable from any other empty list variant.
+        Some(CmdData::Peers(entries)) if entries.is_empty() => Vec::new(),
+        Some(CmdData::PendingPairs(entries)) if entries.is_empty() => Vec::new(),
+        None => Vec::new(),
+        other => panic!("expected TrustList, got {other:?}"),
+    }
+}
+
 /// `Peers` reports the *currently-linked* peer (driver fills `peer_id` with
 /// the placeholder `"paired"`, not the real hex), so we compare on `name`.
-/// Empty list means the daemon has no linked peer — which is the observable
-/// effect of `ManualUnpair` triggered by a `PairConfirm` reject.
 async fn linked_peer_names(ipc: &PathBuf) -> Vec<String> {
     let resp = ipc_send_recv(
         ipc,
@@ -270,16 +292,19 @@ async fn pair_confirm_reject_drops_pending_and_revokes_trust() {
     .await;
     assert!(resp.ok, "PairConfirm reject failed: {resp:?}");
 
-    // Reject runs `ManualUnpair`, which clears `state.peer_name`; the
-    // dispatch is async via the event channel, so poll briefly for the
-    // observable effect: `Peers` no longer reports any linked peer.
+    // Reject is a peer-scoped revoke (same teardown as `CmdOp::Revoke`, not
+    // the old global `ManualUnpair`): the pending entry AND the trust-store
+    // entry must both be gone. `state.peer_name` may keep the stale name
+    // until GhostTimeout — exactly like revoking the primary — so trust
+    // revocation is asserted directly via `TrustList` rather than through
+    // the `Peers` projection.
     let purged = wait_until(Duration::from_secs(1), || async {
-        let linked = linked_peer_names(&ipc).await;
         let pending = pending_peer_ids(&ipc).await;
-        linked.is_empty() && !pending.contains(&peer_id_hex)
+        let trusted = trusted_peer_ids(&ipc).await;
+        !pending.contains(&peer_id_hex) && !trusted.contains(&peer_id_hex)
     })
     .await;
-    assert!(purged, "linked + pending must both be cleared after reject");
+    assert!(purged, "pending + trust must both be cleared after reject");
 
     shutdown_daemon(shutdown, h).await;
 }

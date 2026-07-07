@@ -17,7 +17,7 @@ use fluxsync_core::{FirewallPolicy, Rule};
 use fluxsync_crypto::{test_util::pair_for_test, Identity};
 use fluxsyncd::{
     cmd::{CmdData, CmdOp, CmdRequest},
-    run, DaemonConfig, TestPair,
+    run, DaemonConfig, TestPair, TestPendingPair,
 };
 use std::fmt::Write as _;
 use std::net::SocketAddr;
@@ -533,6 +533,183 @@ async fn revoke_secondary_drops_only_that_peer() {
     })
     .await;
     assert!(c_down, "C did not tear down its session after being revoked");
+
+    sd_a.cancel();
+    sd_b.cancel();
+    sd_c.cancel();
+    for (h, who) in [(h_a, "A"), (h_b, "B"), (h_c, "C")] {
+        timeout(Duration::from_millis(500), h)
+            .await
+            .unwrap_or_else(|_| panic!("daemon {who} did not shut down in 500ms"))
+            .unwrap_or_else(|_| panic!("daemon {who} task panicked"))
+            .unwrap_or_else(|_| panic!("daemon {who} run() returned Err"));
+    }
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a panic was captured by the test panic hook"
+    );
+}
+
+/// FluxMesh bug #5 (P0 security): rejecting a SECONDARY's SAS pairing
+/// (`CmdOp::PairConfirm { accept: false }`) used to fire
+/// `Event::ManualUnpair`, whose `CloseSession`/`DropPeer` actions are
+/// unit/primary-only — they send `Bye` and drop the session on the PRIMARY
+/// slot regardless of which peer was actually being rejected. So rejecting
+/// C's (secondary) pairing on B tore down B's healthy PRIMARY link to A,
+/// while C — which never got a session drop at all — stayed fully linked.
+/// The fix makes the reject peer-scoped, mirroring `CmdOp::Revoke`: B must
+/// drop only C, and A's link must survive completely untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn pair_confirm_reject_secondary_drops_only_that_peer() {
+    let _ = tracing_subscriber::fmt::try_init();
+    install_panic_hook();
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let id_c = Identity::generate();
+    let (pid_a, _pid_b, pid_c) = (id_a.peer_id(), id_b.peer_id(), id_c.peer_id());
+    let c_static_pub = id_c.public_key();
+    let (sess_a_b, sess_b_a) = pair_for_test(&id_a, &id_b).expect("pair a-b");
+    let (sess_b_c, sess_c_b) = pair_for_test(&id_b, &id_c).expect("pair b-c");
+
+    let (port_a, port_b, port_c) = (
+        pick_free_udp_port().await,
+        pick_free_udp_port().await,
+        pick_free_udp_port().await,
+    );
+    let addr_a: SocketAddr = format!("127.0.0.1:{port_a}").parse().unwrap();
+    let addr_b: SocketAddr = format!("127.0.0.1:{port_b}").parse().unwrap();
+    let addr_c: SocketAddr = format!("127.0.0.1:{port_c}").parse().unwrap();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ipc_a = dir.path().join("a.sock");
+    let ipc_b = dir.path().join("b.sock");
+    let ipc_c = dir.path().join("c.sock");
+
+    let mut cfg_a = base_cfg(id_a, port_a, ipc_a.clone(), "node-a");
+    cfg_a.test_pair = Some(TestPair {
+        session: sess_a_b,
+        peer_addr: addr_b,
+        peer_name: "node-b".into(),
+        peer_id: id_b.peer_id(),
+    });
+    let mut cfg_c = base_cfg(id_c, port_c, ipc_c.clone(), "node-c");
+    cfg_c.test_pair = Some(TestPair {
+        session: sess_c_b,
+        peer_addr: addr_b,
+        peer_name: "node-b".into(),
+        peer_id: id_b.peer_id(),
+    });
+    let mut cfg_b = base_cfg(id_b, port_b, ipc_b.clone(), "node-b");
+    cfg_b.test_pair = Some(TestPair {
+        session: sess_b_a,
+        peer_addr: addr_a,
+        peer_name: "node-a".into(),
+        peer_id: pid_a,
+    });
+    cfg_b.test_pairs = vec![TestPair {
+        session: sess_b_c,
+        peer_addr: addr_c,
+        peer_name: "node-c".into(),
+        peer_id: pid_c,
+    }];
+    // C is a freshly TOFU-joined secondary still awaiting the human's SAS
+    // verdict on B — exactly the state `CmdOp::PairConfirm` resolves.
+    cfg_b.test_pending_pair = Some(TestPendingPair {
+        peer_id: pid_c,
+        static_pub: c_static_pub,
+        name: "node-c".into(),
+        sas_words: [
+            "alpha".into(),
+            "bravo".into(),
+            "charlie".into(),
+            "delta".into(),
+            "echo".into(),
+            "foxtrot".into(),
+        ],
+        from: addr_c,
+        expires_in: Duration::from_secs(60),
+    });
+
+    let sd_a = CancellationToken::new();
+    let sd_b = CancellationToken::new();
+    let sd_c = CancellationToken::new();
+    let (ca, cb, cc) = (sd_a.clone(), sd_b.clone(), sd_c.clone());
+    let h_a = tokio::spawn(async move { run(cfg_a, ca).await });
+    let h_b = tokio::spawn(async move { run(cfg_b, cb).await });
+    let h_c = tokio::spawn(async move { run(cfg_c, cc).await });
+
+    let up = wait_until(Duration::from_secs(2), || async {
+        peer_name(&ipc_b).await.as_deref() == Some("node-a")
+            && mesh_peers(&ipc_b).await.0 == 2
+            && mesh_peers(&ipc_c).await.0 == 1
+    })
+    .await;
+    assert!(up, "B did not reach A-primary / 2-peer steady state");
+
+    // B rejects C's (secondary) pending SAS pairing.
+    let pid_c_hex: String = pid_c.iter().fold(String::new(), |mut out, b| {
+        write!(out, "{b:02x}").unwrap();
+        out
+    });
+    let reject = ipc_send_recv(
+        &ipc_b,
+        CmdRequest {
+            id: 89,
+            op: CmdOp::PairConfirm {
+                peer_id: pid_c_hex,
+                accept: false,
+            },
+        },
+    )
+    .await;
+    assert!(
+        reject.ok,
+        "reject of secondary's pending pair failed: {reject:?}"
+    );
+
+    // B drops ONLY C — A's primary link must survive completely untouched.
+    // Before the fix, `Event::ManualUnpair`'s primary-only `CloseSession`
+    // dropped A's session instead (and left C fully linked).
+    let dropped = wait_until(Duration::from_secs(3), || async {
+        mesh_peers(&ipc_b).await == (1, 1) && peer_name(&ipc_b).await.as_deref() == Some("node-a")
+    })
+    .await;
+    assert!(
+        dropped,
+        "B did not keep A as its sole live primary after rejecting secondary C \
+         (peers={:?}, primary_name={:?})",
+        mesh_peers(&ipc_b).await,
+        peer_name(&ipc_b).await
+    );
+
+    // C received the (accept:false) PairConfirm and tore its own side down.
+    let c_down = wait_until(Duration::from_secs(3), || async {
+        mesh_peers(&ipc_c).await == (0, 0)
+    })
+    .await;
+    assert!(c_down, "C did not tear down its session after being rejected");
+
+    // Positive proof A's session is genuinely alive, not just labeled so: a
+    // fresh push from A must still reach B.
+    let text = "still-linked-after-secondary-reject";
+    let push = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 90,
+            op: CmdOp::Push { text: text.into() },
+        },
+    )
+    .await;
+    assert!(push.ok, "push from A failed: {push:?}");
+    let arrived = wait_until(Duration::from_secs(2), || async {
+        history_count(&ipc_b, text).await >= 1
+    })
+    .await;
+    assert!(
+        arrived,
+        "A's push never reached B — the primary session was corrupted by the secondary's reject"
+    );
 
     sd_a.cancel();
     sd_b.cancel();

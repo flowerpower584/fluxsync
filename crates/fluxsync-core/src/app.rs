@@ -796,7 +796,13 @@ impl App {
                 self.state.sas_phase = "showing".to_string();
                 self.state.sas_peer = Some(*peer_id);
             }
-            Event::SasLocalConfirmed => {
+            // L3 fix: peer-scoped like `SasPeerConfirmed`/`SasPeerRejected`
+            // below — a confirm-tap the daemon dispatched for one peer must
+            // not advance a DIFFERENT, concurrently in-flight pairing's
+            // phase if `sas_peer` was since overwritten by a second
+            // `SasPairingStarted`. A mismatched `peer_id` falls through to
+            // the `_` arm and is ignored, so no explicit no-op arm is needed.
+            Event::SasLocalConfirmed { peer_id } if self.state.sas_peer == Some(*peer_id) => {
                 self.state.sas_phase = if matches!(
                     self.state.sas_phase.as_str(),
                     "peer_confirmed" | "confirmed"
@@ -967,7 +973,7 @@ impl App {
                 | Event::FrameReceivedClipboard { .. }
                 | Event::LocalClipboardChange { .. }
                 | Event::SasPairingStarted { .. }
-                | Event::SasLocalConfirmed
+                | Event::SasLocalConfirmed { .. }
                 | Event::SasPeerConfirmed { .. }
                 | Event::SasPeerRejected { .. }
                 | Event::SasReset
@@ -2287,7 +2293,7 @@ mod tests {
     fn sas_local_confirm_first_moves_to_local_confirmed() {
         let mut app = boot();
         app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
-        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "local_confirmed");
     }
 
@@ -2304,7 +2310,7 @@ mod tests {
         let mut app = boot();
         app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
-        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "confirmed");
     }
 
@@ -2312,7 +2318,7 @@ mod tests {
     fn sas_peer_confirm_after_local_confirmed_moves_to_confirmed() {
         let mut app = boot();
         app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
-        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "confirmed");
     }
@@ -2323,9 +2329,9 @@ mod tests {
         // "confirmed" back to a single-sided state.
         let mut app = boot();
         app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
-        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
-        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "confirmed");
         app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "confirmed");
@@ -2335,7 +2341,7 @@ mod tests {
     fn sas_peer_rejected_sets_peer_rejected() {
         let mut app = boot();
         app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
-        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasPeerRejected { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "peer_rejected");
     }
@@ -2364,7 +2370,7 @@ mod tests {
     fn manual_unpair_resets_sas_phase_to_idle() {
         let mut app = boot();
         app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
-        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "confirmed");
         app.handle(Event::ManualUnpair, &wall());
@@ -2400,7 +2406,7 @@ mod tests {
         // "local_confirmed" now, not wait for GhostTimeout.
         let mut app = boot();
         app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
-        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "local_confirmed");
         app.handle(Event::PeerLost { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "idle");
@@ -2426,7 +2432,7 @@ mod tests {
         let peer_b = [8u8; 32];
         let mut app = boot();
         app.handle(Event::SasPairingStarted { peer_id: peer_a }, &wall());
-        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed { peer_id: peer_a }, &wall());
         assert_eq!(app.snapshot().sas_phase, "local_confirmed");
 
         // A DIFFERENT peer (peer_b) drops — peer_a's pairing must survive.
@@ -2476,7 +2482,7 @@ mod tests {
 
         let mut app = boot();
         app.handle(Event::SasPairingStarted { peer_id: PAIRING_PEER }, &wall());
-        app.handle(Event::SasLocalConfirmed, &wall());
+        app.handle(Event::SasLocalConfirmed { peer_id: PAIRING_PEER }, &wall());
         assert_eq!(app.snapshot().sas_phase, "local_confirmed");
 
         app.handle(Event::SasPeerRejected { peer_id: OTHER_PEER }, &wall());
@@ -2488,5 +2494,37 @@ mod tests {
 
         app.handle(Event::SasPeerRejected { peer_id: PAIRING_PEER }, &wall());
         assert_eq!(app.snapshot().sas_phase, "peer_rejected");
+    }
+
+    /// FluxMesh bug fix: `SasLocalConfirmed` used to carry no `peer_id` and
+    /// therefore always applied to whichever peer `sas_peer` currently
+    /// named, unlike its `SasPeerConfirmed`/`SasPeerRejected` siblings.
+    /// Concurrent pairing with two peers (B then C) overwrites `sas_peer` to
+    /// C; a confirm-tap the daemon dispatched for B must not advance C's
+    /// still-"showing" phase to a false "local_confirmed" for a pairing the
+    /// human never actually confirmed.
+    #[test]
+    fn sas_local_confirmed_from_wrong_peer_is_ignored() {
+        const PEER_B: [u8; 32] = [7u8; 32];
+        const PEER_C: [u8; 32] = [9u8; 32];
+
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted { peer_id: PEER_B }, &wall());
+        // A second, concurrent pairing with a DIFFERENT peer overwrites
+        // `sas_peer` — exactly the scenario the bug describes.
+        app.handle(Event::SasPairingStarted { peer_id: PEER_C }, &wall());
+        assert_eq!(app.snapshot().sas_peer, Some(PEER_C));
+
+        // A confirm intended for B must not advance C's phase.
+        app.handle(Event::SasLocalConfirmed { peer_id: PEER_B }, &wall());
+        assert_eq!(
+            app.snapshot().sas_phase,
+            "showing",
+            "a different peer's local-confirm must not advance this pairing's phase"
+        );
+
+        // Confirming the ACTUAL current pairing (C) still works normally.
+        app.handle(Event::SasLocalConfirmed { peer_id: PEER_C }, &wall());
+        assert_eq!(app.snapshot().sas_phase, "local_confirmed");
     }
 }

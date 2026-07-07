@@ -240,14 +240,26 @@ impl Transport {
     pub async fn set_peer_addr(&self, addr: SocketAddr) {
         *self.conn.peer_addr.lock().await = Some(addr);
         *self.conn.last_peer_addr.lock().await = Some(addr);
-        self.push_history(addr).await;
+        Self::push_history(&self.conn, addr).await;
     }
 
+    /// Record `addr` for `id`, routed to whichever `PeerConn` actually owns
+    /// that peer (primary or an `extra` secondary) instead of always the
+    /// primary slot. Callers (`run_initiator`/`run_responder`/
+    /// `run_rekey_initiator`) always invoke this right after a
+    /// `try_install_session`/`install_primary_session_if_generation` call for
+    /// the same `id`, so `acquire_conn` resolves to the exact `PeerConn` the
+    /// session just landed on — reusing it here (rather than blindly writing
+    /// `self.conn`) is what stops a secondary handshake from stamping the
+    /// secondary's id onto the primary's `last_peer_id` while the primary's
+    /// session key material is untouched (see FluxMesh bug: `cached_peer_id`/
+    /// `linked_peer_ids`/`recv` all mislabel frames once that happens).
     pub async fn set_peer_info(&self, id: [u8; 32], addr: SocketAddr) {
-        *self.conn.peer_addr.lock().await = Some(addr);
-        *self.conn.last_peer_addr.lock().await = Some(addr);
-        *self.conn.last_peer_id.lock().await = Some(id);
-        self.push_history(addr).await;
+        let conn = self.acquire_conn(id).await;
+        *conn.peer_addr.lock().await = Some(addr);
+        *conn.last_peer_addr.lock().await = Some(addr);
+        *conn.last_peer_id.lock().await = Some(id);
+        Self::push_history(&conn, addr).await;
     }
 
     /// Resolve the `PeerConn` a session install for `id` should target.
@@ -291,8 +303,8 @@ impl Transport {
         self.session_notify.notify_one();
     }
 
-    async fn push_history(&self, addr: SocketAddr) {
-        let mut h = self.conn.roaming_history.lock().await;
+    async fn push_history(conn: &PeerConn, addr: SocketAddr) {
+        let mut h = conn.roaming_history.lock().await;
         if !h.contains(&addr) {
             h.insert(0, addr);
             h.truncate(5);
@@ -361,6 +373,52 @@ impl Transport {
         true
     }
 
+    /// FluxMesh bug fix: generalizes
+    /// [`Self::install_primary_session_if_generation`] to whichever slot
+    /// (primary or `extra`) already tracks `id`, instead of always the
+    /// primary. Used for two cases the primary-only version can't reach:
+    /// (a) a planned rekey where THIS daemon is the deterministic initiator
+    /// for a SECONDARY peer (DIR-P2-03's trigger used to be primary-only);
+    /// (b) a secondary's reconnect after its previous session went stale
+    /// (peer crash/restart) without yet being ghost-timed-out — without
+    /// this, `run_responder`'s empty-slot-only CAS (`try_install_session`)
+    /// rejects the fresh handshake and the secondary stays dark until the
+    /// ~9s ghost-timeout finally clears the stale session.
+    ///
+    /// Returns `false` (no-op) if `id` has no known `PeerConn` at all —
+    /// callers must resolve an existing generation first (e.g. via
+    /// [`Self::session_generation_for`]); this is never the right call for
+    /// installing a brand-new peer's first session (use
+    /// [`Self::try_install_session`] for that).
+    pub async fn install_session_if_generation_for(
+        &self,
+        id: [u8; 32],
+        session: Session,
+        expected_generation: u64,
+    ) -> bool {
+        let Some(target) = self.conn_for(id).await else {
+            return false;
+        };
+        let mut g = target.session.lock().await;
+        if target.session_generation.load(Ordering::SeqCst) != expected_generation {
+            return false;
+        }
+        *g = Some(session);
+        // Same atomic-commit ordering as `install_primary_session_if_generation`:
+        // bump the generation while `g` is still held so a concurrent racer
+        // blocked on this same lock observes the new generation and its own
+        // CAS correctly fails instead of double-installing.
+        target.session_generation.fetch_add(1, Ordering::SeqCst);
+        drop(g);
+        *target.last_peer_id.lock().await = Some(id);
+        target
+            .session_established_at_ms
+            .store(now_ms(), Ordering::SeqCst);
+        target.bytes_since_established.store(0, Ordering::SeqCst);
+        self.session_notify.notify_one();
+        true
+    }
+
     /// Current `session_generation` of the primary slot. Read by the
     /// rekey watchdog / rekey initiator before starting a (slow) Noise
     /// exchange, then passed back to
@@ -370,6 +428,19 @@ impl Transport {
     #[must_use]
     pub fn primary_session_generation(&self) -> u64 {
         self.conn.session_generation.load(Ordering::SeqCst)
+    }
+
+    /// Like [`Self::primary_session_generation`] but resolves to whichever
+    /// slot (primary or `extra`) already tracks `id`, or `None` if `id` is
+    /// unknown. FluxMesh rekey-watchdog fix: lets the watchdog snapshot a
+    /// SECONDARY's generation too, so a planned rekey (or a stale-session
+    /// replace) can target it via [`Self::install_session_if_generation_for`]
+    /// the same way [`Self::primary_session_generation`] +
+    /// [`Self::install_primary_session_if_generation`] do for the primary.
+    #[must_use]
+    pub async fn session_generation_for(&self, id: [u8; 32]) -> Option<u64> {
+        let c = self.conn_for(id).await?;
+        Some(c.session_generation.load(Ordering::SeqCst))
     }
 
     pub async fn drop_session(&self) {
@@ -443,6 +514,16 @@ impl Transport {
     #[must_use]
     pub fn session_bytes(&self) -> u64 {
         self.conn.bytes_since_established.load(Ordering::Relaxed)
+    }
+
+    /// Like [`Self::session_bytes`] but resolves to whichever `PeerConn`
+    /// (primary or `extra`) currently holds `peer_id`, so the rekey watchdog
+    /// can read a SECONDARY's own byte budget instead of assuming the
+    /// primary's. `None` if `peer_id` has no known `PeerConn`.
+    #[must_use]
+    pub async fn session_bytes_for(&self, peer_id: [u8; 32]) -> Option<u64> {
+        let c = self.conn_for(peer_id).await?;
+        Some(c.bytes_since_established.load(Ordering::Relaxed))
     }
 
     /// Send a typed datagram to the given address, prefixing the body
@@ -523,6 +604,32 @@ impl Transport {
             *c.session.lock().await = None;
             c.session_generation.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// Permanent teardown: drops `peer_id`'s session like
+    /// [`Self::drop_session_for`] AND, if it was tracked in `extra` (a
+    /// FluxMesh secondary), removes the whole `PeerConn` stub too — unlike
+    /// `drop_session_for`, which deliberately leaves the stub behind so a
+    /// live-but-stale secondary session can still be generation-CAS-replaced
+    /// by a reconnecting peer (see [`Self::install_session_if_generation_for`]).
+    ///
+    /// Use this ONLY where the teardown is paired with revoking trust
+    /// (`CmdOp::Revoke`, a `PairConfirm` reject, or the pending-reaper's
+    /// expiry-revoke) — once untrusted, the peer can never legitimately
+    /// reconnect, so nothing depends on the stub surviving, and leaving it
+    /// behind forever would grow `extra` unboundedly across repeated
+    /// pair/revoke churn. Ordinary transient teardowns (`Msg::Bye`, the
+    /// secondary ghost-timeout) must keep using `drop_session_for` — trust
+    /// is intact there and the stub is exactly what lets a fast reconnect
+    /// skip the ghost-timeout wait.
+    ///
+    /// No-op on the `extra` removal if `peer_id` is (or was) the primary:
+    /// the primary slot is a fixed field, not a map entry, so there is
+    /// nothing to leak — its next occupant reclaims it naturally via
+    /// `acquire_conn` once the session is empty.
+    pub async fn purge_peer(&self, peer_id: [u8; 32]) {
+        self.drop_session_for(peer_id).await;
+        self.extra.lock().await.remove(&peer_id);
     }
 
     /// Set the current peer address for `peer_id`, if known.
@@ -991,6 +1098,73 @@ mod tests {
         assert_eq!(transport.promote_secondary().await, None);
     }
 
+    /// FluxMesh bug: `set_peer_info` used to write unconditionally to the
+    /// primary slot (`self.conn`), even for a peer whose session
+    /// `install_session`/`try_install_session` had just routed into `extra`.
+    /// Every handshake path (`run_initiator`/`run_responder`/
+    /// `run_rekey_initiator`) calls `set_peer_info(id, addr)` right after
+    /// installing that same `id`'s session, so a secondary handshake would
+    /// stamp the secondary's id onto the PRIMARY's `last_peer_id` while the
+    /// primary's own session key material stayed untouched — corrupting
+    /// `cached_peer_id`/`linked_peer_ids` and misrouting `recv`. This proves
+    /// `set_peer_info` now resolves the same `PeerConn` `acquire_conn` (and
+    /// therefore the prior session install) already picked.
+    #[tokio::test]
+    async fn set_peer_info_routes_to_the_same_conn_as_the_session_install() {
+        use super::Transport;
+        use fluxsync_crypto::{test_util::pair_for_test, Identity};
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.unwrap();
+        let transport = Arc::new(transport);
+
+        let me = Identity::generate();
+        let (sess1, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (sess2, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (primary_id, secondary_id) = ([1u8; 32], [2u8; 32]);
+
+        // First install claims the primary slot; the second, arriving while
+        // the primary is still live, routes to `extra` (FluxMesh 2C-b).
+        transport.install_session(primary_id, sess1).await;
+        transport.install_session(secondary_id, sess2).await;
+        assert_eq!(transport.cached_peer_id().await, Some(primary_id));
+
+        // What every handshake path does next: record the just-installed
+        // peer's address via `set_peer_info`.
+        let secondary_addr: SocketAddr = "127.0.0.1:4001".parse().unwrap();
+        transport.set_peer_info(secondary_id, secondary_addr).await;
+
+        // The primary's identity must be untouched by the secondary's
+        // post-install bookkeeping.
+        assert_eq!(
+            transport.cached_peer_id().await,
+            Some(primary_id),
+            "set_peer_info for a secondary must not corrupt the primary's cached_peer_id"
+        );
+        assert_eq!(
+            transport.peer_addr_for(secondary_id).await,
+            Some(secondary_addr),
+            "the secondary's own address must still be recorded on its own conn"
+        );
+        assert_eq!(
+            transport.linked_peer_ids().await,
+            vec![primary_id, secondary_id],
+            "both peers must still be independently linked, no duplicates/drops"
+        );
+
+        // Symmetric primary-case check: `set_peer_info` for the primary's OWN
+        // id must keep routing to the primary slot (matches the Revoke/rekey
+        // path, which relies on this for the already-linked reconnect case).
+        let primary_addr: SocketAddr = "127.0.0.1:4002".parse().unwrap();
+        transport.set_peer_info(primary_id, primary_addr).await;
+        assert_eq!(transport.cached_peer_id().await, Some(primary_id));
+        assert_eq!(
+            transport.peer_addr_for(primary_id).await,
+            Some(primary_addr)
+        );
+    }
+
     /// DIR-P2-03: `install_primary_session_if_generation` is the mechanism a
     /// planned rekey uses to replace a still-live session. Proves the two
     /// halves of its contract: (1) it commits and advances
@@ -1095,5 +1269,139 @@ mod tests {
             expected_generation + 1,
             "the generation must advance exactly once, not twice"
         );
+    }
+
+    /// FluxMesh bug fix (Bug #10b): a secondary's reconnect after its peer
+    /// crashed/restarted used to be rejected by `try_install_session`'s
+    /// empty-slot-only CAS as long as its stale-but-`Some` session survived
+    /// (i.e. until the ~9s ghost-timeout finally nulled it out).
+    /// `install_session_if_generation_for` fixes this by generalizing the
+    /// primary's generation-gated replace to whichever slot (primary or
+    /// `extra`) already tracks the peer, so a fresh handshake can replace a
+    /// still-live stale session immediately. Proves: (1) the empty-slot CAS
+    /// really does reject the stale secondary (reproducing the original
+    /// bug), (2) the generation-gated replace succeeds against that same
+    /// stale session, (3) a stale/duplicate attempt with the now-outdated
+    /// generation loses cleanly, and (4) an unknown id (no `PeerConn` at
+    /// all) is rejected rather than silently routed to the primary.
+    #[tokio::test]
+    async fn install_session_if_generation_for_replaces_a_stale_secondary_session() {
+        use super::Transport;
+        use fluxsync_crypto::{test_util::pair_for_test, Identity};
+        use std::sync::Arc;
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.unwrap();
+        let transport = Arc::new(transport);
+
+        let me = Identity::generate();
+        let (sess_primary, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (sess_secondary_stale, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (primary_id, secondary_id) = ([1u8; 32], [2u8; 32]);
+        transport.install_session(primary_id, sess_primary).await;
+        transport.install_session(secondary_id, sess_secondary_stale).await;
+        assert_eq!(transport.cached_peer_id().await, Some(primary_id));
+
+        // The original bug: the secondary's peer crashed/restarted and is
+        // reconnecting BEFORE the ghost-timeout cleared its stale (but still
+        // `Some`) session — the empty-slot-only CAS must reject this.
+        let (sess_fresh, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        assert!(
+            !transport.try_install_session(secondary_id, sess_fresh).await,
+            "the empty-slot CAS must reject a still-live stale secondary session"
+        );
+
+        // The fix: a generation-gated replace succeeds against that SAME
+        // stale session, immediately — no need to wait for the ghost-timeout.
+        let expected_generation = transport
+            .session_generation_for(secondary_id)
+            .await
+            .expect("secondary must have a known generation");
+        let (sess_fresh2, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        assert!(
+            transport
+                .install_session_if_generation_for(secondary_id, sess_fresh2, expected_generation)
+                .await,
+            "a fresh handshake must be able to replace a stale secondary session immediately"
+        );
+        assert!(transport.has_session_for(secondary_id).await);
+
+        // A stale/duplicate attempt with the OLD (now outdated) generation
+        // must lose cleanly, exactly like the primary-only CAS does.
+        let (sess_dup, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        assert!(
+            !transport
+                .install_session_if_generation_for(secondary_id, sess_dup, expected_generation)
+                .await,
+            "a stale generation must not be able to clobber the just-replaced session"
+        );
+
+        // The primary is untouched throughout.
+        assert_eq!(transport.cached_peer_id().await, Some(primary_id));
+        assert!(transport.has_session_for(primary_id).await);
+
+        // An id with no known `PeerConn` at all must fail cleanly — never
+        // silently routed to the primary or creating a phantom `extra` entry.
+        let (sess_unknown, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        assert!(
+            !transport
+                .install_session_if_generation_for([9u8; 32], sess_unknown, 0)
+                .await,
+            "an unknown peer id must never CAS-install via this method"
+        );
+    }
+
+    /// FluxMesh bug fix (Bug #16): `extra` entries used to be removed only by
+    /// `promote_secondary` — `drop_session_for` (the ordinary transient
+    /// teardown path: `Msg::Bye`, ghost-timeout) only ever nulls the session,
+    /// leaving the `PeerConn` stub behind forever. Over repeated pair/revoke
+    /// churn this grows `extra` unboundedly. `purge_peer` (used at the
+    /// PERMANENT teardown sites — Revoke, PairConfirm-reject, pending-reaper
+    /// expiry) removes the whole stub. Proves the stub really is gone
+    /// (`session_established_at_for` — which survives an ordinary
+    /// `drop_session_for` — returns `None` after `purge_peer`), and that the
+    /// primary slot (a fixed field, not a map entry) is unaffected.
+    #[tokio::test]
+    async fn purge_peer_removes_the_extra_stub_entirely() {
+        use super::Transport;
+        use fluxsync_crypto::{test_util::pair_for_test, Identity};
+        use std::sync::Arc;
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.unwrap();
+        let transport = Arc::new(transport);
+
+        let me = Identity::generate();
+        let (sess1, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (sess2, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (primary_id, secondary_id) = ([1u8; 32], [2u8; 32]);
+        transport.install_session(primary_id, sess1).await;
+        transport.install_session(secondary_id, sess2).await;
+        assert_eq!(transport.cached_peer_id().await, Some(primary_id));
+
+        // An ordinary transient teardown (`drop_session_for`) leaves the
+        // stub in place — established-time bookkeeping still resolves.
+        transport.drop_session_for(secondary_id).await;
+        assert!(
+            transport.session_established_at_for(secondary_id).await.is_some(),
+            "an ordinary drop must leave the extra stub in place"
+        );
+
+        // A permanent teardown (`purge_peer`) removes the stub entirely.
+        transport.purge_peer(secondary_id).await;
+        assert_eq!(
+            transport.session_established_at_for(secondary_id).await,
+            None,
+            "a permanently-revoked peer's extra stub must be fully removed, not just nulled"
+        );
+
+        // The primary is unaffected — `purge_peer` only ever removes an
+        // `extra` entry; the primary slot has nothing to leak.
+        assert!(transport.has_session_for(primary_id).await);
+        assert_eq!(transport.cached_peer_id().await, Some(primary_id));
+
+        // Calling `purge_peer` on the primary's own id is a safe no-op on
+        // the `extra` side (nothing to remove there); the session drop half
+        // still behaves like `drop_session_for`.
+        transport.purge_peer(primary_id).await;
+        assert!(!transport.has_session_for(primary_id).await);
     }
 }
