@@ -247,7 +247,27 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                 // to a plaintext identity.bin. If AndroidKeyStore itself is
                 // broken on this device, fall back to that legacy plaintext
                 // path with a loud log rather than failing to boot at all.
-                val secret = KeystoreIdentityStore.readOrMigrate(filesDir)
+                val identityResult = KeystoreIdentityStore.readOrMigrate(filesDir)
+                if (identityResult is KeystoreIdentityStore.IdentityResult.Unreadable) {
+                    // Fail closed: identity.enc exists but could not be
+                    // decrypted (corrupt file, or the AndroidKeyStore key
+                    // didn't survive a factory-reset/restore-to-new-device).
+                    // The legacy plaintext fallback is already gone by this
+                    // point, so booting with IdentitySource.Keystore/Generate
+                    // here would silently mint a brand-new identity and
+                    // orphan every paired peer with zero user signal. Abort
+                    // the boot instead and surface it — the user must
+                    // deliberately clear app data and re-pair.
+                    android.util.Log.e(
+                        "FluxSync",
+                        "Stored identity exists but is undecryptable (${identityResult.cause.message}); " +
+                            "refusing to auto-generate a replacement. Daemon NOT started.",
+                        identityResult.cause,
+                    )
+                    FluxsyncManager.reportIdentityUnreadable()
+                    return@launch
+                }
+                val secret = (identityResult as? KeystoreIdentityStore.IdentityResult.Ready)?.secret
                 val identity = if (secret != null) {
                     IdentitySource.Provided(secret = secret, dir = keystore)
                 } else {

@@ -32,6 +32,12 @@ pub enum ProtoError {
     #[error("hello platform too long: {0} bytes (max 16)")]
     HelloPlatformTooLong(usize),
 
+    #[error("hello name contains a control character")]
+    HelloNameNotPrintable,
+
+    #[error("hello platform is not ASCII printable")]
+    HelloPlatformNotAsciiPrintable,
+
     #[error("too many hello caps: {0} entries (max 32)")]
     HelloCapsTooMany(usize),
 

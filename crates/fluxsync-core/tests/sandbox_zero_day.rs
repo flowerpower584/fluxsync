@@ -49,7 +49,7 @@ fn untrusted_peer_seen_clears_peer_name() {
     let (mut app, wall) = paired_app();
 
     // Simulate the Mac going away.
-    app.handle(Event::PeerLost, &wall);
+    app.handle(Event::PeerLost { peer_id: [1; 32] }, &wall);
     assert_eq!(app.phase, Phase::Discovering);
     assert_eq!(
         app.state.peer_name, "MacBook-Pro",
@@ -95,7 +95,7 @@ fn ghost_timeout_clears_peer_name() {
     let (mut app, wall) = paired_app();
 
     // Simulate the Mac going away.
-    app.handle(Event::PeerLost, &wall);
+    app.handle(Event::PeerLost { peer_id: [1; 32] }, &wall);
     assert_eq!(app.phase, Phase::Discovering);
     assert_eq!(app.state.peer_name, "MacBook-Pro");
 
@@ -163,7 +163,7 @@ fn wifi_blip_does_not_clear_peer() {
     let (mut app, wall) = paired_app();
 
     // Mac goes away.
-    app.handle(Event::PeerLost, &wall);
+    app.handle(Event::PeerLost { peer_id: [1; 32] }, &wall);
     assert_eq!(app.phase, Phase::Discovering);
     assert_eq!(app.state.peer_name, "MacBook-Pro");
 
@@ -199,7 +199,7 @@ fn wifi_blip_does_not_clear_peer() {
 #[test]
 fn untrusted_peer_different_name_still_drops() {
     let (mut app, wall) = paired_app();
-    app.handle(Event::PeerLost, &wall);
+    app.handle(Event::PeerLost { peer_id: [1; 32] }, &wall);
 
     let actions = app.handle(
         Event::UntrustedPeerSeen {
@@ -221,7 +221,7 @@ fn untrusted_peer_different_name_still_drops() {
 #[test]
 fn manual_unpair_from_discovering() {
     let (mut app, wall) = paired_app();
-    app.handle(Event::PeerLost, &wall);
+    app.handle(Event::PeerLost { peer_id: [1; 32] }, &wall);
     assert_eq!(app.phase, Phase::Discovering);
 
     let actions = app.handle(Event::ManualUnpair, &wall);

@@ -28,6 +28,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
@@ -79,6 +80,7 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
     val error by vm.error.collectAsStateWithLifecycle()
     val isAccessibilityEnabled by vm.isAccessibilityEnabled.collectAsStateWithLifecycle()
     val serviceStale by vm.serviceStale.collectAsStateWithLifecycle()
+    val identityUnreadable by vm.identityUnreadable.collectAsStateWithLifecycle()
 
     // DIR-P3-07: offered once on the first successful pairing (see the
     // PAIR_VERIFY/PAIR_DASHBOARD success handlers below), gated so an
@@ -94,6 +96,17 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
 
     if (!isAccessibilityEnabled) {
         sn.kaolack.fluxsync.ui.screens.AccessibilityBlockingScreen()
+        return
+    }
+
+    // The daemon deliberately refused to boot rather than mint a
+    // replacement identity — see FluxsyncAccessibilityService.ensureDaemonAlive
+    // and KeystoreIdentityStore.IdentityResult.Unreadable. Blocking here
+    // (rather than a dismissible banner) is intentional: proceeding would
+    // let the user believe sync is working while every peer silently
+    // rejects this device.
+    if (identityUnreadable) {
+        IdentityUnreadableScreen()
         return
     }
 
@@ -218,6 +231,35 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
                 showBatteryPrompt = false
             },
         )
+    }
+}
+
+/**
+ * Shown instead of the normal app when the stored identity exists but
+ * could not be decrypted (corrupted `identity.enc`, or an AndroidKeyStore
+ * key that didn't survive a factory-reset/restore-to-new-device). FluxSync
+ * refuses to auto-generate a replacement identity because that would
+ * silently disconnect every paired peer with no signal to the user — this
+ * screen IS that signal. Recovery requires the user to deliberately clear
+ * the app's storage (Settings → Apps → FluxSync → Storage → Clear data)
+ * and re-pair every device.
+ */
+@Composable
+private fun IdentityUnreadableScreen() {
+    Scaffold { padding ->
+        Box(
+            Modifier.fillMaxSize().padding(padding).padding(24.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "FluxSync can't read its saved device identity. This can happen after a " +
+                    "factory reset or restoring to a new device.\n\n" +
+                    "To avoid silently disconnecting your paired devices, FluxSync will not " +
+                    "generate a replacement automatically.\n\n" +
+                    "Clear FluxSync's app storage in Android Settings, then re-pair your devices.",
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }
 

@@ -26,7 +26,12 @@ pub enum Event {
     PeerCaps {
         caps: Vec<String>,
     },
-    PeerLost,
+    /// The peer whose link just died. Threaded so peer-scoped state (e.g.
+    /// `State.sas_peer`) only resets when the peer that dropped is the one
+    /// it currently names — see the peer-scoping guard in `App::handle`.
+    PeerLost {
+        peer_id: [u8; 32],
+    },
     HandshakeOk,
     HandshakeTimeout,
     SetTrustedPeer {
@@ -133,23 +138,33 @@ pub enum Event {
     /// completed, nobody has confirmed the 6 SAS words yet). Sets
     /// `State.sas_phase` to `"showing"` unconditionally — a new pairing
     /// always overwrites any leftover phase from a previous attempt.
-    SasPairingStarted,
+    /// `peer_id`: the peer this pairing is with — recorded into
+    /// `State.sas_peer` (L3 fix) so a later `SasPeerConfirmed`/
+    /// `SasPeerRejected` from an unrelated peer can't stomp this one's
+    /// verify UI.
+    SasPairingStarted { peer_id: [u8; 32] },
     /// The local user confirmed the SAS words (`fluxctl pair confirm
     /// --accept`). Moves `sas_phase` to `"confirmed"` if the peer already
     /// confirmed (or is a legacy build treated as auto-confirmed), else to
-    /// `"local_confirmed"`.
+    /// `"local_confirmed"`. Not peer-scoped: there is only ever one local
+    /// confirm action available at a time, targeting whichever peer
+    /// `State.sas_peer` already names.
     SasLocalConfirmed,
     /// The peer confirmed the SAS words — either via an inbound
     /// `Msg::PairConfirm { accept: true }`, or because its `Hello` did not
     /// advertise the `sas-confirm` capability (legacy build, auto-treated
     /// as confirmed so a new build never waits forever on an old one).
     /// Moves `sas_phase` to `"confirmed"` if the local side already
-    /// confirmed, else to `"peer_confirmed"`.
-    SasPeerConfirmed,
+    /// confirmed, else to `"peer_confirmed"`. L3 fix: `peer_id` must match
+    /// `State.sas_peer` or the transition is ignored — an unrelated peer's
+    /// confirm must not advance a DIFFERENT peer's in-flight SAS phase.
+    SasPeerConfirmed { peer_id: [u8; 32] },
     /// The peer explicitly rejected the pairing (inbound
     /// `Msg::PairConfirm { accept: false }`). Sets `sas_phase` to
-    /// `"peer_rejected"` unconditionally.
-    SasPeerRejected,
+    /// `"peer_rejected"` unconditionally. L3 fix: `peer_id` must match
+    /// `State.sas_peer` or the transition is ignored — see
+    /// `SasPeerConfirmed`.
+    SasPeerRejected { peer_id: [u8; 32] },
     /// The pending reaper revoked an unconfirmed pair after the 90s
     /// pairing window expired. Resets `sas_phase` to `"idle"`.
     SasReset,
@@ -191,6 +206,14 @@ pub enum Action {
         kind: Kind,
         /// Raw bytes to write to the OS clipboard — decoded per `kind`.
         payload: Vec<u8>,
+        /// L1 fix: propagates the item's firewall-sensitivity to the daemon
+        /// so an Android `WriteClipboard{kind: Image, ..}` handler can skip
+        /// the persistent `IMAGE_CACHE` for a sensitive image instead of
+        /// silently caching it in RAM past a security wipe. A locally
+        /// re-emitted write-back (e.g. `resolve_pending`) carries whatever
+        /// sensitivity the parked item had; a fresh local copy is always
+        /// `false` here since it never round-trips through `WriteClipboard`.
+        sensitive: bool,
     },
     EmitState,
     EmitLog(LogEntry),

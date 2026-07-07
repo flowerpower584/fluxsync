@@ -90,3 +90,93 @@ fn no_silent_truncation_send_path() {
         "encode() must reject (not truncate), got {err:?}"
     );
 }
+
+// Terminal-injection regression: `Hello.name` / `Hello.platform` are peer-
+// controlled strings that flow straight into the tray UI and into fluxctl's
+// raw `println!` terminal output. `Hello.caps` already got an ASCII-
+// printable gate; `name`/`platform` never did, so a paired (or mDNS-name-
+// spoofing) peer could smuggle ANSI/OSC escape sequences or CR/NUL bytes
+// into a victim's terminal on the next `fluxctl status`. These tests mirror
+// the raw-CBOR technique above so a hostile peer that crafts bytes bypassing
+// our own `encode()` gate is still rejected by `decode()`, the real wire
+// ingress.
+
+fn raw_hello(name: &str, platform: &str) -> Vec<u8> {
+    raw_cbor(&Frame {
+        version: PROTOCOL_VERSION,
+        msg: Msg::Hello(Hello {
+            name: name.to_string(),
+            platform: platform.to_string(),
+            caps: vec![],
+        }),
+    })
+}
+
+#[test]
+fn hostile_control_chars_in_name_rejected_on_decode() {
+    for hostile in ["evil\rname", "evil\x1bname", "evil\0name"] {
+        let bytes = raw_hello(hostile, "linux");
+        let result = decode(&bytes);
+        assert!(
+            matches!(result, Err(ProtoError::HelloNameNotPrintable)),
+            "decode() must reject a control char in name ({hostile:?}), got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn hostile_control_chars_in_platform_rejected_on_decode() {
+    for hostile in ["lin\rux", "lin\x1bux", "lin\0ux"] {
+        let bytes = raw_hello("A", hostile);
+        let result = decode(&bytes);
+        assert!(
+            matches!(result, Err(ProtoError::HelloPlatformNotAsciiPrintable)),
+            "decode() must reject a control char in platform ({hostile:?}), got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn normal_ascii_name_and_platform_decode_fine() {
+    let bytes = raw_hello("Dethie's MacBook", "macos");
+    assert!(decode(&bytes).is_ok());
+}
+
+#[test]
+fn legit_non_ascii_utf8_name_decodes_fine() {
+    // Device names are user-chosen and may be non-ASCII (accented / CJK
+    // characters); only control characters are disallowed, not the full
+    // non-ASCII range that `Hello.caps` restricts.
+    let bytes = raw_hello("松本さんのMac", "macos");
+    assert!(
+        decode(&bytes).is_ok(),
+        "a non-ASCII UTF-8 device name with no control chars must decode"
+    );
+}
+
+#[test]
+fn non_ascii_platform_is_rejected() {
+    // Unlike `name`, `platform` is drawn from a closed ASCII set
+    // (macos/windows/linux/android/ios/unknown), so it stays ASCII-printable
+    // only, same gate as `Hello.caps`.
+    let bytes = raw_hello("A", "état");
+    assert!(matches!(
+        decode(&bytes),
+        Err(ProtoError::HelloPlatformNotAsciiPrintable)
+    ));
+}
+
+#[test]
+fn no_silent_truncation_send_path_control_chars() {
+    // encode() (send path) must also refuse control chars, not just decode().
+    let frame = Frame {
+        version: PROTOCOL_VERSION,
+        msg: Msg::Hello(Hello {
+            name: "evil\rname".into(),
+            platform: "linux".into(),
+            caps: vec![],
+        }),
+    };
+    let err = encode(&frame);
+    assert!(matches!(err, Err(ProtoError::HelloNameNotPrintable)));
+}

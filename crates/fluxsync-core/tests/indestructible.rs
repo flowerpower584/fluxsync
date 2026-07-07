@@ -90,7 +90,7 @@ fn lifecycle_full_happy_path() {
 #[test]
 fn lifecycle_peer_lost_then_rediscovery() {
     let mut app = linked_app();
-    let a = app.handle(Event::PeerLost, &wall());
+    let a = app.handle(Event::PeerLost { peer_id: [7; 32] }, &wall());
     assert_eq!(app.phase, Phase::Discovering);
     assert!(a.contains(&Action::CloseSession));
     assert!(a.contains(&Action::StartDiscovery));
@@ -787,7 +787,7 @@ fn emit_state_on_every_meaningful_event() {
         "clipboard receive must emit"
     );
 
-    let a = app.handle(Event::PeerLost, &wall());
+    let a = app.handle(Event::PeerLost { peer_id: [7; 32] }, &wall());
     assert!(a.contains(&Action::EmitState), "peer lost must emit");
 }
 
@@ -869,7 +869,7 @@ fn stress_peer_bounce_10_cycles() {
         assert_eq!(app.phase, Phase::Linked);
         assert_eq!(app.snapshot().peer_name, format!("Peer-{i}"));
 
-        app.handle(Event::PeerLost, &wall());
+        app.handle(Event::PeerLost { peer_id: [i; 32] }, &wall());
         assert_eq!(app.phase, Phase::Discovering);
         // peer_name stays persistent across PeerLost (by design)
         assert!(!app.snapshot().peer_name.is_empty());

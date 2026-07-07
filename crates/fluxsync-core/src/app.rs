@@ -54,6 +54,25 @@ fn cap_history_keeping_favorites(history: &mut Vec<HistoryItem>) {
     });
 }
 
+/// L2 fix: is `c` a Unicode bidi-override or invisible format character
+/// that a display-safe device name must reject? `char::is_control` alone
+/// (Unicode Cc) lets these through, since they're category Cf, not Cc —
+/// enabling visual name-spoofing (e.g. U+202E RIGHT-TO-LEFT OVERRIDE can
+/// make "eviD.exe" render as "exe.Devi"). Deliberately a narrow, explicit
+/// set (bidi controls + ZWSP/ZWNJ/ZWJ/LRM/RLM + the BOM/ZWNBSP) rather than
+/// "reject all Cf" so ordinary international text — accents, CJK, etc. —
+/// is never affected. `fluxsync_proto::codec` duplicates this exact
+/// predicate (proto cannot depend on core) — keep the two in sync.
+fn is_bidi_or_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x200B..=0x200F // ZWSP, ZWNJ, ZWJ, LRM, RLM
+            | 0x202A..=0x202E // LRE, RLE, PDF, LRO, RLO
+            | 0x2066..=0x2069 // LRI, RLI, FSI, PDI
+            | 0xFEFF // BOM / ZERO WIDTH NO-BREAK SPACE
+    )
+}
+
 /// One per-peer link in the mesh. Today it carries only the FSM phase; later
 /// phases grow per-peer session metrics, role (send/receive-only), and
 /// last-seen. Keeping a phase *per link* is what lets several devices be in
@@ -189,9 +208,9 @@ impl App {
                 fluxsync_proto::MAX_HELLO_NAME
             )));
         }
-        if trimmed.chars().any(char::is_control) {
+        if trimmed.chars().any(|c| c.is_control() || is_bidi_or_format_char(c)) {
             return Err(CoreError::InvalidDeviceName(
-                "name contains non-printable characters".into(),
+                "name contains non-printable or bidi/format characters".into(),
             ));
         }
         self.config.peer_name_self = trimmed.to_string();
@@ -326,6 +345,7 @@ impl App {
             Direction::Inbound => Action::WriteClipboard {
                 kind: p.kind,
                 payload: p.payload,
+                sensitive: p.sensitive,
             },
         };
         vec![action, Action::EmitState]
@@ -673,7 +693,7 @@ impl App {
                     }
                 }
             }
-            Event::PeerLost => {
+            Event::PeerLost { peer_id } => {
                 self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
                 // Session died mid-SAS-verification (e.g. the peer's reaper
@@ -684,11 +704,20 @@ impl App {
                 // and the follow-up PeerLost must not clobber the verdict
                 // the UI needs to display. "confirmed" survives too: a
                 // completed verification is not undone by a link drop.
-                if matches!(
-                    self.state.sas_phase.as_str(),
-                    "showing" | "peer_confirmed" | "local_confirmed"
-                ) {
+                //
+                // Peer-scoped (fixes the former L3 residual): `PeerLost` now
+                // carries the `peer_id` of the link that actually died, so a
+                // PRIMARY disconnect can no longer clobber a SECONDARY mesh
+                // peer's own in-flight SAS pairing (and vice versa) — only
+                // reset when the dropped peer is the one `sas_peer` names.
+                if self.state.sas_peer == Some(*peer_id)
+                    && matches!(
+                        self.state.sas_phase.as_str(),
+                        "showing" | "peer_confirmed" | "local_confirmed"
+                    )
+                {
                     self.state.sas_phase = "idle".to_string();
+                    self.state.sas_peer = None;
                 }
             }
             Event::PrimaryFailover {
@@ -725,6 +754,7 @@ impl App {
                 self.drop_pending_all();
                 self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
                 self.state.sas_phase = "idle".to_string();
+                self.state.sas_peer = None;
             }
             Event::GhostTimeout
                 if !matches!(self.phase, Phase::Linked | Phase::Paused | Phase::Halted) =>
@@ -739,6 +769,7 @@ impl App {
                 self.drop_pending_all();
                 self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
                 self.state.sas_phase = "idle".to_string();
+                self.state.sas_peer = None;
             }
             Event::ManualUnpair => {
                 self.state.on = false;
@@ -759,9 +790,11 @@ impl App {
                 // is gone, so they would otherwise leak forever.
                 self.drop_pending_all();
                 self.state.sas_phase = "idle".to_string();
+                self.state.sas_peer = None;
             }
-            Event::SasPairingStarted => {
+            Event::SasPairingStarted { peer_id } => {
                 self.state.sas_phase = "showing".to_string();
+                self.state.sas_peer = Some(*peer_id);
             }
             Event::SasLocalConfirmed => {
                 self.state.sas_phase = if matches!(
@@ -773,7 +806,12 @@ impl App {
                     "local_confirmed".to_string()
                 };
             }
-            Event::SasPeerConfirmed => {
+            // L3 fix: ignore a confirm from a peer OTHER than the one
+            // `sas_peer` is currently tracking — an unrelated peer's Hello
+            // (legacy-cap auto-confirm) or inbound `PairConfirm{accept:
+            // true}` must never advance a DIFFERENT, in-progress pairing's
+            // phase.
+            Event::SasPeerConfirmed { peer_id } if self.state.sas_peer == Some(*peer_id) => {
                 self.state.sas_phase = if matches!(
                     self.state.sas_phase.as_str(),
                     "local_confirmed" | "confirmed"
@@ -783,11 +821,15 @@ impl App {
                     "peer_confirmed".to_string()
                 };
             }
-            Event::SasPeerRejected => {
+            // L3 fix: same peer-scoping as `SasPeerConfirmed` above. A confirm/
+            // reject whose peer_id != sas_peer falls through to the `_` arm
+            // below and is ignored, so no explicit no-op arm is needed.
+            Event::SasPeerRejected { peer_id } if self.state.sas_peer == Some(*peer_id) => {
                 self.state.sas_phase = "peer_rejected".to_string();
             }
             Event::SasReset => {
                 self.state.sas_phase = "idle".to_string();
+                self.state.sas_peer = None;
             }
             Event::SetTrustedPeer { name } => {
                 self.state.trusted_peer_name = Some(name.clone());
@@ -915,7 +957,7 @@ impl App {
                 | Event::BatteryChangedSelf { .. }
                 | Event::BatteryChangedPeer { .. }
                 | Event::PeerSeen { .. }
-                | Event::PeerLost
+                | Event::PeerLost { .. }
                 | Event::ManualUnpair
                 | Event::UntrustedPeerSeen { .. }
                 | Event::GhostTimeout
@@ -924,10 +966,10 @@ impl App {
                 | Event::ClearHistory { .. }
                 | Event::FrameReceivedClipboard { .. }
                 | Event::LocalClipboardChange { .. }
-                | Event::SasPairingStarted
+                | Event::SasPairingStarted { .. }
                 | Event::SasLocalConfirmed
-                | Event::SasPeerConfirmed
-                | Event::SasPeerRejected
+                | Event::SasPeerConfirmed { .. }
+                | Event::SasPeerRejected { .. }
                 | Event::SasReset
                 | Event::PeerRevoked { .. }
         ) && !actions.contains(&Action::EmitState)
@@ -1647,6 +1689,64 @@ mod tests {
             .any(|h| h.preview == "old retransmit"));
     }
 
+    /// L1 fix: `Action::WriteClipboard.sensitive` must mirror the inbound
+    /// frame's own `sensitive` flag — this is the Event→Action boundary the
+    /// flag used to get dropped at, letting an Android sensitive image
+    /// linger in `IMAGE_CACHE` forever.
+    #[test]
+    fn l1_write_clipboard_action_carries_inbound_sensitive_flag() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Galaxy".into(),
+            },
+            &wall(),
+        );
+        app.handle(Event::HandshakeOk, &wall());
+
+        let sensitive_actions = app.handle(
+            Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
+                hash: [10; 32],
+                kind: Kind::Image,
+                payload: vec![0x89, 0x50, 0x4e, 0x47],
+                preview: "image".into(),
+                lamport: 1,
+                sensitive: true,
+                resync: false,
+            },
+            &wall(),
+        );
+        assert!(
+            sensitive_actions.iter().any(
+                |a| matches!(a, Action::WriteClipboard { sensitive: true, .. })
+            ),
+            "a sensitive inbound image must produce WriteClipboard{{sensitive: true, ..}}"
+        );
+
+        let plain_actions = app.handle(
+            Event::FrameReceivedClipboard {
+                peer_id: [0u8; 32],
+                hash: [11; 32],
+                kind: Kind::Image,
+                payload: vec![0x89, 0x50, 0x4e, 0x47, 0x01],
+                preview: "image".into(),
+                lamport: 2,
+                sensitive: false,
+                resync: false,
+            },
+            &wall(),
+        );
+        assert!(
+            plain_actions.iter().any(
+                |a| matches!(a, Action::WriteClipboard { sensitive: false, .. })
+            ),
+            "a non-sensitive inbound image must produce WriteClipboard{{sensitive: false, ..}}"
+        );
+    }
+
     #[test]
     fn history_capped_at_soft_cap() {
         let mut app = boot();
@@ -2137,6 +2237,27 @@ mod tests {
         ));
     }
 
+    /// L2 fix: a bidi-override character (U+202E RIGHT-TO-LEFT OVERRIDE)
+    /// passes `char::is_control` but must still be rejected — it can make
+    /// the rendered name visually spoof a different string.
+    #[test]
+    fn set_device_name_rejects_bidi_override() {
+        let mut app = boot();
+        assert!(matches!(
+            app.set_device_name("evil\u{202E}exe.gnp"),
+            Err(CoreError::InvalidDeviceName(_))
+        ));
+    }
+
+    /// L2 fix: the bidi/format gate must never reject ordinary
+    /// international text — only the narrow Cf spoofing set.
+    #[test]
+    fn set_device_name_accepts_international_names() {
+        let mut app = boot();
+        assert!(app.set_device_name("Réunion").is_ok());
+        assert!(app.set_device_name("松本のMac").is_ok());
+    }
+
     #[test]
     fn set_device_name_rejects_do_not_mutate_prior_state() {
         let mut app = boot();
@@ -2158,14 +2279,14 @@ mod tests {
     #[test]
     fn sas_pairing_started_sets_showing() {
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "showing");
     }
 
     #[test]
     fn sas_local_confirm_first_moves_to_local_confirmed() {
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasLocalConfirmed, &wall());
         assert_eq!(app.snapshot().sas_phase, "local_confirmed");
     }
@@ -2173,16 +2294,16 @@ mod tests {
     #[test]
     fn sas_peer_confirm_first_moves_to_peer_confirmed() {
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
-        app.handle(Event::SasPeerConfirmed, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
+        app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "peer_confirmed");
     }
 
     #[test]
     fn sas_local_confirm_after_peer_confirmed_moves_to_confirmed() {
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
-        app.handle(Event::SasPeerConfirmed, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
+        app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasLocalConfirmed, &wall());
         assert_eq!(app.snapshot().sas_phase, "confirmed");
     }
@@ -2190,9 +2311,9 @@ mod tests {
     #[test]
     fn sas_peer_confirm_after_local_confirmed_moves_to_confirmed() {
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasLocalConfirmed, &wall());
-        app.handle(Event::SasPeerConfirmed, &wall());
+        app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "confirmed");
     }
 
@@ -2201,28 +2322,28 @@ mod tests {
         // Idempotent: a duplicate confirm from either side must not regress
         // "confirmed" back to a single-sided state.
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasLocalConfirmed, &wall());
-        app.handle(Event::SasPeerConfirmed, &wall());
+        app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasLocalConfirmed, &wall());
         assert_eq!(app.snapshot().sas_phase, "confirmed");
-        app.handle(Event::SasPeerConfirmed, &wall());
+        app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "confirmed");
     }
 
     #[test]
     fn sas_peer_rejected_sets_peer_rejected() {
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasLocalConfirmed, &wall());
-        app.handle(Event::SasPeerRejected, &wall());
+        app.handle(Event::SasPeerRejected { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "peer_rejected");
     }
 
     #[test]
     fn sas_reset_sets_idle() {
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasReset, &wall());
         assert_eq!(app.snapshot().sas_phase, "idle");
     }
@@ -2232,19 +2353,19 @@ mod tests {
         // A fresh pairing must always overwrite any stale phase from a
         // previous, doomed attempt.
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
-        app.handle(Event::SasPeerRejected, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
+        app.handle(Event::SasPeerRejected { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "peer_rejected");
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "showing");
     }
 
     #[test]
     fn manual_unpair_resets_sas_phase_to_idle() {
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasLocalConfirmed, &wall());
-        app.handle(Event::SasPeerConfirmed, &wall());
+        app.handle(Event::SasPeerConfirmed { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "confirmed");
         app.handle(Event::ManualUnpair, &wall());
         assert_eq!(app.snapshot().sas_phase, "idle");
@@ -2253,7 +2374,7 @@ mod tests {
     #[test]
     fn untrusted_peer_seen_resets_sas_phase_to_idle() {
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         app.handle(
             Event::UntrustedPeerSeen {
                 name: "mitm".to_string(),
@@ -2267,7 +2388,7 @@ mod tests {
     fn ghost_timeout_resets_sas_phase_to_idle_when_not_linked() {
         let mut app = boot();
         app.handle(Event::ToggleOn, &wall()); // → Discovering
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::GhostTimeout, &wall());
         assert_eq!(app.snapshot().sas_phase, "idle");
     }
@@ -2278,10 +2399,10 @@ mod tests {
         // confirmed) → our session dies → PeerLost must clear the stale
         // "local_confirmed" now, not wait for GhostTimeout.
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
         app.handle(Event::SasLocalConfirmed, &wall());
         assert_eq!(app.snapshot().sas_phase, "local_confirmed");
-        app.handle(Event::PeerLost, &wall());
+        app.handle(Event::PeerLost { peer_id: [7u8; 32] }, &wall());
         assert_eq!(app.snapshot().sas_phase, "idle");
     }
 
@@ -2290,9 +2411,82 @@ mod tests {
         // A peer reject tears the session down too; the follow-up PeerLost
         // must not clobber the "peer_rejected" verdict the UI displays.
         let mut app = boot();
-        app.handle(Event::SasPairingStarted, &wall());
-        app.handle(Event::SasPeerRejected, &wall());
-        app.handle(Event::PeerLost, &wall());
+        app.handle(Event::SasPairingStarted { peer_id: [7u8; 32] }, &wall());
+        app.handle(Event::SasPeerRejected { peer_id: [7u8; 32] }, &wall());
+        app.handle(Event::PeerLost { peer_id: [7u8; 32] }, &wall());
+        assert_eq!(app.snapshot().sas_phase, "peer_rejected");
+    }
+
+    #[test]
+    fn peer_lost_for_different_peer_does_not_reset_in_flight_sas_phase() {
+        // A secondary mesh peer's SAS pairing must survive an unrelated
+        // peer's PeerLost (e.g. the primary link dying) — only a PeerLost
+        // naming the SAME peer as `sas_peer` may reset the phase.
+        let peer_a = [7u8; 32];
+        let peer_b = [8u8; 32];
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted { peer_id: peer_a }, &wall());
+        app.handle(Event::SasLocalConfirmed, &wall());
+        assert_eq!(app.snapshot().sas_phase, "local_confirmed");
+
+        // A DIFFERENT peer (peer_b) drops — peer_a's pairing must survive.
+        app.handle(Event::PeerLost { peer_id: peer_b }, &wall());
+        assert_eq!(app.snapshot().sas_phase, "local_confirmed");
+        assert_eq!(app.snapshot().sas_peer, Some(peer_a));
+
+        // The peer actually being paired (peer_a) drops — resets as before.
+        app.handle(Event::PeerLost { peer_id: peer_a }, &wall());
+        assert_eq!(app.snapshot().sas_phase, "idle");
+        assert_eq!(app.snapshot().sas_peer, None);
+    }
+
+    /// L3 fix: `sas_phase` is a single global slot, but a `SasPeerConfirmed`
+    /// from an unrelated peer must not be able to advance a DIFFERENT,
+    /// in-progress pairing's phase — e.g. a second concurrent mesh pairing,
+    /// or a stray legacy-auto-confirm racing an unrelated Hello.
+    #[test]
+    fn sas_peer_confirmed_from_wrong_peer_is_ignored() {
+        const PAIRING_PEER: [u8; 32] = [7u8; 32];
+        const OTHER_PEER: [u8; 32] = [9u8; 32];
+
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted { peer_id: PAIRING_PEER }, &wall());
+        assert_eq!(app.snapshot().sas_phase, "showing");
+
+        // An unrelated peer confirming must not touch this pairing's phase.
+        app.handle(Event::SasPeerConfirmed { peer_id: OTHER_PEER }, &wall());
+        assert_eq!(
+            app.snapshot().sas_phase,
+            "showing",
+            "a different peer's confirm must not advance this pairing's phase"
+        );
+
+        // The actual pairing peer confirming still works normally.
+        app.handle(Event::SasPeerConfirmed { peer_id: PAIRING_PEER }, &wall());
+        assert_eq!(app.snapshot().sas_phase, "peer_confirmed");
+    }
+
+    /// L3 fix: same peer-scoping for `SasPeerRejected` — an unrelated
+    /// peer's reject must not falsely mark a DIFFERENT, still-live pairing
+    /// as rejected.
+    #[test]
+    fn sas_peer_rejected_from_wrong_peer_is_ignored() {
+        const PAIRING_PEER: [u8; 32] = [7u8; 32];
+        const OTHER_PEER: [u8; 32] = [9u8; 32];
+
+        let mut app = boot();
+        app.handle(Event::SasPairingStarted { peer_id: PAIRING_PEER }, &wall());
+        app.handle(Event::SasLocalConfirmed, &wall());
+        assert_eq!(app.snapshot().sas_phase, "local_confirmed");
+
+        app.handle(Event::SasPeerRejected { peer_id: OTHER_PEER }, &wall());
+        assert_eq!(
+            app.snapshot().sas_phase,
+            "local_confirmed",
+            "a different peer's reject must not stomp this pairing's phase"
+        );
+
+        app.handle(Event::SasPeerRejected { peer_id: PAIRING_PEER }, &wall());
         assert_eq!(app.snapshot().sas_phase, "peer_rejected");
     }
 }

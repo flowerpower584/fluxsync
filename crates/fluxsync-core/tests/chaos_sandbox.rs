@@ -185,7 +185,7 @@ fn the_ghost_reconnect_test() {
     app.handle(Event::HandshakeOk, &wall);
 
     // We are Linked. Peer is lost.
-    app.handle(Event::PeerLost, &wall);
+    app.handle(Event::PeerLost { peer_id: [1; 32] }, &wall);
     assert_eq!(app.phase, Phase::Discovering);
 
     // Now receive a Reconnect event.

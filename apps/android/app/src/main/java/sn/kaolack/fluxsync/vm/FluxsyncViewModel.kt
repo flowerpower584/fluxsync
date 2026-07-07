@@ -86,6 +86,14 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
     fun clearTransientError() = FluxsyncManager.clearError()
 
     /**
+     * Sticky (not auto-cleared) — true once the AccessibilityService found
+     * an undecryptable `identity.enc` and refused to boot the daemon with a
+     * freshly-generated identity. Drives a blocking screen in FluxsyncApp;
+     * see [FluxsyncManager.reportIdentityUnreadable].
+     */
+    val identityUnreadable: StateFlow<Boolean> = FluxsyncManager.identityUnreadable
+
+    /**
      * FS-018: run a fire-and-forget FFI call with a user-visible error
      * path. A missing handle or a thrown exception reports to
      * [FluxsyncManager.reportError] instead of failing silently.

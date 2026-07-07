@@ -141,6 +141,17 @@ pub async fn run_initiator(
         .ok_or_else(|| anyhow!("handshake channel closed"))?;
 
     let session = initiator.finish(&msg2)?;
+    // H3 fix: a revoke/unpair/wipe that lands while this redial was already
+    // in flight clears `trusted` but has no way to cancel this spawned
+    // task. Re-check right before the install so a peer revoked mid-dial
+    // never ends up with a live session installed after the fact.
+    if !trusted.lock().await.contains_key(&peer_id) {
+        tracing::warn!(
+            peer = ?&peer_id[..6],
+            "H3: peer no longer trusted; aborting handshake install (revoked mid-reconnect)"
+        );
+        return Ok(());
+    }
     // FS-052: SAS bound to this handshake hash. The initiator already
     // authenticated the responder out-of-band (scanned QR / typed PIN), but
     // we still surface the 6 words and gate clipboard so the user can match
@@ -187,7 +198,7 @@ pub async fn run_initiator(
         );
         // FS-052 wire mutual confirm: a fresh pairing always overwrites any
         // leftover `sas_phase` from a previous attempt with the peer.
-        let _ = event_tx.try_send(Event::SasPairingStarted);
+        let _ = event_tx.try_send(Event::SasPairingStarted { peer_id });
     }
 
     let _ = event_tx.try_send(Event::PeerSeen {
@@ -243,6 +254,16 @@ pub async fn run_rekey_initiator(
         .ok_or_else(|| anyhow!("rekey handshake channel closed"))?;
 
     let session = initiator.finish(&msg2)?;
+    // H3 fix: same re-check as `run_initiator` — a revoke/unpair/wipe that
+    // lands mid-rekey must not let this in-flight redial resurrect a live
+    // session for a peer that is no longer trusted.
+    if !trusted.lock().await.contains_key(&peer_id) {
+        tracing::warn!(
+            peer = ?&peer_id[..6],
+            "H3: peer no longer trusted; aborting rekey install (revoked mid-rekey)"
+        );
+        return Ok(());
+    }
     if !transport
         .install_primary_session_if_generation(peer_id, session, expected_generation)
         .await
@@ -427,7 +448,7 @@ pub async fn run_responder(
         );
         // FS-052 wire mutual confirm: a fresh pairing always overwrites any
         // leftover `sas_phase` from a previous attempt with the peer.
-        let _ = event_tx.try_send(Event::SasPairingStarted);
+        let _ = event_tx.try_send(Event::SasPairingStarted { peer_id });
     }
 
     // Install before sending msg2 so a duplicate inbound HandshakeInit
@@ -444,6 +465,19 @@ pub async fn run_responder(
     // original empty-slot-only CAS.
     let installed = match rekey_generation {
         Some(expected) => {
+            // H3 fix: `Some` here means this install would replace an
+            // already-trusted, already-linked peer's session (a rekey) —
+            // re-check trust right before committing so a revoke/unpair/wipe
+            // racing this inbound handshake can't resurrect it. Deliberately
+            // NOT applied to the `None` arm below: that branch legitimately
+            // installs a not-yet-trusted pending (fresh TOFU) peer.
+            if !trusted.lock().await.contains_key(&peer_id) {
+                tracing::warn!(
+                    peer = ?&peer_id[..6],
+                    "H3: peer no longer trusted; aborting rekey install (revoked mid-handshake)"
+                );
+                return Ok(());
+            }
             transport
                 .install_primary_session_if_generation(peer_id, session, expected)
                 .await
@@ -651,6 +685,87 @@ mod tests {
         assert!(
             PAIRING_WINDOW >= Duration::from_secs(30),
             "pairing window must stay usable for a QR scan"
+        );
+    }
+
+    /// H3: a reconnect redial (`run_initiator`) that completes its Noise
+    /// handshake AFTER the peer was removed from `trusted` (simulating a
+    /// revoke/unpair/wipe racing an in-flight redial) must abort the
+    /// install rather than resurrect a live session for a peer we no
+    /// longer trust. Drives the real `run_initiator` against a real
+    /// loopback `Transport`; the "peer" side is played by test code (a
+    /// bare UDP socket + `fluxsync_crypto::Responder`) so the msg1/msg2
+    /// exchange is the genuine wire format, not a shortcut.
+    #[tokio::test]
+    async fn h3_revoked_mid_reconnect_never_installs_session() {
+        use super::{peer_id_for, run_initiator, TrustedPeer, TrustedSet};
+        use crate::transport::{Transport, TYPE_HANDSHAKE_INIT};
+        use fluxsync_core::Event;
+        use fluxsync_crypto::{Identity, Responder};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::net::UdpSocket;
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.expect("bind transport");
+        let transport = Arc::new(transport);
+
+        let my_identity = Identity::generate();
+        let peer_identity = Identity::generate();
+        let peer_static = peer_identity.public_key();
+        let peer_id = peer_id_for(&peer_static);
+
+        // Stands in for the peer's own transport: real UDP socket, no
+        // daemon behind it — just enough for run_initiator's msg1 send to
+        // land somewhere real and for this test to play the responder.
+        let peer_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer socket");
+        let peer_addr = peer_sock.local_addr().expect("peer addr");
+
+        let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
+        trusted.lock().await.insert(
+            peer_id,
+            TrustedPeer { static_pub: peer_static, name: "peer".into() },
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(16);
+        let (msg2_tx, msg2_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+        let handle = tokio::spawn(run_initiator(
+            my_identity,
+            peer_static,
+            peer_addr,
+            transport.clone(),
+            msg2_rx,
+            event_tx,
+            peer_id,
+            "peer".into(),
+            None,
+            trusted.clone(),
+            None,
+        ));
+
+        // Play the peer: receive msg1 off the real socket, compute msg2.
+        let mut buf = [0u8; 2048];
+        let (n, _from) = peer_sock.recv_from(&mut buf).await.expect("recv msg1");
+        assert_eq!(buf[0], TYPE_HANDSHAKE_INIT);
+        let (_peer_session, msg2, _remote_static) =
+            Responder::step(&peer_identity, &buf[1..n]).expect("responder step");
+
+        // H3: the peer is revoked while `run_initiator` is still parked on
+        // `incoming.recv()` awaiting msg2 — exactly the race window the fix
+        // closes.
+        trusted.lock().await.remove(&peer_id);
+
+        msg2_tx.send(msg2).expect("deliver msg2");
+
+        let result = handle.await.expect("run_initiator task panicked");
+        assert!(
+            result.is_ok(),
+            "aborting a stale install must return Ok(()), not an error: {result:?}"
+        );
+        assert!(
+            !transport.has_session_for(peer_id).await,
+            "H3: a peer revoked mid-reconnect must never end up with an installed session"
         );
     }
 }

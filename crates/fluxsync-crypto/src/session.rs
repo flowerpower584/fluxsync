@@ -1,3 +1,5 @@
+use zeroize::Zeroize;
+
 use crate::error::CryptoError;
 
 /// Size of the explicit nonce prefix prepended to every transport frame.
@@ -117,6 +119,27 @@ impl Session {
     }
 }
 
+/// Scrubs the session's own sensitive material when a `Session` is
+/// dropped — notably on every 24h/1GiB rekey, where the retired `Session`
+/// is replaced by plain assignment.
+///
+/// `handshake_hash` is fully owned by this struct, so it is zeroized here.
+///
+/// **SAFETY/LIMITATION:** the ChaCha20-Poly1305 transport keys live inside
+/// `snow::TransportState` -> `CipherState` -> `Box<dyn Cipher>` (all
+/// private to `snow`). Checked `snow` 0.9.6's source directly: neither
+/// `TransportState` nor `CipherState` implements `Zeroize` or a scrubbing
+/// `Drop`, and there is no accessor to reach the key bytes from outside the
+/// crate. This `Drop` therefore cannot scrub the transport keys without
+/// forking `snow`; they remain in heap memory, unscrubbed, until reclaimed
+/// or overwritten by the allocator. This is a documented residual, not an
+/// oversight — revisit if `snow` ever adds a zeroize hook.
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.handshake_hash.zeroize();
+    }
+}
+
 /// IPsec-style anti-replay sliding window over `u64` frame nonces.
 ///
 /// `bitmap` bit `i` records that `highest - i` was accepted; bit 0 is
@@ -182,6 +205,32 @@ impl ReplayWindow {
 #[cfg(test)]
 mod tests {
     use super::{ReplayWindow, REPLAY_WINDOW};
+
+    /// Safe Rust can't assert the heap bytes are actually scrubbed, but
+    /// this pins down that `Drop` runs cleanly on a real, handshaked
+    /// `Session` (not just a bare struct literal) and that the session is
+    /// fully usable — encrypt/decrypt round-trip and `handshake_hash()` —
+    /// right up until it goes out of scope. A regression that made `Drop`
+    /// panic (e.g. a bad field access) or that broke the pre-drop API
+    /// would fail this test.
+    #[test]
+    fn session_encrypts_and_drops_cleanly() {
+        use crate::identity::Identity;
+        use crate::test_util::pair_for_test;
+
+        let a = Identity::generate();
+        let b = Identity::generate();
+        let (mut a_session, mut b_session) = pair_for_test(&a, &b).expect("handshake");
+
+        assert_eq!(a_session.handshake_hash(), b_session.handshake_hash());
+
+        let frame = a_session.encrypt(b"defense-in-depth").expect("encrypt");
+        let plain = b_session.decrypt(&frame).expect("decrypt");
+        assert_eq!(plain, b"defense-in-depth");
+
+        // Simulate a rekey: the old sessions drop here via scope exit,
+        // running Session's Drop (zeroizes handshake_hash) without panicking.
+    }
 
     #[test]
     fn replay_window_accepts_fresh_in_order() {

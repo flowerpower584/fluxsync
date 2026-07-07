@@ -92,7 +92,7 @@ fn test_01_peer_b_goes_offline_a_detects() {
     assert_eq!(a.phase, Phase::Linked);
 
     // B disappears. The heartbeat loop eventually fires PeerLost on A.
-    let actions = a.handle(Event::PeerLost, &wall());
+    let actions = a.handle(Event::PeerLost { peer_id: PEER_ID_B }, &wall());
     assert_eq!(a.phase, Phase::Discovering);
     assert!(has_action(&actions, |a| matches!(a, Action::CloseSession)));
     assert!(has_action(&actions, |a| matches!(
@@ -112,7 +112,7 @@ fn test_02_peer_b_offline_then_online_reconnects() {
     let (mut a, _b) = link_pair();
 
     // B disappears.
-    a.handle(Event::PeerLost, &wall());
+    a.handle(Event::PeerLost { peer_id: PEER_ID_B }, &wall());
     assert_eq!(a.phase, Phase::Discovering);
 
     // B comes back — mDNS fires PeerSeen again.
@@ -158,8 +158,8 @@ fn test_03_peer_b_rediscovered_while_a_still_linked() {
 fn test_04_both_peers_go_offline_simultaneously() {
     let (mut a, mut b) = link_pair();
 
-    a.handle(Event::PeerLost, &wall());
-    b.handle(Event::PeerLost, &wall());
+    a.handle(Event::PeerLost { peer_id: PEER_ID_B }, &wall());
+    b.handle(Event::PeerLost { peer_id: PEER_ID_A }, &wall());
 
     assert_eq!(a.phase, Phase::Discovering);
     assert_eq!(b.phase, Phase::Discovering);
@@ -197,7 +197,7 @@ fn test_05_rapid_disconnect_reconnect_5x() {
 
     for round in 0..5 {
         // Drop.
-        a.handle(Event::PeerLost, &wall());
+        a.handle(Event::PeerLost { peer_id: PEER_ID_B }, &wall());
         assert_eq!(a.phase, Phase::Discovering, "round {round} after PeerLost");
 
         // Rediscover.
@@ -242,7 +242,7 @@ fn test_05_rapid_disconnect_reconnect_5x() {
 fn test_06_handshake_timeout_during_reconnect() {
     let (mut a, _b) = link_pair();
 
-    a.handle(Event::PeerLost, &wall());
+    a.handle(Event::PeerLost { peer_id: PEER_ID_B }, &wall());
     a.handle(
         Event::PeerSeen {
             peer_id: PEER_ID_B,
@@ -277,7 +277,7 @@ fn test_07_peer_lost_during_handshake() {
     );
     assert_eq!(a.phase, Phase::Handshaking);
 
-    let actions = a.handle(Event::PeerLost, &wall());
+    let actions = a.handle(Event::PeerLost { peer_id: PEER_ID_B }, &wall());
     assert_eq!(a.phase, Phase::Discovering);
     assert!(has_action(&actions, |a| {
         matches!(a, Action::StartDiscovery)
@@ -347,7 +347,7 @@ fn test_10_ghost_timeout_drops_stale_peer() {
     );
     a.handle(Event::HandshakeOk, &wall());
     // Now linked. Peer goes offline.
-    a.handle(Event::PeerLost, &wall());
+    a.handle(Event::PeerLost { peer_id: PEER_ID_B }, &wall());
     assert_eq!(a.phase, Phase::Discovering);
 
     // 10 minutes pass without reconnection.
@@ -508,7 +508,7 @@ fn test_18_peer_lost_while_halted() {
     assert_eq!(a.phase, Phase::Halted);
 
     // Now the peer actually disconnects.
-    let actions = a.handle(Event::PeerLost, &wall());
+    let actions = a.handle(Event::PeerLost { peer_id: PEER_ID_B }, &wall());
     // PeerLost resets peer_battery to 100, which should un-halt.
     // FSM says (Linked|Paused|Halted → Discovering on PeerLost)
     // But policy recalculates with peer_battery=100, so we should be Discovering.
@@ -589,7 +589,7 @@ fn test_20_full_offline_online_cycle_end_to_end() {
     assert_eq!(a.phase, Phase::Linked); // Still linked (doesn't know B is gone)
 
     // ── Step 3: A's heartbeat fires PeerLost ──
-    a.handle(Event::PeerLost, &wall());
+    a.handle(Event::PeerLost { peer_id: PEER_ID_B }, &wall());
     assert_eq!(a.phase, Phase::Discovering);
     assert_eq!(a.snapshot().peer_name, "Galaxy S21"); // Name preserved for reconnection
 

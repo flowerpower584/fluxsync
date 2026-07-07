@@ -43,10 +43,22 @@ import javax.crypto.spec.GCMParameterSpec
  *    the identity unpairs the device from every peer, so the plaintext
  *    file is never removed on an unverified write.
  *  - Fallback: if `AndroidKeyStore` itself is unusable (rare OEM firmware
- *    bugs), [readOrMigrate] returns null and the caller falls back to the
- *    legacy plaintext `IdentitySource.Keystore` path with a loud log —
- *    the residual risk being that on those devices the identity stays in
- *    plaintext exactly as before this change.
+ *    bugs) AND there is no `identity.enc` on disk yet, [readOrMigrate]
+ *    returns [IdentityResult.KeystoreUnavailable] and the caller falls
+ *    back to the legacy plaintext `IdentitySource.Keystore` path with a
+ *    loud log — the residual risk being that on those devices the
+ *    identity stays in plaintext exactly as before this change.
+ *  - Fail-closed: if `identity.enc` DOES exist but can't be decrypted
+ *    (corrupted file, or — commonly — an `AndroidKeyStore` key that no
+ *    longer validates because the app's private files survived a
+ *    factory-reset/restore-to-new-device but the hardware-backed key
+ *    never does), [readOrMigrate] returns [IdentityResult.Unreadable]
+ *    instead of [IdentityResult.KeystoreUnavailable]. The two must never
+ *    be conflated: by the time `identity.enc` exists, `migrateLegacy` has
+ *    already deleted the plaintext fallback, so treating this the same
+ *    as "nothing to read yet" would make the caller silently mint a
+ *    brand-new identity and orphan every paired peer with zero user
+ *    signal.
  */
 object KeystoreIdentityStore {
     private const val TAG = "FluxSync"
@@ -59,31 +71,81 @@ object KeystoreIdentityStore {
     private const val GCM_TAG_BITS = 128
     internal const val SECRET_LEN = 32
 
+    /** Outcome of [readOrMigrate]. See the class doc for what each case means. */
+    sealed class IdentityResult {
+        /** The 32-byte identity secret, freshly generated, migrated, or decrypted. */
+        data class Ready(val secret: ByteArray) : IdentityResult()
+
+        /**
+         * No `identity.enc` exists yet and `AndroidKeyStore` itself is
+         * unusable on this device. Safe to fall back to the legacy
+         * plaintext `IdentitySource.Keystore` path — nothing encrypted is
+         * at risk of being orphaned.
+         */
+        object KeystoreUnavailable : IdentityResult()
+
+        /**
+         * `identity.enc` exists but could not be decrypted. The caller
+         * MUST NOT treat this like [KeystoreUnavailable] and fall back to
+         * generating/loading a different identity — that would silently
+         * replace the device's cryptographic identity and orphan every
+         * paired peer. The only correct response is to stop and surface
+         * this to the user.
+         */
+        data class Unreadable(val cause: Exception) : IdentityResult()
+    }
+
     /**
-     * Returns the 32-byte identity secret, migrating from the legacy
-     * plaintext file or generating a fresh identity if neither file
-     * exists yet. Returns null if `AndroidKeyStore` is unusable on this
-     * device — the caller must fall back to the plaintext
-     * `IdentitySource.Keystore` path in that case.
+     * Resolves the 32-byte identity secret: migrates from the legacy
+     * plaintext file, generates a fresh identity if neither file exists
+     * yet, or decrypts the existing `identity.enc`. See [IdentityResult]
+     * for how failures are classified.
      */
     @JvmStatic
-    fun readOrMigrate(dataDir: File): ByteArray? = try {
-        val key = getOrCreateKey()
+    fun readOrMigrate(dataDir: File): IdentityResult {
         val encFile = File(dataDir, ENC_FILE_NAME)
-        val legacyFile = File(dataDir, LEGACY_FILE_NAME)
 
-        when {
-            encFile.exists() -> decryptBytes(key, encFile.readBytes())
-            legacyFile.exists() -> migrateLegacy(key, legacyFile, encFile)
-            else -> {
-                val fresh = ByteArray(SECRET_LEN).also { SecureRandom().nextBytes(it) }
-                writeEncryptedAtomic(key, encFile, fresh)
-                fresh
+        if (encFile.exists()) {
+            // identity.enc exists: the legacy plaintext file has already
+            // been deleted by a verified migration (see migrateLegacy), so
+            // there is no safe fallback left. Any failure here — key gone,
+            // GCM auth failure, truncated/corrupt file — is classified as
+            // Unreadable, never as "nothing to read yet".
+            return try {
+                tryDecryptExisting(getOrCreateKey(), encFile)
+            } catch (e: Exception) {
+                Log.e(TAG, "AndroidKeyStore key unavailable while identity.enc exists; refusing to regenerate: ${e.message}", e)
+                IdentityResult.Unreadable(e)
             }
         }
+
+        return try {
+            val key = getOrCreateKey()
+            val legacyFile = File(dataDir, LEGACY_FILE_NAME)
+            val secret = if (legacyFile.exists()) {
+                migrateLegacy(key, legacyFile, encFile)
+            } else {
+                ByteArray(SECRET_LEN).also { SecureRandom().nextBytes(it) }
+                    .also { writeEncryptedAtomic(key, encFile, it) }
+            }
+            IdentityResult.Ready(secret)
+        } catch (e: Exception) {
+            Log.e(TAG, "AndroidKeyStore identity path unusable, caller must fall back to plaintext: ${e.message}", e)
+            IdentityResult.KeystoreUnavailable
+        }
+    }
+
+    /**
+     * Attempts to decrypt an already-existing `identity.enc`, classifying
+     * any failure as [IdentityResult.Unreadable]. Factored out (and
+     * `internal`) so it can be unit-tested with a plain, non-AndroidKeyStore
+     * AES key — mirrors how [decryptBytes] and [migrateLegacy] take their
+     * key as a parameter for the same reason.
+     */
+    internal fun tryDecryptExisting(key: SecretKey, encFile: File): IdentityResult = try {
+        IdentityResult.Ready(decryptBytes(key, encFile.readBytes()))
     } catch (e: Exception) {
-        Log.e(TAG, "AndroidKeyStore identity path unusable, caller must fall back to plaintext: ${e.message}", e)
-        null
+        IdentityResult.Unreadable(e)
     }
 
     /**

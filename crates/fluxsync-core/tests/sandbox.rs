@@ -29,7 +29,7 @@ fn test_zero_day_timeout_sandbox() {
     assert_eq!(app.state.peer_name, "MacBook");
 
     // Peer drops (e.g. macOS closes or resets)
-    app.handle(Event::PeerLost, &wall);
+    app.handle(Event::PeerLost { peer_id: [1; 32] }, &wall);
 
     // We are back in Discovering, BUT peer_name is persistent so Android UI shows "Reconnecting..."
     assert_eq!(app.phase, Phase::Discovering);

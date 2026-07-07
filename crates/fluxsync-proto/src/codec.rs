@@ -14,8 +14,10 @@ use crate::{
 /// Returns [`ProtoError::Version`] if `frame.version != PROTOCOL_VERSION`,
 /// [`ProtoError::PayloadTooLarge`] / [`ProtoError::ChunkDataTooLarge`] /
 /// [`ProtoError::ChunkTotalTooLarge`] / [`ProtoError::ChunkIndexOutOfRange`] /
-/// [`ProtoError::BatteryLevel`] when the corresponding field violates its
-/// bound, or [`ProtoError::CborEncode`] if the underlying serializer fails.
+/// [`ProtoError::BatteryLevel`] / [`ProtoError::HelloNameNotPrintable`] /
+/// [`ProtoError::HelloPlatformNotAsciiPrintable`] when the corresponding
+/// field violates its bound, or [`ProtoError::CborEncode`] if the underlying
+/// serializer fails.
 pub fn encode(frame: &Frame) -> Result<Vec<u8>, ProtoError> {
     if frame.version != PROTOCOL_VERSION {
         return Err(ProtoError::Version {
@@ -64,6 +66,12 @@ fn validate(frame: &Frame) -> Result<(), ProtoError> {
         Msg::Hello(h) if h.platform.len() > MAX_HELLO_PLATFORM => {
             Err(ProtoError::HelloPlatformTooLong(h.platform.len()))
         }
+        Msg::Hello(h) if h.name.chars().any(|c| c.is_control() || is_bidi_or_format_char(c)) => {
+            Err(ProtoError::HelloNameNotPrintable)
+        }
+        Msg::Hello(h) if !is_ascii_printable_cap(&h.platform) => {
+            Err(ProtoError::HelloPlatformNotAsciiPrintable)
+        }
         Msg::Hello(h) if h.caps.len() > MAX_HELLO_CAPS => {
             Err(ProtoError::HelloCapsTooMany(h.caps.len()))
         }
@@ -95,11 +103,38 @@ fn validate_resync_msg(hashes: &[String]) -> Result<(), ProtoError> {
     Ok(())
 }
 
-/// ASCII-printable check for a single `Hello.caps` entry: bytes `0x20..=0x7E`
-/// (space through `~`). Keeps capability tags renderable/loggable without
-/// any charset ambiguity.
+/// ASCII-printable check for a single `Hello.caps` entry (and, since
+/// `platform` is drawn from the same closed ASCII set as caps, for
+/// `Hello.platform` too): bytes `0x20..=0x7E` (space through `~`). Keeps
+/// these fields renderable/loggable without any charset ambiguity.
+///
+/// `Hello.name` is deliberately NOT gated by this function: it's a
+/// user-chosen device name that may legitimately contain non-ASCII UTF-8
+/// (e.g. accented or CJK characters), so it only rejects control characters
+/// and bidi/format characters (see `is_bidi_or_format_char` and the
+/// `char::is_control` check in `validate`) rather than restricting to ASCII.
 fn is_ascii_printable_cap(s: &str) -> bool {
     s.bytes().all(|b| (0x20..=0x7E).contains(&b))
+}
+
+/// L2 fix: is `c` a Unicode bidi-override or invisible format character
+/// that `Hello.name` must reject? `char::is_control` alone (Unicode Cc)
+/// lets these through, since they're category Cf, not Cc — enabling visual
+/// peer-name-spoofing (e.g. U+202E RIGHT-TO-LEFT OVERRIDE can make a
+/// received name render as something other than what it actually is).
+/// Deliberately a narrow, explicit set (bidi controls + ZWSP/ZWNJ/ZWJ/
+/// LRM/RLM + the BOM/ZWNBSP) rather than "reject all Cf" so ordinary
+/// international text — accents, CJK, etc. — is never affected.
+/// `fluxsync_core::app` duplicates this exact predicate (proto cannot
+/// depend on core) — keep the two in sync.
+fn is_bidi_or_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x200B..=0x200F // ZWSP, ZWNJ, ZWJ, LRM, RLM
+            | 0x202A..=0x202E // LRE, RLE, PDF, LRO, RLO
+            | 0x2066..=0x2069 // LRI, RLI, FSI, PDI
+            | 0xFEFF // BOM / ZERO WIDTH NO-BREAK SPACE
+    )
 }
 
 fn validate_nak(nak: &Nak) -> Result<(), ProtoError> {
@@ -274,6 +309,41 @@ mod tests {
         }));
         let err = encode(&f).unwrap_err();
         assert!(matches!(err, ProtoError::HelloCapNotAsciiPrintable));
+    }
+
+    /// L2 fix: a bidi-override character (U+202E RIGHT-TO-LEFT OVERRIDE)
+    /// passes `char::is_control` but must still be rejected — it can spoof
+    /// how a peer's name renders on screen. Built as raw CBOR (bypassing
+    /// `encode`'s own validation) so this proves `decode` independently
+    /// rejects it too — the path that matters for bytes an actual peer
+    /// sent, not just ones we produced ourselves.
+    #[test]
+    fn rejects_bidi_override_in_hello_name_on_raw_decode() {
+        let bogus = Frame {
+            version: PROTOCOL_VERSION,
+            msg: Msg::Hello(crate::Hello {
+                name: "evil\u{202E}exe.gnp".into(),
+                platform: "linux".into(),
+                caps: vec![],
+            }),
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&bogus, &mut bytes).unwrap();
+        let err = decode(&bytes).unwrap_err();
+        assert!(matches!(err, ProtoError::HelloNameNotPrintable));
+    }
+
+    /// L2 fix: the bidi/format gate must never reject ordinary
+    /// international text — only the narrow Cf spoofing set.
+    #[test]
+    fn accepts_legit_non_ascii_hello_name() {
+        let f = frame(Msg::Hello(crate::Hello {
+            name: "松本のMac".into(),
+            platform: "macos".into(),
+            caps: vec![],
+        }));
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
     }
 
     #[test]

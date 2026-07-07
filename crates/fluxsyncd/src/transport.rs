@@ -345,9 +345,14 @@ impl Transport {
             return false;
         }
         *g = Some(session);
+        // Bump the generation while `g` is still held: this is the atomic
+        // commit point. A concurrent caller blocked on `session.lock()`
+        // above will see the new generation once it acquires the lock, so
+        // its own `expected_generation` check correctly fails instead of
+        // both callers clobbering each other's install.
+        self.conn.session_generation.fetch_add(1, Ordering::SeqCst);
         drop(g);
         *self.conn.last_peer_id.lock().await = Some(id);
-        self.conn.session_generation.fetch_add(1, Ordering::SeqCst);
         self.conn
             .session_established_at_ms
             .store(now_ms(), Ordering::SeqCst);
@@ -415,6 +420,21 @@ impl Transport {
     #[must_use]
     pub fn session_established_at(&self) -> u64 {
         self.conn.session_established_at_ms.load(Ordering::SeqCst)
+    }
+
+    /// M6 residual fix: like [`Self::session_established_at`] but resolves
+    /// to whichever `PeerConn` currently holds `peer_id` — the primary slot
+    /// or a FluxMesh `extra` secondary — instead of assuming the primary.
+    /// `install_session`/`try_install_session` already stamp
+    /// `session_established_at_ms` on whatever `PeerConn` they target (via
+    /// `acquire_conn`), so a secondary's own established time has been
+    /// tracked all along; this just exposes it per-peer. Returns `None` if
+    /// `peer_id` has no known `PeerConn` (never installed, or already
+    /// removed from `extra`).
+    #[must_use]
+    pub async fn session_established_at_for(&self, peer_id: [u8; 32]) -> Option<u64> {
+        let c = self.conn_for(peer_id).await?;
+        Some(c.session_established_at_ms.load(Ordering::SeqCst))
     }
 
     /// DIR-P2-03: encrypted-frame bytes (both directions) carried by the
@@ -873,6 +893,72 @@ mod tests {
         assert!(transport.secondary_liveness().await.is_empty());
     }
 
+    /// M6 residual fix: `session_established_at_for` must resolve to the
+    /// SAME `PeerConn` `conn_for` would pick — the primary slot for the
+    /// first-installed peer, the matching `extra` entry for a second
+    /// simultaneous peer, each with its OWN established time — and `None`
+    /// for a peer_id that has no `PeerConn` at all. This is what lets the
+    /// secondary ghost-timeout (`heartbeat_loop`) and `Msg::Bye` teardown
+    /// sites in `driver.rs` compute a secondary's own uptime for
+    /// `PeerBackoff::on_session_ended`, instead of assuming the primary's.
+    #[tokio::test]
+    async fn session_established_at_for_resolves_primary_vs_secondary_vs_unknown() {
+        use super::{now_ms, Transport};
+        use fluxsync_crypto::{test_util::pair_for_test, Identity};
+        use std::sync::Arc;
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.unwrap();
+        let transport = Arc::new(transport);
+
+        let me = Identity::generate();
+        let (sess1, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (sess2, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (id1, id2) = ([1u8; 32], [2u8; 32]);
+
+        // Never-installed peer: no `PeerConn` exists yet.
+        assert_eq!(transport.session_established_at_for(id1).await, None);
+
+        // First install takes the primary slot.
+        let before_primary = now_ms();
+        transport.install_session(id1, sess1).await;
+        let primary_established = transport
+            .session_established_at_for(id1)
+            .await
+            .expect("primary must report an established time");
+        assert!(primary_established >= before_primary);
+        assert_eq!(primary_established, transport.session_established_at());
+
+        // Second peer, arriving with the primary still live, routes to
+        // `extra` and gets its OWN established time, distinct bookkeeping
+        // from the primary's.
+        let before_secondary = now_ms();
+        transport.install_session(id2, sess2).await;
+        let secondary_established = transport
+            .session_established_at_for(id2)
+            .await
+            .expect("secondary must report its own established time");
+        assert!(secondary_established >= before_secondary);
+        // The primary's timestamp is untouched by the secondary's install.
+        assert_eq!(
+            transport.session_established_at_for(id1).await,
+            Some(primary_established)
+        );
+
+        // Dropping the secondary's session (the ghost-timeout / Msg::Bye
+        // teardown path) must NOT erase its established-time bookkeeping —
+        // callers read it BEFORE `drop_session_for`, exactly like the
+        // primary paths do, so this must stay available after the drop too.
+        transport.drop_session_for(id2).await;
+        assert_eq!(
+            transport.session_established_at_for(id2).await,
+            Some(secondary_established)
+        );
+
+        // A peer_id with no `PeerConn` at all (never primary, never extra)
+        // resolves to `None`.
+        assert_eq!(transport.session_established_at_for([9u8; 32]).await, None);
+    }
+
     /// FluxMesh robustness slice 2: promoting a secondary moves it into the
     /// primary `conn` slot so single-peer accessors (`cached_peer_id`,
     /// `has_session`) follow the survivor. With no secondaries left it returns
@@ -954,6 +1040,60 @@ mod tests {
             transport.primary_session_generation(),
             2,
             "a lost CAS must not advance the generation"
+        );
+    }
+
+    /// The generation bump must happen while still holding the `session`
+    /// mutex, not after `.await`ing on `last_peer_id`. Otherwise two
+    /// concurrent callers with the same `expected_generation` (e.g. a
+    /// replayed HandshakeInit spawning two responder tasks) can both pass
+    /// the generation check before either commits, and both install —
+    /// clobbering each other's session. With the fix, the second caller
+    /// blocks on the mutex until the first fully commits (including the
+    /// bump), then observes the advanced generation and correctly loses
+    /// the race. Uses a multi-thread runtime so the two calls can genuinely
+    /// run in parallel rather than just interleave cooperatively.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn install_primary_session_if_generation_is_atomic_under_concurrency() {
+        use super::Transport;
+        use fluxsync_crypto::{test_util::pair_for_test, Identity};
+        use std::sync::Arc;
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.unwrap();
+        let transport = Arc::new(transport);
+
+        let me = Identity::generate();
+        let peer_id = [7u8; 32];
+
+        let (sess_a, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        transport.install_session(peer_id, sess_a).await;
+        let expected_generation = transport.primary_session_generation();
+
+        let (sess_b, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+        let (sess_c, _) = pair_for_test(&me, &Identity::generate()).unwrap();
+
+        let t1 = transport.clone();
+        let t2 = transport.clone();
+        let h1 = tokio::spawn(async move {
+            t1.install_primary_session_if_generation(peer_id, sess_b, expected_generation)
+                .await
+        });
+        let h2 = tokio::spawn(async move {
+            t2.install_primary_session_if_generation(peer_id, sess_c, expected_generation)
+                .await
+        });
+
+        let (r1, r2) = tokio::join!(h1, h2);
+        let (r1, r2) = (r1.unwrap(), r2.unwrap());
+
+        assert_ne!(
+            r1, r2,
+            "exactly one of two concurrent installs with the same expected_generation must win"
+        );
+        assert_eq!(
+            transport.primary_session_generation(),
+            expected_generation + 1,
+            "the generation must advance exactly once, not twice"
         );
     }
 }

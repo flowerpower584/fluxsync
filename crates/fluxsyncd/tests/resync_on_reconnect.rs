@@ -505,6 +505,72 @@ async fn missed_item_resyncs_after_relink() {
     let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
 }
 
+/// H2 regression: `CmdOp::ClearHistory` is LOCAL-ONLY by design — it never
+/// tells the peer to forget anything. `boot_and_link`'s sanity item was
+/// delivered to `b` live (so `b`'s own resync outbox holds it) BEFORE `a`
+/// clears it here; unlike `missed_item_resyncs_after_relink`'s "cleared"
+/// item (which `b` never saw at all), this is the actual resurrection path:
+/// `b` still has it, so on relink `b`'s `ResyncOffer` re-offers the exact
+/// hash `a` just deleted. Without the cleared-hash tombstone, `a`'s own
+/// `missing_resync_hashes` would call it missing (gone from both history
+/// and outbox) and pull it straight back. A second, genuinely-missed item
+/// pushed while `b` is down proves the tombstone is selective — it only
+/// blocks the one hash `a` deliberately cleared, not resync in general.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cleared_item_does_not_resurrect_via_peer_outbox() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let (ipc_a, shutdown_a, h_a, id_b, keystore_b, ipc_b, _port_b, addr_a, a_pub) =
+        boot_and_link().await;
+
+    // `resync-sanity-item` was pushed and confirmed delivered to b (still
+    // live) inside `boot_and_link`, so b's own outbox already holds it.
+    let cleared = "resync-sanity-item";
+    assert!(
+        history_has(&ipc_a, cleared).await,
+        "sanity item must still be in a's history before it's cleared"
+    );
+
+    clear_history(&ipc_a, false).await;
+    assert!(
+        !history_has(&ipc_a, cleared).await,
+        "ClearHistory did not remove the sanity item from a's history"
+    );
+
+    // A genuinely-missed, never-cleared item: b was already down when this
+    // was pushed, so it can only reach b via resync-1 — proves the
+    // tombstone above doesn't block unrelated pulls.
+    let missed = "resync-h2-genuinely-missed-item";
+    push(&ipc_a, missed).await;
+
+    // Same deliberate plain sleep as the other scenarios in this file —
+    // past the retransmit budget before b comes back.
+    tokio::time::sleep(RETRANSMIT_EXHAUSTION_WAIT).await;
+
+    let (shutdown_b2, h_b2) =
+        restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub, &ipc_a).await;
+
+    assert!(
+        wait_until(Duration::from_secs(15), || async { history_has(&ipc_b, missed).await }).await,
+        "genuinely-missed item never resynced onto b within 15s of relink"
+    );
+
+    // Ordering-based bound, not a blind sleep: resync-1 offers the whole
+    // outbox in one Hello-triggered round trip, so if the cleared item were
+    // ever going to resurrect it would have landed in the same window as
+    // the genuinely-missed item's confirmed arrival above.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !history_has(&ipc_a, cleared).await,
+        "H2: a's own ClearHistory was resurrected by b's ResyncOffer for the same hash"
+    );
+
+    shutdown_a.cancel();
+    shutdown_b2.cancel();
+    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sensitive_item_never_resyncs() {
     let _ = tracing_subscriber::fmt::try_init();

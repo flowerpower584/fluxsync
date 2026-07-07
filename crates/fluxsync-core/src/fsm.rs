@@ -142,8 +142,10 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             ],
         ),
 
-        // Handshaking → Discovering on timeout or peer lost.
-        (P::Handshaking, E::HandshakeTimeout | E::PeerLost) => (
+        // Handshaking → Discovering on timeout or peer lost. Peer-agnostic:
+        // this single FSM only ever tracks the primary link, so which
+        // specific peer_id dropped doesn't change the transition.
+        (P::Handshaking, E::HandshakeTimeout | E::PeerLost { .. }) => (
             P::Discovering,
             vec![
                 A::EmitLog(LogEntry::warn(
@@ -186,6 +188,7 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
                 kind,
                 payload,
                 preview,
+                sensitive,
                 ..
             },
         ) => (
@@ -194,6 +197,7 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
                 A::WriteClipboard {
                     kind: *kind,
                     payload: payload.clone(),
+                    sensitive: *sensitive,
                 },
                 A::AckItem { hash: *hash },
                 A::EmitState,
@@ -210,8 +214,9 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             ],
         ),
 
-        // Linked/Paused/Halted → Discovering on PeerLost.
-        (P::Linked | P::Paused | P::Halted, E::PeerLost) => (
+        // Linked/Paused/Halted → Discovering on PeerLost. Peer-agnostic for
+        // the same reason as the Handshaking arm above.
+        (P::Linked | P::Paused | P::Halted, E::PeerLost { .. }) => (
             P::Discovering,
             vec![
                 A::CloseSession,
@@ -442,7 +447,7 @@ mod tests {
 
     #[test]
     fn linked_peer_lost_returns_to_discovering() {
-        let (p, a) = transition(Phase::Linked, &Event::PeerLost);
+        let (p, a) = transition(Phase::Linked, &Event::PeerLost { peer_id: [0u8; 32] });
         assert_eq!(p, Phase::Discovering);
         assert!(a.contains(&A::CloseSession));
         assert!(a.contains(&A::StartDiscovery));

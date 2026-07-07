@@ -95,6 +95,16 @@ pub struct State {
     /// state snapshots (pre-sas-confirm) deserializing as `"idle"`.
     #[serde(default = "default_sas_phase")]
     pub sas_phase: String,
+    /// L3 fix: which peer's SAS pairing `sas_phase` currently describes.
+    /// `None` while idle. Set on `Event::SasPairingStarted`, cleared on
+    /// `SasReset`/manual-unpair/untrusted-peer-seen/ghost-timeout. Guards
+    /// `SasPeerConfirmed`/`SasPeerRejected` (both peer-scoped) from a
+    /// DIFFERENT, unrelated peer's session activity stomping this one's
+    /// verify UI — `sas_phase` used to be a bare process-wide string with
+    /// no notion of which peer it was tracking. `#[serde(skip)]`: internal
+    /// bookkeeping only, never sent to clients (mirrors `vault_wipe_gen`).
+    #[serde(skip)]
+    pub sas_peer: Option<[u8; 32]>,
 }
 
 fn default_mdns_enabled() -> bool {
@@ -328,6 +338,7 @@ impl State {
             vault_wipe_gen: 0,
             mdns_enabled: config.mdns_enabled,
             sas_phase: default_sas_phase(),
+            sas_peer: None,
         }
     }
 

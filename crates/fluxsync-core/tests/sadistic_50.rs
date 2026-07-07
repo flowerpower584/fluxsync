@@ -900,7 +900,7 @@ fn test_27_peer_lost_then_handshake_ok() {
         },
         &wall,
     );
-    app.handle(Event::PeerLost, &wall);
+    app.handle(Event::PeerLost { peer_id: [1; 32] }, &wall);
 
     // HandshakeOk arrives late after peer was lost
     let actions = app.handle(Event::HandshakeOk, &wall);

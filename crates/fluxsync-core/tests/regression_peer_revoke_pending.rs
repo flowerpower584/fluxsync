@@ -152,6 +152,7 @@ fn revoke_drops_only_that_peers_pending_items() {
         Action::WriteClipboard {
             kind: Kind::Text,
             payload: b"secret-from-peer-2".to_vec(),
+            sensitive: false,
         }
     );
 }
@@ -206,7 +207,7 @@ fn peer_lost_does_not_drop_pending() {
     app.handle(inbound_from(PEER_A, 1), &wall());
     assert_eq!(app.state.pending.len(), 1);
 
-    let actions = app.handle(Event::PeerLost, &wall());
+    let actions = app.handle(Event::PeerLost { peer_id: PEER_A }, &wall());
     assert!(
         !actions
             .iter()

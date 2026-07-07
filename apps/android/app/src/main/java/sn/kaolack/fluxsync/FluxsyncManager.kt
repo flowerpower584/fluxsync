@@ -116,6 +116,23 @@ object FluxsyncManager {
         _lastError.value = null
     }
 
+    /**
+     * True once the AccessibilityService found an `identity.enc` on disk
+     * that it could not decrypt (corrupted file, or an AndroidKeyStore key
+     * that didn't survive a factory-reset/restore-to-new-device) and
+     * therefore refused to boot the daemon with a freshly-generated
+     * identity, which would silently orphan every paired peer. Unlike
+     * [lastError] this is sticky — not auto-cleared on display — because
+     * the only correct fix is the user noticing and deliberately clearing
+     * app data / re-pairing, not dismissing a toast.
+     */
+    private val _identityUnreadable = MutableStateFlow(false)
+    val identityUnreadable = _identityUnreadable.asStateFlow()
+
+    fun reportIdentityUnreadable() {
+        _identityUnreadable.value = true
+    }
+
     fun setHandle(h: FluxsyncHandle?) {
         synchronized(handleLock) {
             handle = h
@@ -164,6 +181,7 @@ object FluxsyncManager {
         _logs.value = emptyList()
         _logCursor.set(0L)
         _lastError.value = null
+        _identityUnreadable.value = false
         clearPeerClips()
         clearPushedClips()
     }

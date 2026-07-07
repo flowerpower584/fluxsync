@@ -37,6 +37,13 @@ pub const CAP: Duration = Duration::from_secs(8);
 /// `500ms << 4 == 8000ms == CAP`. Attempts beyond this stay capped.
 const MAX_SHIFT: u32 = 4;
 
+/// M6: minimum session uptime before [`PeerBackoff::on_session_ended`]
+/// treats a drop as "was stable" and resets `attempt`. Set comfortably
+/// above the ~9s heartbeat-timeout floor (3 missed pings * 3s, see
+/// `driver.rs`'s `heartbeat_loop`) so a session that dies on its very
+/// first missed-heartbeat cycle can never look stable by accident.
+pub const MIN_STABLE: Duration = Duration::from_secs(15);
+
 /// Safety margin added on top of the peer's handshake rate-limiter
 /// sustained refill interval to form [`STEADY_STATE_FLOOR`].
 const FLOOR_MARGIN: Duration = Duration::from_millis(500);
@@ -104,9 +111,28 @@ impl PeerBackoff {
     /// A *completed* handshake (not a mere UDP send / TCP connect)
     /// resets state, so the next drop starts fresh at the fast initial
     /// retry instead of wherever the counter last was.
+    ///
+    /// M6: kept as a manual/explicit reset primitive, but `driver.rs` no
+    /// longer calls this the instant a handshake completes — a link that
+    /// completes then immediately drops, repeatedly, would reset straight
+    /// back to the fast retry on every flap, defeating this module's whole
+    /// purpose. See [`Self::on_session_ended`], which driver.rs calls
+    /// instead at actual teardown, gated on proven stability.
     pub fn on_handshake_ok(&mut self) {
         self.attempt = 0;
         self.next_ready_at = None;
+    }
+
+    /// M6: reset backoff only if the just-ended session stayed up at least
+    /// [`MIN_STABLE`] — otherwise keep the escalated `attempt`, since a
+    /// session shorter than that is a flap, not a recovery. Called from
+    /// `driver.rs`'s teardown paths (heartbeat timeout, `Msg::Bye`, a
+    /// completed rekey) with the dead session's uptime.
+    pub fn on_session_ended(&mut self, uptime: Duration) {
+        if uptime >= MIN_STABLE {
+            self.attempt = 0;
+            self.next_ready_at = None;
+        }
     }
 }
 
@@ -345,6 +371,40 @@ mod tests {
         // again, not wherever the counter left off.
         pb.on_attempt_failed(now, &mut rng);
         assert_eq!(pb.next_ready_at.unwrap() - now, ms(500));
+    }
+
+    /// M6: a session that dropped before proving itself stable (< `MIN_STABLE`)
+    /// must keep its escalated `attempt` — resetting here is exactly the
+    /// flap-storm bug this fix closes.
+    #[test]
+    fn on_session_ended_keeps_escalated_attempt_when_short_lived() {
+        let mut pb = PeerBackoff::new();
+        let mut rng = MaxRng;
+        let now = Instant::now();
+        for _ in 0..3 {
+            pb.on_attempt_failed(now, &mut rng);
+        }
+        assert_eq!(pb.attempt, 3);
+        pb.on_session_ended(MIN_STABLE.checked_sub(Duration::from_millis(1)).unwrap());
+        assert_eq!(pb.attempt, 3, "a short-lived session must not reset backoff");
+        assert!(!pb.ready(now), "the pending wait must survive the short-lived session");
+    }
+
+    /// M6: a session that stayed up at least `MIN_STABLE` resets backoff on
+    /// end, so a legitimate reconnect after real stability isn't slowed by a
+    /// stale escalated `attempt`.
+    #[test]
+    fn on_session_ended_resets_when_stable() {
+        let mut pb = PeerBackoff::new();
+        let mut rng = MaxRng;
+        let now = Instant::now();
+        for _ in 0..3 {
+            pb.on_attempt_failed(now, &mut rng);
+        }
+        assert_eq!(pb.attempt, 3);
+        pb.on_session_ended(MIN_STABLE);
+        assert_eq!(pb.attempt, 0, "a session that reached MIN_STABLE must reset backoff");
+        assert!(pb.ready(now), "reset must clear the pending wait");
     }
 
     #[test]
