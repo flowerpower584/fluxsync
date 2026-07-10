@@ -175,9 +175,7 @@ async fn trusted_peer_ids(ipc: &PathBuf) -> Vec<String> {
     )
     .await;
     match resp.data {
-        Some(CmdData::TrustList(entries)) => {
-            entries.into_iter().map(|e| e.peer_id_hex).collect()
-        }
+        Some(CmdData::TrustList(entries)) => entries.into_iter().map(|e| e.peer_id_hex).collect(),
         // `CmdData` is `#[serde(untagged)]`: an empty `TrustList` round-trips
         // as `[]`, indistinguishable from any other empty list variant.
         Some(CmdData::Peers(entries)) if entries.is_empty() => Vec::new(),

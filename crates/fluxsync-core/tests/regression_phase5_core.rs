@@ -128,7 +128,9 @@ fn inbound_firewall_deny_does_not_record_history() {
     let acts = app.handle(inbound_text(9, 5), &wall());
 
     assert!(
-        !acts.iter().any(|a| matches!(a, Action::WriteClipboard { .. })),
+        !acts
+            .iter()
+            .any(|a| matches!(a, Action::WriteClipboard { .. })),
         "Deny must strip the WriteClipboard action"
     );
     assert!(
@@ -148,7 +150,9 @@ fn inbound_firewall_ask_parks_without_recording_history() {
     let acts = app.handle(inbound_text(9, 5), &wall());
 
     assert!(
-        !acts.iter().any(|a| matches!(a, Action::WriteClipboard { .. })),
+        !acts
+            .iter()
+            .any(|a| matches!(a, Action::WriteClipboard { .. })),
         "Ask must hold the WriteClipboard action"
     );
     assert_eq!(
@@ -174,7 +178,8 @@ fn inbound_firewall_allow_records_history() {
     let acts = app.handle(inbound_text(9, 5), &wall());
 
     assert!(
-        acts.iter().any(|a| matches!(a, Action::WriteClipboard { .. })),
+        acts.iter()
+            .any(|a| matches!(a, Action::WriteClipboard { .. })),
         "Allow must keep the WriteClipboard action"
     );
     assert_eq!(

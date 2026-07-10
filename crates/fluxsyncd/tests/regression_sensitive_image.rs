@@ -93,14 +93,30 @@ where
 }
 
 async fn status(ipc: &Path) -> Box<fluxsync_core::State> {
-    match ipc_send_recv(ipc, CmdRequest { id: 1, op: CmdOp::Status }).await.data {
+    match ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Status,
+        },
+    )
+    .await
+    .data
+    {
         Some(CmdData::State(s)) => s,
         other => panic!("expected State, got {other:?}"),
     }
 }
 
 async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(ipc, CmdRequest { id: 0, op: CmdOp::SetThreshold { value } }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 0,
+            op: CmdOp::SetThreshold { value },
+        },
+    )
+    .await;
     assert!(r.ok, "set-threshold failed: {r:?}");
 }
 
@@ -122,7 +138,10 @@ async fn push_image(ipc: &Path, png: &[u8], sensitive: bool) -> CmdResponse {
         ipc,
         CmdRequest {
             id: 42,
-            op: CmdOp::PushImage { data: B64.encode(png), sensitive },
+            op: CmdOp::PushImage {
+                data: B64.encode(png),
+                sensitive,
+            },
         },
     )
     .await
@@ -231,7 +250,10 @@ async fn sensitive_image_syncs_but_excluded_from_history_and_vault() {
     // sensitive case below. ──
     let control_png = tiny_png(0x11);
     let control_resp = push_image(&ipc_a, &control_png, false).await;
-    assert!(control_resp.ok, "control image push failed: {control_resp:?}");
+    assert!(
+        control_resp.ok,
+        "control image push failed: {control_resp:?}"
+    );
 
     assert!(
         wait_until(Duration::from_secs(5), || async {
@@ -270,20 +292,32 @@ async fn sensitive_image_syncs_but_excluded_from_history_and_vault() {
 
     let secret_png = tiny_png(0x99);
     let secret_resp = push_image(&ipc_a, &secret_png, true).await;
-    assert!(secret_resp.ok, "sensitive image push failed: {secret_resp:?}");
+    assert!(
+        secret_resp.ok,
+        "sensitive image push failed: {secret_resp:?}"
+    );
 
     // Proof the item actually crossed the wire and was applied on B — the
     // only signal available, since by design it must never touch history.
     assert!(
         wait_until(Duration::from_secs(5), || async {
-            status(&ipc_a).await.metrics.as_ref().map_or(0, |m| m.items_sent) > sent_before
+            status(&ipc_a)
+                .await
+                .metrics
+                .as_ref()
+                .map_or(0, |m| m.items_sent)
+                > sent_before
         })
         .await,
         "A's items_sent never advanced for the sensitive image push"
     );
     assert!(
         wait_until(Duration::from_secs(5), || async {
-            status(&ipc_b).await.metrics.as_ref().map_or(0, |m| m.items_received)
+            status(&ipc_b)
+                .await
+                .metrics
+                .as_ref()
+                .map_or(0, |m| m.items_received)
                 > received_before
         })
         .await,

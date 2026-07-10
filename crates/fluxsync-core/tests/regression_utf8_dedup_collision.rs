@@ -61,7 +61,8 @@ fn distinct_invalid_utf8_payloads_are_both_delivered() {
     fe.extend_from_slice(b"hello");
     assert_ne!(ff, fe, "sanity: the two payloads must actually differ");
 
-    let first_payload_actions = app.handle(inbound_bytes(ff.clone(), [1; 32], 1, "invalid-ff"), &wall());
+    let first_payload_actions =
+        app.handle(inbound_bytes(ff.clone(), [1; 32], 1, "invalid-ff"), &wall());
     assert!(
         !first_payload_actions
             .iter()
@@ -75,7 +76,8 @@ fn distinct_invalid_utf8_payloads_are_both_delivered() {
         "the first (0xFF) payload must be applied"
     );
 
-    let second_payload_actions = app.handle(inbound_bytes(fe.clone(), [2; 32], 2, "invalid-fe"), &wall());
+    let second_payload_actions =
+        app.handle(inbound_bytes(fe.clone(), [2; 32], 2, "invalid-fe"), &wall());
     assert!(
         !second_payload_actions
             .iter()
@@ -108,8 +110,14 @@ fn identical_invalid_utf8_payload_is_still_deduped() {
     let mut payload = vec![0xFFu8];
     payload.extend_from_slice(b"hello");
 
-    app.handle(inbound_bytes(payload.clone(), [1; 32], 1, "invalid-ff"), &wall());
-    let acts = app.handle(inbound_bytes(payload, [1; 32], 2, "invalid-ff-again"), &wall());
+    app.handle(
+        inbound_bytes(payload.clone(), [1; 32], 1, "invalid-ff"),
+        &wall(),
+    );
+    let acts = app.handle(
+        inbound_bytes(payload, [1; 32], 2, "invalid-ff-again"),
+        &wall(),
+    );
 
     assert!(
         acts.iter().any(|a| matches!(a, Action::DuplicateDropped)),

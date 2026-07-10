@@ -112,7 +112,9 @@ fn ffi_provided_identity_starts_and_roundtrips() {
     )
     .expect("start with Provided identity");
 
-    handle.push_text("provided-identity-ok".into()).expect("push");
+    handle
+        .push_text("provided-identity-ok".into())
+        .expect("push");
 
     let start = std::time::Instant::now();
     let mut hit = false;

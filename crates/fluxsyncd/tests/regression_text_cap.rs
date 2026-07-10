@@ -79,7 +79,14 @@ where
 /// True if `ipc` reports at least one history item before `deadline`.
 async fn has_history_item(ipc: &PathBuf, deadline: Duration) -> bool {
     wait_until(deadline, || async {
-        let resp = ipc_send_recv(ipc, CmdRequest { id: 7, op: fluxsyncd::cmd::CmdOp::Status }).await;
+        let resp = ipc_send_recv(
+            ipc,
+            CmdRequest {
+                id: 7,
+                op: fluxsyncd::cmd::CmdOp::Status,
+            },
+        )
+        .await;
         matches!(resp.data, Some(CmdData::State(s)) if !s.history.is_empty())
     })
     .await
@@ -149,7 +156,10 @@ async fn over_cap_text_push_is_rejected_not_truncated() {
         }
         let resp = ipc_send_recv(
             &ipc_a,
-            CmdRequest { id: 1, op: fluxsyncd::cmd::CmdOp::Status },
+            CmdRequest {
+                id: 1,
+                op: fluxsyncd::cmd::CmdOp::Status,
+            },
         )
         .await;
         matches!(resp.data, Some(CmdData::State(s)) if s.peer_name == "device-b")
@@ -163,7 +173,10 @@ async fn over_cap_text_push_is_rejected_not_truncated() {
         }
         let resp = ipc_send_recv(
             &ipc_b,
-            CmdRequest { id: 1, op: fluxsyncd::cmd::CmdOp::Status },
+            CmdRequest {
+                id: 1,
+                op: fluxsyncd::cmd::CmdOp::Status,
+            },
         )
         .await;
         matches!(resp.data, Some(CmdData::State(s)) if s.peer_name == "device-a")
@@ -231,7 +244,9 @@ async fn over_cap_text_push_is_rejected_not_truncated() {
         &ipc_a,
         CmdRequest {
             id: 43,
-            op: fluxsyncd::cmd::CmdOp::Push { text: small_text.clone() },
+            op: fluxsyncd::cmd::CmdOp::Push {
+                text: small_text.clone(),
+            },
         },
     )
     .await;
@@ -297,7 +312,14 @@ async fn over_cap_image_push_is_rejected_not_truncated() {
         if !ipc_a.exists() {
             return false;
         }
-        let resp = ipc_send_recv(&ipc_a, CmdRequest { id: 1, op: fluxsyncd::cmd::CmdOp::Status }).await;
+        let resp = ipc_send_recv(
+            &ipc_a,
+            CmdRequest {
+                id: 1,
+                op: fluxsyncd::cmd::CmdOp::Status,
+            },
+        )
+        .await;
         matches!(resp.data, Some(CmdData::State(_)))
     })
     .await;
@@ -313,17 +335,32 @@ async fn over_cap_image_push_is_rejected_not_truncated() {
 
     let resp = ipc_send_recv(
         &ipc_a,
-        CmdRequest { id: 42, op: fluxsyncd::cmd::CmdOp::PushImage { data: b64, sensitive: false } },
+        CmdRequest {
+            id: 42,
+            op: fluxsyncd::cmd::CmdOp::PushImage {
+                data: b64,
+                sensitive: false,
+            },
+        },
     )
     .await;
-    eprintln!("REGRESSION: over-cap image push ok={} err={:?}", resp.ok, resp.err);
+    eprintln!(
+        "REGRESSION: over-cap image push ok={} err={:?}",
+        resp.ok, resp.err
+    );
 
     assert!(
         !PANIC_TRIGGERED.load(Ordering::SeqCst),
         "a panic was captured by the test panic hook"
     );
-    assert!(!resp.ok, "expected over-cap image push to be rejected (ok=false)");
-    let err = resp.err.as_deref().expect("expected an error on rejected image push");
+    assert!(
+        !resp.ok,
+        "expected over-cap image push to be rejected (ok=false)"
+    );
+    let err = resp
+        .err
+        .as_deref()
+        .expect("expected an error on rejected image push");
     assert!(
         err.contains("too large"),
         "expected a 'too large' rejection (not a PNG-decode error), got: {err:?}"
@@ -331,7 +368,10 @@ async fn over_cap_image_push_is_rejected_not_truncated() {
 
     // Nothing was stored locally — the over-cap image never entered history.
     let stored = has_history_item(&ipc_a, Duration::from_secs(2)).await;
-    assert!(!stored, "expected A to store nothing for the over-cap image push");
+    assert!(
+        !stored,
+        "expected A to store nothing for the over-cap image push"
+    );
 
     shutdown_a.cancel();
     let _ = h_a.await;
@@ -366,7 +406,14 @@ async fn exact_boundary_text_push_accepted_and_rejected() {
         if !ipc_a.exists() {
             return false;
         }
-        let resp = ipc_send_recv(&ipc_a, CmdRequest { id: 1, op: fluxsyncd::cmd::CmdOp::Status }).await;
+        let resp = ipc_send_recv(
+            &ipc_a,
+            CmdRequest {
+                id: 1,
+                op: fluxsyncd::cmd::CmdOp::Status,
+            },
+        )
+        .await;
         matches!(resp.data, Some(CmdData::State(_)))
     })
     .await;
@@ -399,7 +446,9 @@ async fn exact_boundary_text_push_accepted_and_rejected() {
         &ipc_a,
         CmdRequest {
             id: 101,
-            op: fluxsyncd::cmd::CmdOp::Push { text: over_cap_text },
+            op: fluxsyncd::cmd::CmdOp::Push {
+                text: over_cap_text,
+            },
         },
     )
     .await;

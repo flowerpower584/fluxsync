@@ -105,7 +105,10 @@ async fn ipc_line_is_length_capped_no_oom() {
         .await
         .expect("control: daemon never answered an under-cap line")
         .expect("control: read error");
-    assert!(n > 0, "control: expected a response line for a bounded request");
+    assert!(
+        n > 0,
+        "control: expected a response line for a bounded request"
+    );
     assert!(
         resp.contains("\"ok\":false") && resp.contains("bad json"),
         "control: expected a CmdResponse error envelope, got: {resp:?}"
@@ -142,11 +145,11 @@ async fn ipc_line_is_length_capped_no_oom() {
     // If the writes all went through, the rejection shows up as a clean EOF
     // (or read error) on the next read — the daemon dropped the connection.
     let mut tail = String::new();
-    let closed = match tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut tail)).await
-    {
-        Ok(Ok(0) | Err(_)) => true, // clean EOF, or connection reset == torn down
-        Ok(Ok(_)) | Err(_) => false, // over-cap reply, or timed out buffering -> unbounded (bug)
-    };
+    let closed =
+        match tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut tail)).await {
+            Ok(Ok(0) | Err(_)) => true, // clean EOF, or connection reset == torn down
+            Ok(Ok(_)) | Err(_) => false, // over-cap reply, or timed out buffering -> unbounded (bug)
+        };
 
     let after = rss_kb(pid);
     // RSS KiB values never approach 2^52; no precision loss in practice.

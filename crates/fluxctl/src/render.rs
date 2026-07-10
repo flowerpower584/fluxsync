@@ -43,7 +43,10 @@ pub fn render_status(v: &Value) {
         .get("link_latency_ms")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let device_name = data.get("device_name").and_then(Value::as_str).unwrap_or("");
+    let device_name = data
+        .get("device_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let peer_name = data.get("peer_name").and_then(Value::as_str).unwrap_or("");
     let peer_batt = data
         .get("peer_battery")
@@ -210,15 +213,9 @@ pub fn render_status(v: &Value) {
     // human-glance summary.
     if let Some(m) = data.get("metrics").filter(|v| !v.is_null()) {
         let sent = m.get("items_sent").and_then(Value::as_u64).unwrap_or(0);
-        let received = m
-            .get("items_received")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let received = m.get("items_received").and_then(Value::as_u64).unwrap_or(0);
         let dups = m.get("dedup_drops").and_then(Value::as_u64).unwrap_or(0);
-        let resynced = m
-            .get("items_resynced")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let resynced = m.get("items_resynced").and_then(Value::as_u64).unwrap_or(0);
         let reconnects = m.get("reconnects").and_then(Value::as_u64).unwrap_or(0);
         let hs_failed = m
             .get("handshakes_failed")

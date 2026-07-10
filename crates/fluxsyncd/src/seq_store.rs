@@ -278,7 +278,10 @@ mod tests {
             initial2 >= RESERVE,
             "restart must never resume at or below a seq already issued (issued up to {seq}, resumed at {initial2})"
         );
-        assert!(initial2 > seq || initial2 == 2 * RESERVE, "resumed horizon must be safely ahead");
+        assert!(
+            initial2 > seq || initial2 == 2 * RESERVE,
+            "resumed horizon must be safely ahead"
+        );
     }
 
     #[test]
@@ -289,7 +292,10 @@ mod tests {
         store.advance(RESERVE).unwrap();
 
         let bak_path = d.path().join("event_seq.json.bak");
-        assert!(bak_path.exists(), ".bak must exist after crossing a horizon boundary");
+        assert!(
+            bak_path.exists(),
+            ".bak must exist after crossing a horizon boundary"
+        );
         let bak_contents = std::fs::read_to_string(&bak_path).unwrap();
 
         // Corrupt the main file.
@@ -321,6 +327,9 @@ mod tests {
             .unwrap()
             .modified()
             .unwrap();
-        assert_eq!(before, after, "advance below horizon must not rewrite the file");
+        assert_eq!(
+            before, after,
+            "advance below horizon must not rewrite the file"
+        );
     }
 }

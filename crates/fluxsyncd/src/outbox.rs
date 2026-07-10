@@ -298,8 +298,14 @@ mod tests {
         ob.insert(hash(2), entry(big, 2, Instant::now())); // pushes over cap: evicts hash(1)
         ob.insert(hash(3), entry(big, 3, Instant::now())); // pushes over cap: evicts hash(2)
 
-        assert!(ob.get(hash(1)).is_none(), "hash(1) must be byte-cap evicted");
-        assert!(ob.get(hash(2)).is_none(), "hash(2) must be byte-cap evicted");
+        assert!(
+            ob.get(hash(1)).is_none(),
+            "hash(1) must be byte-cap evicted"
+        );
+        assert!(
+            ob.get(hash(2)).is_none(),
+            "hash(2) must be byte-cap evicted"
+        );
         assert!(ob.get(hash(3)).is_some());
         assert_eq!(ob.len(), 1);
     }

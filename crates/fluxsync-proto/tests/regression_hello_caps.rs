@@ -68,7 +68,10 @@ fn hostile_oversized_cap_entry_rejected_on_decode() {
 fn boundary_cap_len_max_ok_over_rejected_on_decode() {
     let at_cap = hello(vec!["x".repeat(MAX_CAP_LEN)]);
     let ok = decode(&raw_cbor(&at_cap));
-    assert!(ok.is_ok(), "cap len == {MAX_CAP_LEN} must decode, got {ok:?}");
+    assert!(
+        ok.is_ok(),
+        "cap len == {MAX_CAP_LEN} must decode, got {ok:?}"
+    );
 
     let over = hello(vec!["x".repeat(MAX_CAP_LEN + 1)]);
     let err = decode(&raw_cbor(&over));

@@ -347,7 +347,10 @@ mod tests {
 
         let mut rng = MaxRng; // delay == base == 500ms for attempt 0
         pb.on_attempt_failed(now, &mut rng);
-        assert!(!pb.ready(now), "must not be ready immediately after a failure");
+        assert!(
+            !pb.ready(now),
+            "must not be ready immediately after a failure"
+        );
         assert!(!pb.ready(now + ms(499)));
         assert!(pb.ready(now + ms(500)));
         assert!(pb.ready(now + ms(501)));
@@ -386,8 +389,14 @@ mod tests {
         }
         assert_eq!(pb.attempt, 3);
         pb.on_session_ended(MIN_STABLE.checked_sub(Duration::from_millis(1)).unwrap());
-        assert_eq!(pb.attempt, 3, "a short-lived session must not reset backoff");
-        assert!(!pb.ready(now), "the pending wait must survive the short-lived session");
+        assert_eq!(
+            pb.attempt, 3,
+            "a short-lived session must not reset backoff"
+        );
+        assert!(
+            !pb.ready(now),
+            "the pending wait must survive the short-lived session"
+        );
     }
 
     /// M6: a session that stayed up at least `MIN_STABLE` resets backoff on
@@ -403,7 +412,10 @@ mod tests {
         }
         assert_eq!(pb.attempt, 3);
         pb.on_session_ended(MIN_STABLE);
-        assert_eq!(pb.attempt, 0, "a session that reached MIN_STABLE must reset backoff");
+        assert_eq!(
+            pb.attempt, 0,
+            "a session that reached MIN_STABLE must reset backoff"
+        );
         assert!(pb.ready(now), "reset must clear the pending wait");
     }
 
@@ -417,7 +429,10 @@ mod tests {
         a.on_attempt_failed(now, &mut rng);
         a.on_attempt_failed(now, &mut rng);
         assert!(!a.ready(now));
-        assert!(b.ready(now), "peer b must be unaffected by peer a's failures");
+        assert!(
+            b.ready(now),
+            "peer b must be unaffected by peer a's failures"
+        );
 
         b.on_attempt_failed(now, &mut rng);
         assert_eq!(a.attempt, 2);

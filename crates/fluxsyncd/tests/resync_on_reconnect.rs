@@ -110,7 +110,14 @@ fn cfg_for(id: &Identity, port: u16, keystore: &Path, ipc: &Path, name: &str) ->
 }
 
 async fn status(ipc: &Path) -> Box<fluxsync_core::State> {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 1, op: CmdOp::Status }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     match resp.data {
         Some(CmdData::State(s)) => s,
         other => panic!("expected State, got {other:?}"),
@@ -140,15 +147,28 @@ async fn ipc_up(ipc: &Path, dur: Duration) -> bool {
         if !ipc.exists() {
             return false;
         }
-        ipc_try_send_recv(ipc, CmdRequest { id: 0, op: CmdOp::Status })
-            .await
-            .is_some_and(|r| r.ok)
+        ipc_try_send_recv(
+            ipc,
+            CmdRequest {
+                id: 0,
+                op: CmdOp::Status,
+            },
+        )
+        .await
+        .is_some_and(|r| r.ok)
     })
     .await
 }
 
 async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(ipc, CmdRequest { id: 0, op: CmdOp::SetThreshold { value } }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 0,
+            op: CmdOp::SetThreshold { value },
+        },
+    )
+    .await;
     assert!(r.ok, "set-threshold failed: {r:?}");
 }
 
@@ -177,13 +197,22 @@ async fn clear_history(ipc: &Path, include_favorites: bool) {
 }
 
 async fn history_has(ipc: &Path, preview: &str) -> bool {
-    status(ipc).await.history.iter().any(|h| h.preview == preview)
+    status(ipc)
+        .await
+        .history
+        .iter()
+        .any(|h| h.preview == preview)
 }
 
 /// Full history row matching `preview`, so callers can inspect fields like
 /// `resync` beyond the plain presence check `history_has` does.
 async fn history_item(ipc: &Path, preview: &str) -> Option<fluxsync_core::HistoryItem> {
-    status(ipc).await.history.iter().find(|h| h.preview == preview).cloned()
+    status(ipc)
+        .await
+        .history
+        .iter()
+        .find(|h| h.preview == preview)
+        .cloned()
 }
 
 async fn phase_linked(ipc: &Path) -> bool {
@@ -191,7 +220,11 @@ async fn phase_linked(ipc: &Path) -> bool {
 }
 
 async fn items_resynced(ipc: &Path) -> u64 {
-    status(ipc).await.metrics.as_ref().map_or(0, |m| m.items_resynced)
+    status(ipc)
+        .await
+        .metrics
+        .as_ref()
+        .map_or(0, |m| m.items_resynced)
 }
 
 /// DEFECT 1 regression proof: a resync-delivered item's `WriteClipboard`
@@ -213,9 +246,20 @@ async fn resync_applies_suppressed(ipc: &Path) -> u64 {
 // harness used by two_daemons.rs / rekey.rs / vault_persist.rs.
 
 async fn pair_show(ipc: &Path) -> (String, String) {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 10, op: CmdOp::PairShow {} }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 10,
+            op: CmdOp::PairShow {},
+        },
+    )
+    .await;
     match resp.data {
-        Some(CmdData::PairInfo { peer_id_hex, pubkey_b32, .. }) => (peer_id_hex, pubkey_b32),
+        Some(CmdData::PairInfo {
+            peer_id_hex,
+            pubkey_b32,
+            ..
+        }) => (peer_id_hex, pubkey_b32),
         other => panic!("unexpected pair_show response: {other:?}"),
     }
 }
@@ -237,7 +281,14 @@ async fn pair_accept(ipc: &Path, pubkey_b32: String, peer_name: &str, addr: Sock
 }
 
 async fn pending_peer_id(ipc: &Path) -> Option<String> {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 12, op: CmdOp::PairPending {} }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 12,
+            op: CmdOp::PairPending {},
+        },
+    )
+    .await;
     match resp.data {
         Some(CmdData::PendingPairs(v)) if !v.is_empty() => Some(v[0].peer_id.clone()),
         _ => None,
@@ -254,14 +305,20 @@ async fn confirm_pending(ipc: &Path, dur: Duration) {
                 ipc,
                 CmdRequest {
                     id: 13,
-                    op: CmdOp::PairConfirm { peer_id, accept: true },
+                    op: CmdOp::PairConfirm {
+                        peer_id,
+                        accept: true,
+                    },
                 },
             )
             .await;
             assert!(resp.ok, "pair_confirm failed: {resp:?}");
             return;
         }
-        assert!(start.elapsed() < dur, "no pending pair to confirm within {dur:?}");
+        assert!(
+            start.elapsed() < dur,
+            "no pending pair to confirm within {dur:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -278,8 +335,14 @@ async fn pair_daemons(ipc_a: &Path, addr_a: SocketAddr, ipc_b: &Path) -> String 
     let (_a_id, a_pub) = pair_show(ipc_a).await;
     pair_accept(ipc_b, a_pub.clone(), "device-a", addr_a).await;
 
-    let linked_a = wait_until(Duration::from_secs(10), || async { phase_linked(ipc_a).await }).await;
-    let linked_b = wait_until(Duration::from_secs(10), || async { phase_linked(ipc_b).await }).await;
+    let linked_a = wait_until(Duration::from_secs(10), || async {
+        phase_linked(ipc_a).await
+    })
+    .await;
+    let linked_b = wait_until(Duration::from_secs(10), || async {
+        phase_linked(ipc_b).await
+    })
+    .await;
     assert!(linked_a, "a: did not reach linked phase while pairing");
     assert!(linked_b, "b: did not reach linked phase while pairing");
 
@@ -335,8 +398,14 @@ async fn boot_and_link() -> (
         shutdown_b.clone(),
     ));
 
-    assert!(ipc_up(&ipc_a, Duration::from_secs(5)).await, "a: ipc not up");
-    assert!(ipc_up(&ipc_b, Duration::from_secs(5)).await, "b: ipc not up");
+    assert!(
+        ipc_up(&ipc_a, Duration::from_secs(5)).await,
+        "a: ipc not up"
+    );
+    assert!(
+        ipc_up(&ipc_b, Duration::from_secs(5)).await,
+        "b: ipc not up"
+    );
 
     set_threshold(&ipc_a, 5).await;
     set_threshold(&ipc_b, 5).await;
@@ -346,15 +415,22 @@ async fn boot_and_link() -> (
     let sanity = "resync-sanity-item";
     push(&ipc_a, sanity).await;
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&ipc_b, sanity).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&ipc_b, sanity).await
+        })
+        .await,
         "sanity item never reached b before the resync scenario started"
     );
 
     // Shut b down cleanly; a stays up and un-toggled from here on.
     shutdown_b.cancel();
-    let _ = timeout(Duration::from_secs(5), h_b).await.expect("b: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b)
+        .await
+        .expect("b: clean shutdown hung");
 
-    (ipc_a, shutdown_a, h_a, id_b, keystore_b, ipc_b, port_b, addr_a, a_pub)
+    (
+        ipc_a, shutdown_a, h_a, id_b, keystore_b, ipc_b, port_b, addr_a, a_pub,
+    )
 }
 
 /// Restart `b` with the same identity + keystore dir (so `peers.json`
@@ -369,21 +445,33 @@ async fn restart_b_and_relink(
     addr_a: SocketAddr,
     a_pub: String,
     ipc_a: &Path,
-) -> (CancellationToken, tokio::task::JoinHandle<anyhow::Result<()>>) {
+) -> (
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
     let port_b2 = pick_free_udp_port().await;
     let shutdown_b2 = CancellationToken::new();
     let h_b2 = tokio::spawn(run(
         cfg_for(id_b, port_b2, keystore_b, ipc_b, "device-b-v2"),
         shutdown_b2.clone(),
     ));
-    assert!(ipc_up(ipc_b, Duration::from_secs(5)).await, "b2: ipc not up after restart");
+    assert!(
+        ipc_up(ipc_b, Duration::from_secs(5)).await,
+        "b2: ipc not up after restart"
+    );
 
     pair_accept(ipc_b, a_pub, "device-a", addr_a).await;
 
     let relinked_a = wait_until(RECONNECT_ENVELOPE, || async { phase_linked(ipc_a).await }).await;
     let relinked_b = wait_until(RECONNECT_ENVELOPE, || async { phase_linked(ipc_b).await }).await;
-    assert!(relinked_a, "a: did not recover to linked within {RECONNECT_ENVELOPE:?} of b's restart");
-    assert!(relinked_b, "b2: did not reach linked within {RECONNECT_ENVELOPE:?} of restart");
+    assert!(
+        relinked_a,
+        "a: did not recover to linked within {RECONNECT_ENVELOPE:?} of b's restart"
+    );
+    assert!(
+        relinked_b,
+        "b2: did not reach linked within {RECONNECT_ENVELOPE:?} of restart"
+    );
 
     (shutdown_b2, h_b2)
 }
@@ -422,11 +510,17 @@ async fn missed_item_resyncs_after_relink() {
         &ipc_a,
         CmdRequest {
             id: 8,
-            op: CmdOp::SetFavorite { hash: missed_hash, favorite: true },
+            op: CmdOp::SetFavorite {
+                hash: missed_hash,
+                favorite: true,
+            },
         },
     )
     .await;
-    assert!(fav_resp.ok, "set-favorite on missed item failed: {fav_resp:?}");
+    assert!(
+        fav_resp.ok,
+        "set-favorite on missed item failed: {fav_resp:?}"
+    );
 
     clear_history(&ipc_a, false).await;
     assert!(
@@ -453,7 +547,10 @@ async fn missed_item_resyncs_after_relink() {
         restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub, &ipc_a).await;
 
     assert!(
-        wait_until(Duration::from_secs(15), || async { history_has(&ipc_b, missed).await }).await,
+        wait_until(Duration::from_secs(15), || async {
+            history_has(&ipc_b, missed).await
+        })
+        .await,
         "missed item never resynced onto b within 15s of relink"
     );
 
@@ -465,12 +562,18 @@ async fn missed_item_resyncs_after_relink() {
     let missed_item = history_item(&ipc_b, missed)
         .await
         .expect("missed item must be present in b's history after resync");
-    assert!(missed_item.resync, "pull-resynced item must have resync == true");
+    assert!(
+        missed_item.resync,
+        "pull-resynced item must have resync == true"
+    );
 
     let sanity_item = history_item(&ipc_b, "resync-sanity-item")
         .await
         .expect("sanity item (live-pushed before b went down) must survive in b's history");
-    assert!(!sanity_item.resync, "a live-pushed item must have resync == false");
+    assert!(
+        !sanity_item.resync,
+        "a live-pushed item must have resync == false"
+    );
 
     assert!(
         wait_until(Duration::from_secs(5), || async {
@@ -501,8 +604,12 @@ async fn missed_item_resyncs_after_relink() {
 
     shutdown_a.cancel();
     shutdown_b2.cancel();
-    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
-    let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_a)
+        .await
+        .expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b2)
+        .await
+        .expect("b2: clean shutdown hung");
 }
 
 /// H2 regression: `CmdOp::ClearHistory` is LOCAL-ONLY by design — it never
@@ -551,7 +658,10 @@ async fn cleared_item_does_not_resurrect_via_peer_outbox() {
         restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub, &ipc_a).await;
 
     assert!(
-        wait_until(Duration::from_secs(15), || async { history_has(&ipc_b, missed).await }).await,
+        wait_until(Duration::from_secs(15), || async {
+            history_has(&ipc_b, missed).await
+        })
+        .await,
         "genuinely-missed item never resynced onto b within 15s of relink"
     );
 
@@ -567,8 +677,12 @@ async fn cleared_item_does_not_resurrect_via_peer_outbox() {
 
     shutdown_a.cancel();
     shutdown_b2.cancel();
-    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
-    let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_a)
+        .await
+        .expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b2)
+        .await
+        .expect("b2: clean shutdown hung");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -599,7 +713,10 @@ async fn sensitive_item_never_resyncs() {
 
     // The control item proves resync actually ran.
     assert!(
-        wait_until(Duration::from_secs(15), || async { history_has(&ipc_b, control).await }).await,
+        wait_until(Duration::from_secs(15), || async {
+            history_has(&ipc_b, control).await
+        })
+        .await,
         "control item never resynced onto b within 15s of relink"
     );
     assert!(
@@ -631,8 +748,12 @@ async fn sensitive_item_never_resyncs() {
 
     shutdown_a.cancel();
     shutdown_b2.cancel();
-    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
-    let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_a)
+        .await
+        .expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b2)
+        .await
+        .expect("b2: clean shutdown hung");
 }
 
 /// DEFECT 1 + DEFECT 2 regression: the live "every macOS relaunch" bug.
@@ -690,7 +811,10 @@ async fn resync_apply_suppressed_and_loop_stops_after_second_relink() {
         restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub.clone(), &ipc_a).await;
 
     assert!(
-        wait_until(Duration::from_secs(15), || async { history_has(&ipc_b, missed).await }).await,
+        wait_until(Duration::from_secs(15), || async {
+            history_has(&ipc_b, missed).await
+        })
+        .await,
         "CRLF item never resynced onto b within 15s of relink cycle 1 — if this hangs, suspect \
          a hash mismatch between a's offered hash and b's history hash (DEFECT 2a)"
     );
@@ -720,7 +844,9 @@ async fn resync_apply_suppressed_and_loop_stops_after_second_relink() {
     // shutdown could race past), so the rehydrated history already holds
     // the hash and resync-1's held-check must skip it entirely this time.
     shutdown_b2.cancel();
-    let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b2)
+        .await
+        .expect("b2: clean shutdown hung");
 
     let (shutdown_b3, h_b3) =
         restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub, &ipc_a).await;
@@ -742,8 +868,12 @@ async fn resync_apply_suppressed_and_loop_stops_after_second_relink() {
 
     shutdown_a.cancel();
     shutdown_b3.cancel();
-    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
-    let _ = timeout(Duration::from_secs(5), h_b3).await.expect("b3: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_a)
+        .await
+        .expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b3)
+        .await
+        .expect("b3: clean shutdown hung");
 }
 
 /// DEFECT 3 regression: resync-1's promise is narrow — recover items whose
@@ -780,7 +910,10 @@ async fn item_copied_while_fully_unlinked_never_resyncs() {
         cfg_for(&id_a, port_a, &keystore_a, &ipc_a, "device-a"),
         shutdown_a.clone(),
     ));
-    assert!(ipc_up(&ipc_a, Duration::from_secs(5)).await, "a: ipc not up");
+    assert!(
+        ipc_up(&ipc_a, Duration::from_secs(5)).await,
+        "a: ipc not up"
+    );
     set_threshold(&ipc_a, 5).await;
 
     // a has no peer at all yet (never paired) — copy here, with zero linked
@@ -795,7 +928,10 @@ async fn item_copied_while_fully_unlinked_never_resyncs() {
         cfg_for(&id_b, port_b, &keystore_b, &ipc_b, "device-b"),
         shutdown_b.clone(),
     ));
-    assert!(ipc_up(&ipc_b, Duration::from_secs(5)).await, "b: ipc not up");
+    assert!(
+        ipc_up(&ipc_b, Duration::from_secs(5)).await,
+        "b: ipc not up"
+    );
     set_threshold(&ipc_b, 5).await;
 
     pair_daemons(&ipc_a, addr_a, &ipc_b).await;
@@ -811,6 +947,10 @@ async fn item_copied_while_fully_unlinked_never_resyncs() {
 
     shutdown_a.cancel();
     shutdown_b.cancel();
-    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
-    let _ = timeout(Duration::from_secs(5), h_b).await.expect("b: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_a)
+        .await
+        .expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b)
+        .await
+        .expect("b: clean shutdown hung");
 }

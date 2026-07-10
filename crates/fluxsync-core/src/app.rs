@@ -218,7 +218,10 @@ impl App {
                 fluxsync_proto::MAX_HELLO_NAME
             )));
         }
-        if trimmed.chars().any(|c| c.is_control() || is_bidi_or_format_char(c)) {
+        if trimmed
+            .chars()
+            .any(|c| c.is_control() || is_bidi_or_format_char(c))
+        {
             return Err(CoreError::InvalidDeviceName(
                 "name contains non-printable or bidi/format characters".into(),
             ));
@@ -257,7 +260,15 @@ impl App {
                 payload,
                 preview,
                 ..
-            } => (*kind, *sensitive, Direction::Outbound, *hash, payload, preview, None),
+            } => (
+                *kind,
+                *sensitive,
+                Direction::Outbound,
+                *hash,
+                payload,
+                preview,
+                None,
+            ),
             Event::FrameReceivedClipboard {
                 kind,
                 sensitive,
@@ -526,9 +537,7 @@ impl App {
         let forward_to = self
             .links
             .iter()
-            .filter(|(d, l)| {
-                l.phase == Phase::Linked && **d != source && **d != event_id.origin
-            })
+            .filter(|(d, l)| l.phase == Phase::Linked && **d != source && **d != event_id.origin)
             .map(|(d, _)| *d)
             .collect();
         Ingest::Apply { forward_to }
@@ -1267,7 +1276,11 @@ mod tests {
             &wall(),
         );
 
-        let item = app.state.history.first().expect("history must have the item");
+        let item = app
+            .state
+            .history
+            .first()
+            .expect("history must have the item");
         assert_eq!(
             item.source_peer_id,
             Some(hex32(&[9u8; 32])),
@@ -1824,9 +1837,13 @@ mod tests {
             &wall(),
         );
         assert!(
-            sensitive_actions.iter().any(
-                |a| matches!(a, Action::WriteClipboard { sensitive: true, .. })
-            ),
+            sensitive_actions.iter().any(|a| matches!(
+                a,
+                Action::WriteClipboard {
+                    sensitive: true,
+                    ..
+                }
+            )),
             "a sensitive inbound image must produce WriteClipboard{{sensitive: true, ..}}"
         );
 
@@ -1844,9 +1861,13 @@ mod tests {
             &wall(),
         );
         assert!(
-            plain_actions.iter().any(
-                |a| matches!(a, Action::WriteClipboard { sensitive: false, .. })
-            ),
+            plain_actions.iter().any(|a| matches!(
+                a,
+                Action::WriteClipboard {
+                    sensitive: false,
+                    ..
+                }
+            )),
             "a non-sensitive inbound image must produce WriteClipboard{{sensitive: false, ..}}"
         );
     }
@@ -2039,7 +2060,9 @@ mod tests {
             },
             &wall(),
         );
-        assert!(!resolved.iter().any(|a| matches!(a, Action::SendItem { .. })));
+        assert!(!resolved
+            .iter()
+            .any(|a| matches!(a, Action::SendItem { .. })));
         assert!(app.snapshot().pending.is_empty());
     }
 
@@ -2061,7 +2084,9 @@ mod tests {
             &wall(),
         );
         // Held: no write, but the ack still fires so the peer stops resending.
-        assert!(!acts.iter().any(|a| matches!(a, Action::WriteClipboard { .. })));
+        assert!(!acts
+            .iter()
+            .any(|a| matches!(a, Action::WriteClipboard { .. })));
         assert!(acts
             .iter()
             .any(|a| matches!(a, Action::AckItem { hash } if hash == &[8u8; 32])));
@@ -2143,7 +2168,9 @@ mod tests {
             &wall(),
         );
         assert!(
-            !acts.iter().any(|a| matches!(a, Action::WriteClipboard { .. })),
+            !acts
+                .iter()
+                .any(|a| matches!(a, Action::WriteClipboard { .. })),
             "Never-text must not write the OS clipboard"
         );
         assert!(
@@ -2170,7 +2197,9 @@ mod tests {
             },
             &wall(),
         );
-        assert!(acts.iter().any(|a| matches!(a, Action::WriteClipboard { .. })));
+        assert!(acts
+            .iter()
+            .any(|a| matches!(a, Action::WriteClipboard { .. })));
     }
 
     // ── FluxMesh coordinator (Phase 1) ──────────────────────────────────
@@ -2554,11 +2583,21 @@ mod tests {
         const OTHER_PEER: [u8; 32] = [9u8; 32];
 
         let mut app = boot();
-        app.handle(Event::SasPairingStarted { peer_id: PAIRING_PEER }, &wall());
+        app.handle(
+            Event::SasPairingStarted {
+                peer_id: PAIRING_PEER,
+            },
+            &wall(),
+        );
         assert_eq!(app.snapshot().sas_phase, "showing");
 
         // An unrelated peer confirming must not touch this pairing's phase.
-        app.handle(Event::SasPeerConfirmed { peer_id: OTHER_PEER }, &wall());
+        app.handle(
+            Event::SasPeerConfirmed {
+                peer_id: OTHER_PEER,
+            },
+            &wall(),
+        );
         assert_eq!(
             app.snapshot().sas_phase,
             "showing",
@@ -2566,7 +2605,12 @@ mod tests {
         );
 
         // The actual pairing peer confirming still works normally.
-        app.handle(Event::SasPeerConfirmed { peer_id: PAIRING_PEER }, &wall());
+        app.handle(
+            Event::SasPeerConfirmed {
+                peer_id: PAIRING_PEER,
+            },
+            &wall(),
+        );
         assert_eq!(app.snapshot().sas_phase, "peer_confirmed");
     }
 
@@ -2579,18 +2623,38 @@ mod tests {
         const OTHER_PEER: [u8; 32] = [9u8; 32];
 
         let mut app = boot();
-        app.handle(Event::SasPairingStarted { peer_id: PAIRING_PEER }, &wall());
-        app.handle(Event::SasLocalConfirmed { peer_id: PAIRING_PEER }, &wall());
+        app.handle(
+            Event::SasPairingStarted {
+                peer_id: PAIRING_PEER,
+            },
+            &wall(),
+        );
+        app.handle(
+            Event::SasLocalConfirmed {
+                peer_id: PAIRING_PEER,
+            },
+            &wall(),
+        );
         assert_eq!(app.snapshot().sas_phase, "local_confirmed");
 
-        app.handle(Event::SasPeerRejected { peer_id: OTHER_PEER }, &wall());
+        app.handle(
+            Event::SasPeerRejected {
+                peer_id: OTHER_PEER,
+            },
+            &wall(),
+        );
         assert_eq!(
             app.snapshot().sas_phase,
             "local_confirmed",
             "a different peer's reject must not stomp this pairing's phase"
         );
 
-        app.handle(Event::SasPeerRejected { peer_id: PAIRING_PEER }, &wall());
+        app.handle(
+            Event::SasPeerRejected {
+                peer_id: PAIRING_PEER,
+            },
+            &wall(),
+        );
         assert_eq!(app.snapshot().sas_phase, "peer_rejected");
     }
 

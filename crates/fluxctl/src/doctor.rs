@@ -175,7 +175,11 @@ fn check_phase(data: Option<&Value>) -> Check {
             Level::Warn,
             "halted — battery critical (<= 5%); the link resumes once charged",
         ),
-        other => Check::new("phase", Level::Warn, format!("unrecognized phase {other:?}")),
+        other => Check::new(
+            "phase",
+            Level::Warn,
+            format!("unrecognized phase {other:?}"),
+        ),
     }
 }
 
@@ -310,7 +314,10 @@ fn check_data_dir(dir: &Path, facts: &DataDirFacts) -> Check {
         return Check::new(
             "data_dir",
             Level::Warn,
-            format!("{} exists but is not writable — fix permissions", dir.display()),
+            format!(
+                "{} exists but is not writable — fix permissions",
+                dir.display()
+            ),
         );
     }
     let hist = match facts.history_enc_size {
@@ -363,7 +370,12 @@ fn identity_source_message(no_keychain: bool, strict: bool, platform: &str) -> S
 /// may differ from the daemon's if the two were launched in different
 /// shells/services — `identity_file_on_disk` is ground truth from the data
 /// dir and corrects for that mismatch when it disagrees.
-fn check_identity(no_keychain: bool, strict: bool, platform: &str, identity_file_on_disk: bool) -> Check {
+fn check_identity(
+    no_keychain: bool,
+    strict: bool,
+    platform: &str,
+    identity_file_on_disk: bool,
+) -> Check {
     let mut msg = identity_source_message(no_keychain, strict, platform);
     if identity_file_on_disk && !no_keychain {
         msg.push_str(
@@ -377,9 +389,7 @@ fn check_identity(no_keychain: bool, strict: bool, platform: &str, identity_file
     // not `Fail`: it's an intentional, opt-in escape hatch for headless/
     // dark-wake boots where the OS keychain is unavailable, not a bug.
     let level = if no_keychain {
-        msg.push_str(
-            " — unencrypted on disk; intended for headless/dark-wake boots only",
-        );
+        msg.push_str(" — unencrypted on disk; intended for headless/dark-wake boots only");
         Level::Warn
     } else {
         Level::Info
@@ -407,7 +417,9 @@ fn check_version(fluxctl_version: &str, daemon_version: Option<&Value>) -> Check
         Check::new(
             "version",
             Level::Warn,
-            format!("fluxctl {fluxctl_version} != daemon {dv} — rebuild/reinstall matching binaries"),
+            format!(
+                "fluxctl {fluxctl_version} != daemon {dv} — rebuild/reinstall matching binaries"
+            ),
         )
     }
 }
@@ -452,7 +464,11 @@ pub async fn run(ipc_path: &Path, json: bool) -> Result<bool> {
     let platform = std::env::consts::OS;
 
     let checks = vec![
-        check_daemon(reachable, connect_err.as_deref(), daemon_launch_hint(platform)),
+        check_daemon(
+            reachable,
+            connect_err.as_deref(),
+            daemon_launch_hint(platform),
+        ),
         check_sync(data.as_ref()),
         check_phase(data.as_ref()),
         check_peers(trust_count),
@@ -467,7 +483,12 @@ pub async fn run(ipc_path: &Path, json: bool) -> Result<bool> {
                 event_seq_present,
             },
         ),
-        check_identity(no_keychain, strict_keychain, platform, identity_file_on_disk),
+        check_identity(
+            no_keychain,
+            strict_keychain,
+            platform,
+            identity_file_on_disk,
+        ),
         check_version(
             env!("CARGO_PKG_VERSION"),
             data.as_ref().and_then(|d| d.get("version")),
@@ -532,7 +553,11 @@ mod tests {
 
     #[test]
     fn daemon_unreachable_fails_with_hint() {
-        let c = check_daemon(false, Some("connect ipc /x: No such file"), "start fluxsyncd");
+        let c = check_daemon(
+            false,
+            Some("connect ipc /x: No such file"),
+            "start fluxsyncd",
+        );
         assert_eq!(c.level, Level::Fail);
         assert!(c.message.contains("start fluxsyncd"));
         assert!(c.message.contains("No such file"));
@@ -700,7 +725,10 @@ mod tests {
             history_enc_size: None,
             event_seq_present: false,
         };
-        assert_eq!(check_data_dir(Path::new("/nope"), &facts).level, Level::Warn);
+        assert_eq!(
+            check_data_dir(Path::new("/nope"), &facts).level,
+            Level::Warn
+        );
     }
 
     #[test]
@@ -726,8 +754,9 @@ mod tests {
     #[test]
     fn identity_reports_platform_backend() {
         assert!(identity_source_message(false, false, "macos").contains("macOS Keychain"));
-        assert!(identity_source_message(false, false, "windows")
-            .contains("Windows Credential Manager"));
+        assert!(
+            identity_source_message(false, false, "windows").contains("Windows Credential Manager")
+        );
         assert!(identity_source_message(false, false, "linux").contains("Secret Service"));
     }
 
@@ -794,10 +823,7 @@ mod tests {
         assert_eq!(check_sync(Some(&data)).level, Level::Ok);
         assert_eq!(check_phase(Some(&data)).level, Level::Ok);
         assert_eq!(check_peer_liveness(Some(&data), Some(1)).level, Level::Ok);
-        assert_eq!(
-            check_counters(data.get("metrics")).level,
-            Level::Ok
-        );
+        assert_eq!(check_counters(data.get("metrics")).level, Level::Ok);
         assert_eq!(check_version("0.6.2", data.get("version")).level, Level::Ok);
     }
 }

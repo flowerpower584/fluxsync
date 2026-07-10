@@ -73,13 +73,27 @@ fn cfg_for(id: &Identity, port: u16, keystore: &Path, ipc: &Path, name: &str) ->
 }
 
 async fn history_has(ipc: &Path, preview: &str, id: u64) -> bool {
-    let r = ipc_send_recv(ipc, CmdRequest { id, op: CmdOp::Status }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     matches!(r.data, Some(CmdData::State(s)) if s.history.iter().any(|h| h.preview == preview))
 }
 
 /// `(hash, favorite)` of the history item with this preview, if present.
 async fn item_of(ipc: &Path, preview: &str, id: u64) -> Option<(String, bool)> {
-    let r = ipc_send_recv(ipc, CmdRequest { id, op: CmdOp::Status }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     if let Some(CmdData::State(s)) = r.data {
         s.history
             .iter()
@@ -101,13 +115,23 @@ async fn history_survives_restart() {
 
     // ── v1: copy an item, let the vault persist it ──
     let sd1 = CancellationToken::new();
-    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "vault-d"), sd1.clone()));
+    let h1 = tokio::spawn(run(
+        cfg_for(&id, port, &keystore, &ipc, "vault-d"),
+        sd1.clone(),
+    ));
     assert!(
         wait_until(Duration::from_secs(5), || async { ipc.exists() }).await,
         "v1 ipc never appeared"
     );
 
-    ipc_send_recv(&ipc, CmdRequest { id: 0, op: CmdOp::Toggle { on: true } }).await;
+    ipc_send_recv(
+        &ipc,
+        CmdRequest {
+            id: 0,
+            op: CmdOp::Toggle { on: true },
+        },
+    )
+    .await;
     let r = ipc_send_recv(
         &ipc,
         CmdRequest {
@@ -121,7 +145,10 @@ async fn history_survives_restart() {
     assert!(r.ok, "push failed: {r:?}");
 
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "hello-vault", 2).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&ipc, "hello-vault", 2).await
+        })
+        .await,
         "item never reached in-memory history"
     );
     let hist_file = keystore.join("history.enc");
@@ -135,29 +162,46 @@ async fn history_survives_restart() {
     );
 
     sd1.cancel();
-    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h1)
+        .await
+        .expect("v1 shutdown hung");
 
     // ── v2: same identity + keystore → history is rehydrated ──
     let port2 = pick_free_udp_port().await;
     let sd2 = CancellationToken::new();
-    let h2 = tokio::spawn(run(cfg_for(&id, port2, &keystore, &ipc, "vault-d-v2"), sd2.clone()));
+    let h2 = tokio::spawn(run(
+        cfg_for(&id, port2, &keystore, &ipc, "vault-d-v2"),
+        sd2.clone(),
+    ));
     assert!(
         wait_until(Duration::from_secs(5), || async { ipc.exists() }).await,
         "v2 ipc never appeared"
     );
 
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "hello-vault", 3).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&ipc, "hello-vault", 3).await
+        })
+        .await,
         "history was not restored from the vault after restart"
     );
 
     sd2.cancel();
-    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h2)
+        .await
+        .expect("v2 shutdown hung");
 }
 
 /// Read `(enabled, text_rule)` of the firewall from the daemon's State.
 async fn firewall_of(ipc: &Path, id: u64) -> Option<(bool, Rule)> {
-    let r = ipc_send_recv(ipc, CmdRequest { id, op: CmdOp::Status }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     match r.data {
         Some(CmdData::State(s)) => Some((s.firewall.enabled, s.firewall.text)),
         _ => None,
@@ -177,7 +221,10 @@ async fn firewall_policy_survives_restart() {
 
     // ── v1: enable the firewall with text = Never ──
     let sd1 = CancellationToken::new();
-    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "fw-d"), sd1.clone()));
+    let h1 = tokio::spawn(run(
+        cfg_for(&id, port, &keystore, &ipc, "fw-d"),
+        sd1.clone(),
+    ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
 
     let policy = FirewallPolicy {
@@ -211,12 +258,17 @@ async fn firewall_policy_survives_restart() {
     );
 
     sd1.cancel();
-    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h1)
+        .await
+        .expect("v1 shutdown hung");
 
     // ── v2: same keystore → policy is rehydrated from disk ──
     let port2 = pick_free_udp_port().await;
     let sd2 = CancellationToken::new();
-    let h2 = tokio::spawn(run(cfg_for(&id, port2, &keystore, &ipc, "fw-d-v2"), sd2.clone()));
+    let h2 = tokio::spawn(run(
+        cfg_for(&id, port2, &keystore, &ipc, "fw-d-v2"),
+        sd2.clone(),
+    ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
 
     assert!(
@@ -229,7 +281,9 @@ async fn firewall_policy_survives_restart() {
     );
 
     sd2.cancel();
-    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h2)
+        .await
+        .expect("v2 shutdown hung");
 }
 
 #[tokio::test]
@@ -242,10 +296,20 @@ async fn favorite_flag_survives_restart() {
     let ipc = keystore.join("d.sock");
 
     let sd1 = CancellationToken::new();
-    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "fav-d"), sd1.clone()));
+    let h1 = tokio::spawn(run(
+        cfg_for(&id, port, &keystore, &ipc, "fav-d"),
+        sd1.clone(),
+    ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
 
-    ipc_send_recv(&ipc, CmdRequest { id: 0, op: CmdOp::Toggle { on: true } }).await;
+    ipc_send_recv(
+        &ipc,
+        CmdRequest {
+            id: 0,
+            op: CmdOp::Toggle { on: true },
+        },
+    )
+    .await;
     ipc_send_recv(
         &ipc,
         CmdRequest {
@@ -259,7 +323,10 @@ async fn favorite_flag_survives_restart() {
 
     // Wait for the item to land, then read its hash and pin it.
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "pin-me", 2).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&ipc, "pin-me", 2).await
+        })
+        .await,
         "item never reached history"
     );
     let (hash, _) = item_of(&ipc, "pin-me", 3).await.expect("item present");
@@ -295,12 +362,17 @@ async fn favorite_flag_survives_restart() {
     );
 
     sd1.cancel();
-    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h1)
+        .await
+        .expect("v1 shutdown hung");
 
     // Restart → the favorite flag must come back set.
     let port2 = pick_free_udp_port().await;
     let sd2 = CancellationToken::new();
-    let h2 = tokio::spawn(run(cfg_for(&id, port2, &keystore, &ipc, "fav-d-v2"), sd2.clone()));
+    let h2 = tokio::spawn(run(
+        cfg_for(&id, port2, &keystore, &ipc, "fav-d-v2"),
+        sd2.clone(),
+    ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
 
     assert!(
@@ -313,7 +385,9 @@ async fn favorite_flag_survives_restart() {
     );
 
     sd2.cancel();
-    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h2)
+        .await
+        .expect("v2 shutdown hung");
 }
 
 async fn clear_history(ipc: &Path, include_favorites: bool, id: u64) {
@@ -343,34 +417,66 @@ async fn clear_history_keeps_favorites_by_default() {
     let ipc = keystore.join("d.sock");
 
     let sd1 = CancellationToken::new();
-    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "clr-d"), sd1.clone()));
+    let h1 = tokio::spawn(run(
+        cfg_for(&id, port, &keystore, &ipc, "clr-d"),
+        sd1.clone(),
+    ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
 
-    ipc_send_recv(&ipc, CmdRequest { id: 0, op: CmdOp::Toggle { on: true } }).await;
     ipc_send_recv(
         &ipc,
-        CmdRequest { id: 1, op: CmdOp::Push { text: "keep-fav".into() } },
+        CmdRequest {
+            id: 0,
+            op: CmdOp::Toggle { on: true },
+        },
     )
     .await;
     ipc_send_recv(
         &ipc,
-        CmdRequest { id: 2, op: CmdOp::Push { text: "drop-me".into() } },
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Push {
+                text: "keep-fav".into(),
+            },
+        },
+    )
+    .await;
+    ipc_send_recv(
+        &ipc,
+        CmdRequest {
+            id: 2,
+            op: CmdOp::Push {
+                text: "drop-me".into(),
+            },
+        },
     )
     .await;
 
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "keep-fav", 3).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&ipc, "keep-fav", 3).await
+        })
+        .await,
         "favorite-to-be item never reached history"
     );
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "drop-me", 4).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&ipc, "drop-me", 4).await
+        })
+        .await,
         "non-favorite item never reached history"
     );
 
     let (hash, _) = item_of(&ipc, "keep-fav", 5).await.expect("item present");
     let r = ipc_send_recv(
         &ipc,
-        CmdRequest { id: 6, op: CmdOp::SetFavorite { hash, favorite: true } },
+        CmdRequest {
+            id: 6,
+            op: CmdOp::SetFavorite {
+                hash,
+                favorite: true,
+            },
+        },
     )
     .await;
     assert!(r.ok, "set-favorite failed: {r:?}");
@@ -386,7 +492,10 @@ async fn clear_history_keeps_favorites_by_default() {
     clear_history(&ipc, false, 8).await;
 
     assert!(
-        wait_until(Duration::from_secs(5), || async { !history_has(&ipc, "drop-me", 9).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            !history_has(&ipc, "drop-me", 9).await
+        })
+        .await,
         "non-favorite item survived ClearHistory{{include_favorites: false}} in memory"
     );
     assert!(
@@ -396,19 +505,30 @@ async fn clear_history_keeps_favorites_by_default() {
 
     let hist_file = keystore.join("history.enc");
     sd1.cancel();
-    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h1)
+        .await
+        .expect("v1 shutdown hung");
 
     // Restart with the same keystore: the on-disk vault must already
     // reflect the favorites-only survivor set, not the pre-clear list and
     // not an empty file left over from a bare delete.
     let port2 = pick_free_udp_port().await;
     let sd2 = CancellationToken::new();
-    let h2 = tokio::spawn(run(cfg_for(&id, port2, &keystore, &ipc, "clr-d-v2"), sd2.clone()));
+    let h2 = tokio::spawn(run(
+        cfg_for(&id, port2, &keystore, &ipc, "clr-d-v2"),
+        sd2.clone(),
+    ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
-    assert!(hist_file.exists(), "vault file must still exist (favorite survivor persisted)");
+    assert!(
+        hist_file.exists(),
+        "vault file must still exist (favorite survivor persisted)"
+    );
 
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "keep-fav", 11).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&ipc, "keep-fav", 11).await
+        })
+        .await,
         "favorited item was not restored from the on-disk vault after restart"
     );
     assert!(
@@ -417,7 +537,9 @@ async fn clear_history_keeps_favorites_by_default() {
     );
 
     sd2.cancel();
-    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h2)
+        .await
+        .expect("v2 shutdown hung");
 }
 
 /// "Clear clipboard history" with `include_favorites = true`: even a
@@ -435,23 +557,49 @@ async fn clear_history_include_favorites_drops_everything() {
     let ipc = keystore.join("d.sock");
 
     let sd1 = CancellationToken::new();
-    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "clr-all-d"), sd1.clone()));
+    let h1 = tokio::spawn(run(
+        cfg_for(&id, port, &keystore, &ipc, "clr-all-d"),
+        sd1.clone(),
+    ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
 
-    ipc_send_recv(&ipc, CmdRequest { id: 0, op: CmdOp::Toggle { on: true } }).await;
     ipc_send_recv(
         &ipc,
-        CmdRequest { id: 1, op: CmdOp::Push { text: "also-drop-fav".into() } },
+        CmdRequest {
+            id: 0,
+            op: CmdOp::Toggle { on: true },
+        },
+    )
+    .await;
+    ipc_send_recv(
+        &ipc,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Push {
+                text: "also-drop-fav".into(),
+            },
+        },
     )
     .await;
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&ipc, "also-drop-fav", 2).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&ipc, "also-drop-fav", 2).await
+        })
+        .await,
         "item never reached history"
     );
-    let (hash, _) = item_of(&ipc, "also-drop-fav", 3).await.expect("item present");
+    let (hash, _) = item_of(&ipc, "also-drop-fav", 3)
+        .await
+        .expect("item present");
     let r = ipc_send_recv(
         &ipc,
-        CmdRequest { id: 4, op: CmdOp::SetFavorite { hash, favorite: true } },
+        CmdRequest {
+            id: 4,
+            op: CmdOp::SetFavorite {
+                hash,
+                favorite: true,
+            },
+        },
     )
     .await;
     assert!(r.ok, "set-favorite failed: {r:?}");
@@ -467,18 +615,26 @@ async fn clear_history_include_favorites_drops_everything() {
     clear_history(&ipc, true, 6).await;
 
     assert!(
-        wait_until(Duration::from_secs(5), || async { !history_has(&ipc, "also-drop-fav", 7).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            !history_has(&ipc, "also-drop-fav", 7).await
+        })
+        .await,
         "favorited item survived ClearHistory{{include_favorites: true}} in memory"
     );
 
     sd1.cancel();
-    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h1)
+        .await
+        .expect("v1 shutdown hung");
 
     // Restart with the same keystore: even the favorite must not come back
     // from disk.
     let port2 = pick_free_udp_port().await;
     let sd2 = CancellationToken::new();
-    let h2 = tokio::spawn(run(cfg_for(&id, port2, &keystore, &ipc, "clr-all-d-v2"), sd2.clone()));
+    let h2 = tokio::spawn(run(
+        cfg_for(&id, port2, &keystore, &ipc, "clr-all-d-v2"),
+        sd2.clone(),
+    ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
 
     // Real window for an errant resurrection to land before asserting it
@@ -491,12 +647,21 @@ async fn clear_history_include_favorites_drops_everything() {
     );
 
     sd2.cancel();
-    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h2)
+        .await
+        .expect("v2 shutdown hung");
 }
 
 /// Read the daemon's own `device_name` from its State.
 async fn device_name_of(ipc: &Path, id: u64) -> Option<String> {
-    let r = ipc_send_recv(ipc, CmdRequest { id, op: CmdOp::Status }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     match r.data {
         Some(CmdData::State(s)) => Some(s.device_name),
         _ => None,
@@ -517,7 +682,10 @@ async fn device_name_survives_restart() {
 
     // ── v1: boots with the CLI-style default, then renames ──
     let sd1 = CancellationToken::new();
-    let h1 = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "name-d"), sd1.clone()));
+    let h1 = tokio::spawn(run(
+        cfg_for(&id, port, &keystore, &ipc, "name-d"),
+        sd1.clone(),
+    ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
 
     assert_eq!(device_name_of(&ipc, 1).await, Some("name-d".to_string()));
@@ -550,14 +718,22 @@ async fn device_name_survives_restart() {
     );
 
     sd1.cancel();
-    let _ = timeout(Duration::from_secs(5), h1).await.expect("v1 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h1)
+        .await
+        .expect("v1 shutdown hung");
 
     // ── v2: same keystore, DIFFERENT `--peer-name`-style default → the
     // persisted rename wins (disk is authoritative, same as firewall). ──
     let port2 = pick_free_udp_port().await;
     let sd2 = CancellationToken::new();
     let h2 = tokio::spawn(run(
-        cfg_for(&id, port2, &keystore, &ipc, "name-d-v2-should-be-overridden"),
+        cfg_for(
+            &id,
+            port2,
+            &keystore,
+            &ipc,
+            "name-d-v2-should-be-overridden",
+        ),
         sd2.clone(),
     ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
@@ -565,16 +741,16 @@ async fn device_name_survives_restart() {
     assert!(
         wait_until(Duration::from_secs(5), || {
             let ipc = ipc.clone();
-            async move {
-                device_name_of(&ipc, 4).await == Some("Dethie's MacBook".to_string())
-            }
+            async move { device_name_of(&ipc, 4).await == Some("Dethie's MacBook".to_string()) }
         })
         .await,
         "device name was not restored after restart"
     );
 
     sd2.cancel();
-    let _ = timeout(Duration::from_secs(5), h2).await.expect("v2 shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h2)
+        .await
+        .expect("v2 shutdown hung");
 }
 
 /// DIR-P3-01: empty/whitespace-only and over-the-wire-bound names are
@@ -589,7 +765,10 @@ async fn set_device_name_rejects_invalid() {
     let ipc = keystore.join("d.sock");
 
     let sd = CancellationToken::new();
-    let h = tokio::spawn(run(cfg_for(&id, port, &keystore, &ipc, "reject-d"), sd.clone()));
+    let h = tokio::spawn(run(
+        cfg_for(&id, port, &keystore, &ipc, "reject-d"),
+        sd.clone(),
+    ));
     assert!(wait_until(Duration::from_secs(5), || async { ipc.exists() }).await);
 
     let empty = ipc_send_recv(
@@ -618,5 +797,7 @@ async fn set_device_name_rejects_invalid() {
     assert_eq!(device_name_of(&ipc, 3).await, Some("reject-d".to_string()));
 
     sd.cancel();
-    let _ = timeout(Duration::from_secs(5), h).await.expect("shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h)
+        .await
+        .expect("shutdown hung");
 }

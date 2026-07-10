@@ -6,9 +6,7 @@
 //! `ManualUnpair`. History is intentionally preserved so a same-device
 //! reconnect can resume it.
 
-use fluxsync_core::{
-    App, Config, Direction, Event, FirewallPolicy, Rule, StubWallClock,
-};
+use fluxsync_core::{App, Config, Direction, Event, FirewallPolicy, Rule, StubWallClock};
 use fluxsync_proto::Kind;
 
 fn wall() -> StubWallClock {
@@ -70,7 +68,10 @@ fn manual_unpair_clears_parked_ask_items() {
     let parked: Vec<String> = app.state.pending.iter().map(|p| p.hash.clone()).collect();
     println!("PARKED pending.len() = {}", app.state.pending.len());
     for p in &app.state.pending {
-        println!("  pending hash={} dir={:?} preview={}", p.hash, p.direction, p.preview);
+        println!(
+            "  pending hash={} dir={:?} preview={}",
+            p.hash, p.direction, p.preview
+        );
     }
     assert_eq!(parked.len(), 3, "precondition: 3 items should be parked");
 
@@ -80,13 +81,21 @@ fn manual_unpair_clears_parked_ask_items() {
     // ── The unlink ──
     app.handle(Event::ManualUnpair, &wall());
 
-    println!("AFTER ManualUnpair: peer_name={:?} peer_id_zero={} on={}",
+    println!(
+        "AFTER ManualUnpair: peer_name={:?} peer_id_zero={} on={}",
         app.state.peer_name,
         app.state.peer_id == [0u8; 32],
-        app.state.on);
-    println!("AFTER ManualUnpair: pending.len() = {}", app.state.pending.len());
-    println!("AFTER ManualUnpair: history.len() = {} (was {})",
-        app.state.history.len(), history_before);
+        app.state.on
+    );
+    println!(
+        "AFTER ManualUnpair: pending.len() = {}",
+        app.state.pending.len()
+    );
+    println!(
+        "AFTER ManualUnpair: history.len() = {} (was {})",
+        app.state.history.len(),
+        history_before
+    );
 
     // Indirect probe of the *payload* half (pending_payloads is private):
     // re-resolving a parked hash with allow=true must NOT still emit the held
@@ -98,10 +107,12 @@ fn manual_unpair_clears_parked_ask_items() {
         },
         &wall(),
     );
-    let payload_still_held = resolve_actions
-        .iter()
-        .any(|a| matches!(a, fluxsync_core::Action::SendItem { .. }
-            | fluxsync_core::Action::WriteClipboard { .. }));
+    let payload_still_held = resolve_actions.iter().any(|a| {
+        matches!(
+            a,
+            fluxsync_core::Action::SendItem { .. } | fluxsync_core::Action::WriteClipboard { .. }
+        )
+    });
     println!(
         "AFTER ManualUnpair: resolving old hash emits held sync action = {payload_still_held}"
     );

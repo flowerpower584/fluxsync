@@ -26,17 +26,17 @@ use crate::discovery::{self, DiscoveryEvent};
 use crate::handshake::{
     self, PairingWindow, PendingSet, TrustedPeer, TrustedSet, MAX_PERSISTED_PEERS,
 };
+use crate::history_store::{self, VaultEntry};
 use crate::ipc::{IpcConn, IpcServer};
 use crate::logs::LogTail;
 use crate::metrics::{DisconnectReason, MetricsTracker};
+use crate::outbox::{Entry as OutboxEntry, Outbox};
 use crate::rate_limit::HandshakeRateLimiter;
+use crate::seq_store::SeqStore;
 use crate::transport::{is_rekey_initiator, now_ms, rekey_due, RecvFrame, Transport};
 use anyhow::{anyhow, Context, Result};
 use base32::Alphabet;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use crate::history_store::{self, VaultEntry};
-use crate::outbox::{Entry as OutboxEntry, Outbox};
-use crate::seq_store::SeqStore;
 use fluxsync_core::{
     dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, Decision, DeviceId, Direction,
     Event, EventId, HistoryItem, LogEntry, LogLevel, PeerInfo, SeenSet, State, WallClock,
@@ -199,7 +199,9 @@ async fn cleared_hex_snapshot(tombstone: &ClearedTombstone) -> Vec<String> {
         .lock()
         .await
         .iter()
-        .filter(|(_, cleared_at)| now.saturating_duration_since(**cleared_at) <= crate::outbox::MAX_AGE)
+        .filter(|(_, cleared_at)| {
+            now.saturating_duration_since(**cleared_at) <= crate::outbox::MAX_AGE
+        })
         .map(|(h, _)| hex::encode(h))
         .collect()
 }
@@ -314,15 +316,12 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // *before* the first snapshot, so every consumer sees the restored
     // list immediately. Best-effort: a load failure (wrong identity,
     // tampered file) logs and starts empty rather than aborting boot.
-    let vault: Option<(PathBuf, zeroize::Zeroizing<[u8; 32]>, Vec<VaultEntry>)> =
-        if let Some(dir) = keystore_dir.as_ref() {
-            let key = identity.derive_at_rest_key(history_store::AT_REST_CONTEXT);
-            let entries = match history_store::load(
-                dir,
-                &key,
-                now_ms(),
-                history_store::DEFAULT_TTL_SECS,
-            ) {
+    let vault: Option<(PathBuf, zeroize::Zeroizing<[u8; 32]>, Vec<VaultEntry>)> = if let Some(dir) =
+        keystore_dir.as_ref()
+    {
+        let key = identity.derive_at_rest_key(history_store::AT_REST_CONTEXT);
+        let entries =
+            match history_store::load(dir, &key, now_ms(), history_store::DEFAULT_TTL_SECS) {
                 Ok(entries) => {
                     app.restore_history(entries.iter().map(|e| e.item.clone()).collect());
                     tracing::info!(count = entries.len(), "rehydrated history from vault");
@@ -333,10 +332,10 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                     Vec::new()
                 }
             };
-            Some((dir.clone(), key, entries))
-        } else {
-            None
-        };
+        Some((dir.clone(), key, entries))
+    } else {
+        None
+    };
 
     let initial = app.snapshot().clone();
     let (state_watch_tx, state_watch_rx) = watch::channel(initial);
@@ -876,9 +875,17 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         let persisted_peer_addrs = persisted_peer_addrs.clone();
         tasks.spawn(async move {
             discovery_dispatcher(
-                disc_rx, identity, trusted, transport, pending, event_tx, disc_cache, backoff,
+                disc_rx,
+                identity,
+                trusted,
+                transport,
+                pending,
+                event_tx,
+                disc_cache,
+                backoff,
                 persisted_peer_addrs,
-                kd, shutdown,
+                kd,
+                shutdown,
             )
             .await
         });
@@ -1285,13 +1292,10 @@ async fn purge_dropped_pending_from_outbox_stage(
 /// Revoke), and the silent-secondary-timeout `Event::PeerRevoked` path in
 /// `run()`'s main loop.
 async fn purge_peer_from_inflight(peer_id: [u8; 32], inflight: &InflightMap) {
-    inflight
-        .lock()
-        .await
-        .retain(|_, inf| {
-            inf.pending_peers.remove(&peer_id);
-            !inf.pending_peers.is_empty()
-        });
+    inflight.lock().await.retain(|_, inf| {
+        inf.pending_peers.remove(&peer_id);
+        !inf.pending_peers.is_empty()
+    });
 }
 
 #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
@@ -1539,9 +1543,14 @@ async fn dispatch(
             // to run before `Action::EmitState` below publishes the new
             // (pending-item-shrunk) state, so it can't wait until this loop
             // reaches it here.
-            #[allow(clippy::match_same_arms)] // empty body, but for an unrelated reason than the arm below
+            #[allow(clippy::match_same_arms)]
+            // empty body, but for an unrelated reason than the arm below
             Action::PendingDropped { .. } => {}
-            Action::WriteClipboard { kind, payload, sensitive } => {
+            Action::WriteClipboard {
+                kind,
+                payload,
+                sensitive,
+            } => {
                 // DIR-P1-09: this is the "item apply" chokepoint — a
                 // logical inbound item accepted and written to the local
                 // OS clipboard, regardless of text/image kind.
@@ -1880,8 +1889,10 @@ async fn handle_driver_cmd(
                 .filter(|h| include_favorites || !h.favorite)
                 .map(|h| h.hash.clone())
                 .collect();
-            let cleared_bytes: Vec<[u8; 32]> =
-                cleared_hex.iter().filter_map(|h| decode_hex32(h).ok()).collect();
+            let cleared_bytes: Vec<[u8; 32]> = cleared_hex
+                .iter()
+                .filter_map(|h| decode_hex32(h).ok())
+                .collect();
             // Purge the resync outbox first: a cleared item must not come
             // back into history via a later pull/resync.
             outbox.lock().await.remove_many(&cleared_bytes);
@@ -1944,7 +1955,13 @@ async fn handle_driver_cmd(
         }
         CmdOp::ResolvePending { hash, allow } => {
             tracing::info!(%hash, allow, "IPC: resolve-pending");
-            let actions = app.handle(Event::ResolvePending { hash: hash.clone(), allow }, &**wall);
+            let actions = app.handle(
+                Event::ResolvePending {
+                    hash: hash.clone(),
+                    allow,
+                },
+                &**wall,
+            );
             // Outbox admission gate fix: a staged inbound item (see
             // `PendingOutboxStage`) is only admitted now if `App::handle`
             // actually re-emitted its held `WriteClipboard` — not merely
@@ -1952,8 +1969,10 @@ async fn handle_driver_cmd(
             // unknown/already-resolved hash, or an OUTBOUND approval
             // (`SendItem` instead) must never promote anything, and either
             // way the staged entry (if any) must not survive this call.
-            let admitted_inbound =
-                allow && actions.iter().any(|a| matches!(a, Action::WriteClipboard { .. }));
+            let admitted_inbound = allow
+                && actions
+                    .iter()
+                    .any(|a| matches!(a, Action::WriteClipboard { .. }));
             if let Ok(bytes) = decode_hex32(&hash) {
                 match outbox_stage.lock().await.remove(&bytes) {
                     Some(entry) if admitted_inbound => {
@@ -2545,8 +2564,7 @@ async fn handle_driver_cmd(
                         // Legacy peer: defensively count it as confirmed in
                         // case its Hello landed before the pending insert and
                         // the Hello handler's legacy path never fired.
-                        let actions =
-                            app.handle(Event::SasPeerConfirmed { peer_id: arr }, &**wall);
+                        let actions = app.handle(Event::SasPeerConfirmed { peer_id: arr }, &**wall);
                         dispatch(
                             actions,
                             app,
@@ -2938,7 +2956,9 @@ async fn handle_driver_cmd(
             }
             CmdResponse::ok(
                 req_id,
-                Some(CmdData::PairResult { already_paired: already_confirmed }),
+                Some(CmdData::PairResult {
+                    already_paired: already_confirmed,
+                }),
             )
         }
         CmdOp::PairAccept {
@@ -3182,7 +3202,9 @@ async fn handle_driver_cmd(
             .await;
             CmdResponse::ok(
                 req_id,
-                Some(CmdData::PairResult { already_paired: already_confirmed }),
+                Some(CmdData::PairResult {
+                    already_paired: already_confirmed,
+                }),
             )
         }
     };
@@ -4983,7 +5005,16 @@ async fn complete_reassembled_item(
     }
     let frames = build_item_frames(lamport, hash, kind, &payload, sensitive, origin, event_seq);
     if !block_relay {
-        forward_frames(transport, inflight, pending_pairs, source, origin, hash, frames).await;
+        forward_frames(
+            transport,
+            inflight,
+            pending_pairs,
+            source,
+            origin,
+            hash,
+            frames,
+        )
+        .await;
     }
     let preview = preview_label(kind, &payload);
     // resync-1 apply-suppression fix: did WE ask `source` for this exact
@@ -5182,9 +5213,23 @@ async fn dispatch_inbound_frame(
                     drop(map);
 
                     complete_reassembled_item(
-                        transport, inflight, mesh_seen, event_tx, peer_id, origin, event_seq,
-                        item.hash, kind, sensitive, lamport, full_payload, outbox, outbox_stage,
-                        pending_pulls, state_rx, pending_pairs,
+                        transport,
+                        inflight,
+                        mesh_seen,
+                        event_tx,
+                        peer_id,
+                        origin,
+                        event_seq,
+                        item.hash,
+                        kind,
+                        sensitive,
+                        lamport,
+                        full_payload,
+                        outbox,
+                        outbox_stage,
+                        pending_pulls,
+                        state_rx,
+                        pending_pairs,
                     )
                     .await;
                 }
@@ -5216,11 +5261,11 @@ async fn dispatch_inbound_frame(
                     // `complete_reassembled_item` — see its doc comment.
                     let mut block_relay = false;
                     if !item.sensitive {
-                        let decision =
-                            state_rx
-                                .borrow()
-                                .firewall
-                                .decide(item.kind, item.sensitive, Direction::Inbound);
+                        let decision = state_rx.borrow().firewall.decide(
+                            item.kind,
+                            item.sensitive,
+                            Direction::Inbound,
+                        );
                         let staged = OutboxEntry {
                             payload: item.payload.clone(),
                             kind: item.kind,
@@ -5250,8 +5295,13 @@ async fn dispatch_inbound_frame(
                             msg: Msg::ClipboardItem(item.clone()),
                         }) {
                             forward_item(
-                                transport, inflight, pending_pairs, peer_id, item.origin,
-                                item.hash, bytes,
+                                transport,
+                                inflight,
+                                pending_pairs,
+                                peer_id,
+                                item.origin,
+                                item.hash,
+                                bytes,
                             )
                             .await;
                         }
@@ -5334,9 +5384,23 @@ async fn dispatch_inbound_frame(
                 drop(map);
 
                 complete_reassembled_item(
-                    transport, inflight, mesh_seen, event_tx, peer_id, origin, event_seq,
-                    c.item_id, kind, sensitive, lamport, full_payload, outbox, outbox_stage,
-                    pending_pulls, state_rx, pending_pairs,
+                    transport,
+                    inflight,
+                    mesh_seen,
+                    event_tx,
+                    peer_id,
+                    origin,
+                    event_seq,
+                    c.item_id,
+                    kind,
+                    sensitive,
+                    lamport,
+                    full_payload,
+                    outbox,
+                    outbox_stage,
+                    pending_pulls,
+                    state_rx,
+                    pending_pairs,
                 )
                 .await;
             }
@@ -5455,9 +5519,7 @@ async fn dispatch_inbound_frame(
                     .entry(peer_id)
                     .or_insert_with(PeerBackoff::new)
                     .on_session_ended(uptime);
-            } else if let Some(established) =
-                transport.session_established_at_for(peer_id).await
-            {
+            } else if let Some(established) = transport.session_established_at_for(peer_id).await {
                 // M6 residual fix: a secondary (FluxMesh `extra`) peer's clean
                 // disconnect gets the same stability-gated backoff reset as
                 // the primary above — computed from THIS peer's own
@@ -5598,14 +5660,10 @@ async fn dispatch_inbound_frame(
                         if flush_deferred {
                             let frame = Frame {
                                 version: PROTOCOL_VERSION,
-                                msg: Msg::PairConfirm(fluxsync_proto::PairConfirm {
-                                    accept: true,
-                                }),
+                                msg: Msg::PairConfirm(fluxsync_proto::PairConfirm { accept: true }),
                             };
                             if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                                if let Err(e) =
-                                    transport.send_encrypted_to(peer_id, &bytes).await
-                                {
+                                if let Err(e) = transport.send_encrypted_to(peer_id, &bytes).await {
                                     tracing::warn!(
                                         peer = ?&peer_id[..6],
                                         error = %e,
@@ -5642,8 +5700,7 @@ async fn dispatch_inbound_frame(
             // must not re-announce.
             {
                 let has_pending = pending_pairs.lock().await.contains_key(&peer_id);
-                let peer_supports_verify_restart =
-                    caps.iter().any(|c| c == "verify-restart");
+                let peer_supports_verify_restart = caps.iter().any(|c| c == "verify-restart");
                 if has_pending && peer_supports_verify_restart {
                     let first_announce = {
                         let mut meta = peer_meta.lock().await;
@@ -5736,8 +5793,13 @@ async fn dispatch_inbound_frame(
                 .iter()
                 .map(|h| h.hash.clone())
                 .collect();
-            let outbox_hashes: Vec<String> =
-                outbox.lock().await.hashes().iter().map(hex::encode).collect();
+            let outbox_hashes: Vec<String> = outbox
+                .lock()
+                .await
+                .hashes()
+                .iter()
+                .map(hex::encode)
+                .collect();
             // H2 fix: exclude anything we deliberately cleared via
             // `CmdOp::ClearHistory` — a peer's outbox is not told about a
             // local clear (by design), so without this a cleared item would
@@ -5812,10 +5874,11 @@ async fn dispatch_inbound_frame(
                 // because it still sits in the outbox cache — re-check the
                 // LIVE firewall before serving it, same `decide()` call
                 // `gate_outbound`/admission use elsewhere in this file.
-                let decision = state_rx
-                    .borrow()
-                    .firewall
-                    .decide(entry.kind, false, Direction::Outbound);
+                let decision =
+                    state_rx
+                        .borrow()
+                        .firewall
+                        .decide(entry.kind, false, Direction::Outbound);
                 if decision != Decision::Pass {
                     tracing::debug!(
                         peer = ?&peer_id[..6],
@@ -5827,8 +5890,15 @@ async fn dispatch_inbound_frame(
                 // Lamport 0: `Entry` doesn't retain the original tick, and 0
                 // is a safe no-op for the receiver's `LamportClock::observe`
                 // (it only ever advances the clock forward via `max`).
-                let frames =
-                    build_item_frames(0, hash, entry.kind, &entry.payload, false, entry.origin, entry.seq);
+                let frames = build_item_frames(
+                    0,
+                    hash,
+                    entry.kind,
+                    &entry.payload,
+                    false,
+                    entry.origin,
+                    entry.seq,
+                );
                 if frames.is_empty() {
                     continue;
                 }
@@ -5964,14 +6034,10 @@ async fn dispatch_inbound_frame(
                             );
                             let frame = Frame {
                                 version: PROTOCOL_VERSION,
-                                msg: Msg::PairConfirm(fluxsync_proto::PairConfirm {
-                                    accept: true,
-                                }),
+                                msg: Msg::PairConfirm(fluxsync_proto::PairConfirm { accept: true }),
                             };
                             if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                                if let Err(e) =
-                                    transport.send_encrypted_to(peer_id, &bytes).await
-                                {
+                                if let Err(e) = transport.send_encrypted_to(peer_id, &bytes).await {
                                     tracing::warn!(
                                         peer = ?&peer_id[..6],
                                         error = %e,
@@ -6110,9 +6176,8 @@ async fn dispatch_inbound_frame(
                 );
                 return;
             };
-            let sas_words: [String; 6] =
-                fluxsync_crypto::fingerprint_from_handshake_hash(&hash)
-                    .map(std::string::ToString::to_string);
+            let sas_words: [String; 6] = fluxsync_crypto::fingerprint_from_handshake_hash(&hash)
+                .map(std::string::ToString::to_string);
             let from = transport.peer_addr_for(peer_id).await;
             {
                 // Same FS-058 hygiene as `run_initiator`/`run_responder`'s
@@ -6139,9 +6204,7 @@ async fn dispatch_inbound_frame(
                         // Fall back to an unspecified addr if the transport
                         // has no live route entry (shouldn't happen for an
                         // authenticated sender) — `from` is display-only.
-                        from: from.unwrap_or_else(|| {
-                            SocketAddr::from(([0, 0, 0, 0], 0))
-                        }),
+                        from: from.unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0))),
                         expires_at: now + handshake::PAIRING_WINDOW,
                     },
                 );
@@ -6291,7 +6354,11 @@ const RESYNC_PULL_TIMEOUT: Duration = Duration::from_secs(60);
 /// outstanding and fresh. Also lazily sweeps every other stale entry for that
 /// peer (`RESYNC_PULL_TIMEOUT` old) so the bounded map never accumulates
 /// pulls that were never served.
-async fn take_pending_pull(pending_pulls: &PendingPulls, peer_id: [u8; 32], hash: [u8; 32]) -> bool {
+async fn take_pending_pull(
+    pending_pulls: &PendingPulls,
+    peer_id: [u8; 32],
+    hash: [u8; 32],
+) -> bool {
     let mut map = pending_pulls.lock().await;
     let Some(per_peer) = map.get_mut(&peer_id) else {
         return false;
@@ -7301,15 +7368,18 @@ mod tests {
         use std::collections::HashMap;
 
         fn peer(name: &str) -> handshake::TrustedPeer {
-            handshake::TrustedPeer { static_pub: [0u8; 32], name: name.to_string() }
+            handshake::TrustedPeer {
+                static_pub: [0u8; 32],
+                name: name.to_string(),
+            }
         }
 
         // Scattered ids (not insertion-order-adjacent to the true min) so a
         // `HashMap`-iteration-order bug (`.values().next()`) is very unlikely
         // to coincidentally reproduce the correct answer.
         let ids: [[u8; 32]; 8] = [
-            [0x90; 32], [0x20; 32], [0xF0; 32], [0x01; 32],
-            [0x77; 32], [0xAA; 32], [0x55; 32], [0xC3; 32],
+            [0x90; 32], [0x20; 32], [0xF0; 32], [0x01; 32], [0x77; 32], [0xAA; 32], [0x55; 32],
+            [0xC3; 32],
         ];
         let mut trusted = HashMap::new();
         for (i, id) in ids.iter().enumerate() {
@@ -7330,8 +7400,7 @@ mod tests {
 
         // ── Case 2: no primary known — must fall back to the lowest peer
         //            id, deterministically. ──
-        let chosen = choose_boot_trusted_peer(&trusted, None)
-            .expect("fallback must find an entry");
+        let chosen = choose_boot_trusted_peer(&trusted, None).expect("fallback must find an entry");
         assert_eq!(
             chosen.name, true_min_name,
             "FIXED: no known primary must deterministically pick the lowest peer id, \
@@ -7357,25 +7426,50 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::Mutex;
 
-        assert!(!is_redialable_addr("169.254.1.1".parse().unwrap()), "link-local must be rejected");
-        assert!(!is_redialable_addr("224.0.0.1".parse().unwrap()), "multicast must be rejected");
-        assert!(!is_redialable_addr("0.0.0.0".parse().unwrap()), "unspecified must be rejected");
-        assert!(!is_redialable_addr("fe80::1".parse().unwrap()), "IPv6 link-local must be rejected");
-        assert!(is_redialable_addr("192.168.1.42".parse().unwrap()), "a normal LAN address must pass");
+        assert!(
+            !is_redialable_addr("169.254.1.1".parse().unwrap()),
+            "link-local must be rejected"
+        );
+        assert!(
+            !is_redialable_addr("224.0.0.1".parse().unwrap()),
+            "multicast must be rejected"
+        );
+        assert!(
+            !is_redialable_addr("0.0.0.0".parse().unwrap()),
+            "unspecified must be rejected"
+        );
+        assert!(
+            !is_redialable_addr("fe80::1".parse().unwrap()),
+            "IPv6 link-local must be rejected"
+        );
+        assert!(
+            is_redialable_addr("192.168.1.42".parse().unwrap()),
+            "a normal LAN address must pass"
+        );
         // Loopback is intentionally allowed: an off-host attacker cannot forge
         // a loopback source, and the in-process harness redials over it.
-        assert!(is_redialable_addr("127.0.0.1".parse().unwrap()), "loopback must be allowed");
-        assert!(is_redialable_addr("::1".parse().unwrap()), "IPv6 loopback must be allowed");
+        assert!(
+            is_redialable_addr("127.0.0.1".parse().unwrap()),
+            "loopback must be allowed"
+        );
+        assert!(
+            is_redialable_addr("::1".parse().unwrap()),
+            "IPv6 loopback must be allowed"
+        );
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let (transport, _port) =
-            Transport::bind("127.0.0.1", 0).await.expect("bind transport");
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind transport");
         let peer_id = [0x11u8; 32];
         let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
-        trusted
-            .lock()
-            .await
-            .insert(peer_id, TrustedPeer { static_pub: [0x22u8; 32], name: "peer".into() });
+        trusted.lock().await.insert(
+            peer_id,
+            TrustedPeer {
+                static_pub: [0x22u8; 32],
+                name: "peer".into(),
+            },
+        );
 
         // A link-local source (the LAN-spoofable class the fix targets)
         // must never be written to peers.json.
@@ -7388,7 +7482,9 @@ mod tests {
         )
         .await;
         assert!(
-            crate::keystore::load_peers(dir.path()).expect("load peers").is_empty(),
+            crate::keystore::load_peers(dir.path())
+                .expect("load peers")
+                .is_empty(),
             "L4: a link-local last_addr must never be persisted"
         );
 
@@ -7495,9 +7591,8 @@ mod tests {
         let key = zeroize::Zeroizing::new([0x11u8; 32]);
         let now = 1_000_000u64;
         let ttl = history_store::DEFAULT_TTL_SECS;
-        let disk_len = |d: &std::path::Path| {
-            history_store::load(d, &key, now, ttl).map_or(0, |v| v.len())
-        };
+        let disk_len =
+            |d: &std::path::Path| history_store::load(d, &key, now, ttl).map_or(0, |v| v.len());
 
         let secret = HistoryItem {
             kind: Kind::Text,
@@ -7572,7 +7667,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(saved, "baseline favorite must reach the on-disk vault first");
+        assert!(
+            saved,
+            "baseline favorite must reach the on-disk vault first"
+        );
 
         // Security wipe with a NON-EMPTY post-wipe history (a peer-swap starts
         // a fresh, non-favorite item). This is what makes ctx.entries.clear()
@@ -7608,8 +7706,7 @@ mod tests {
         let mut cleared = false;
         for _ in 0..200 {
             let p = disk_previews(dir.path());
-            if p.iter().any(|x| x == "post-swap item")
-                && !p.iter().any(|x| x == "favorited secret")
+            if p.iter().any(|x| x == "post-swap item") && !p.iter().any(|x| x == "favorited secret")
             {
                 cleared = true;
                 break;
@@ -7758,7 +7855,12 @@ mod tests {
         // that is fluxsync_core::app's own test coverage (and
         // regression_vault_security_wipe.rs's TEST 1 for the real security
         // triggers specifically).
-        app.handle(Event::ClearHistory { include_favorites: true }, &wall);
+        app.handle(
+            Event::ClearHistory {
+                include_favorites: true,
+            },
+            &wall,
+        );
         assert_eq!(app.snapshot().vault_wipe_gen, 1);
 
         let wiped = sync_security_wipe_if_needed(
@@ -7802,7 +7904,10 @@ mod tests {
             Some(&dir_buf),
         )
         .await;
-        assert!(!wiped_again, "must not re-fire for a generation already handled");
+        assert!(
+            !wiped_again,
+            "must not re-fire for a generation already handled"
+        );
     }
 
     /// L1 fix: `sync_security_wipe_if_needed` must also empty `IMAGE_CACHE`
@@ -7812,7 +7917,10 @@ mod tests {
     /// same as `clear_history_purges_cached_images_for_cleared_hashes`.
     #[tokio::test]
     async fn sync_security_wipe_if_needed_clears_image_cache() {
-        use super::{image_cache, lookup_cached_image, sync_security_wipe_if_needed, Outbox, PendingOutboxStage};
+        use super::{
+            image_cache, lookup_cached_image, sync_security_wipe_if_needed, Outbox,
+            PendingOutboxStage,
+        };
         use fluxsync_core::{App, Config, Event, StubWallClock};
         use std::collections::HashMap;
         use std::sync::Arc;
@@ -7834,7 +7942,12 @@ mod tests {
         let mut last_wipe_gen = app.snapshot().vault_wipe_gen;
 
         // Bump vault_wipe_gen the same way the outbox/disk test does.
-        app.handle(Event::ClearHistory { include_favorites: true }, &wall);
+        app.handle(
+            Event::ClearHistory {
+                include_favorites: true,
+            },
+            &wall,
+        );
         assert_eq!(app.snapshot().vault_wipe_gen, 1);
 
         let wiped = sync_security_wipe_if_needed(
@@ -7972,7 +8085,12 @@ mod tests {
         // A security wipe must purge the non-sensitive image cached above.
         let mut last_wipe_gen = app.snapshot().vault_wipe_gen;
         let wall = StubWallClock::new("12:00", 1_000);
-        app.handle(Event::ClearHistory { include_favorites: true }, &wall);
+        app.handle(
+            Event::ClearHistory {
+                include_favorites: true,
+            },
+            &wall,
+        );
         let wiped = sync_security_wipe_if_needed(
             &app,
             &mut last_wipe_gen,
@@ -8006,7 +8124,10 @@ mod tests {
         // Different source peers, same item_id ⇒ different keys (the fix).
         assert_ne!(reassembly_key(peer_a, item), reassembly_key(peer_b, item));
         // Same peer, different items ⇒ different keys.
-        assert_ne!(reassembly_key(peer_a, item), reassembly_key(peer_a, [0xBBu8; 32]));
+        assert_ne!(
+            reassembly_key(peer_a, item),
+            reassembly_key(peer_a, [0xBBu8; 32])
+        );
         // The key is not just the item_id passed through.
         assert_ne!(reassembly_key(peer_a, item), item);
     }
@@ -8419,16 +8540,14 @@ mod tests {
             .insert(peer_id, tofu_trusted_peer(peer_id));
         // NO pending entry, idle sas_phase — the outside-a-flow case.
         let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
-        let peer_meta: super::PeerMetaMap =
-            Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+        let peer_meta: super::PeerMetaMap = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
         {
             let mut meta = peer_meta.lock().await;
             let e = meta.entry(peer_id).or_insert_with(super::PeerMeta::new);
             e.caps = vec!["core-1".into(), "sas-confirm".into()];
             e.hello_seen = true;
         }
-        let echo_ack: super::EchoAckSent =
-            Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let echo_ack: super::EchoAckSent = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
             &fluxsync_core::Config::default(),
         ));
@@ -8718,10 +8837,10 @@ mod tests {
             .await
             .insert(peer_id, tofu_trusted_peer(peer_id));
         let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
-        pending_pairs
-            .lock()
-            .await
-            .insert(peer_id, test_pending_pair(Instant::now() + Duration::from_secs(60)));
+        pending_pairs.lock().await.insert(
+            peer_id,
+            test_pending_pair(Instant::now() + Duration::from_secs(60)),
+        );
         let deferred: super::DeferredSasConfirm =
             Arc::new(Mutex::new(std::collections::HashSet::new()));
         deferred.lock().await.insert(peer_id);
@@ -8903,7 +9022,8 @@ mod tests {
         let cleared_x = "aa".repeat(32);
         let missing_y = "bb".repeat(32);
         let offered = vec![cleared_x.clone(), missing_y.clone()];
-        let missing = missing_resync_hashes(&offered, &[], &[], std::slice::from_ref(&cleared_x), &[]);
+        let missing =
+            missing_resync_hashes(&offered, &[], &[], std::slice::from_ref(&cleared_x), &[]);
         assert_eq!(
             missing,
             vec![missing_y],
@@ -8921,7 +9041,10 @@ mod tests {
             .collect();
         let missing = missing_resync_hashes(&offered, &[], &[], &[], &[]);
         assert_eq!(missing.len(), MAX_RESYNC_HASHES);
-        assert_eq!(missing[0], offered[0], "must keep the offer's original order");
+        assert_eq!(
+            missing[0], offered[0],
+            "must keep the offer's original order"
+        );
     }
 
     /// resync-1: a `ResyncOffer` hex-encodes each outbox hash, preserving
@@ -9177,21 +9300,51 @@ mod tests {
             text: Rule::Ask,
             ..FirewallPolicy::default()
         };
-        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
-            &Config { firewall: firewall.clone(), ..Config::default() },
-        ));
+        let (_state_tx, state_rx) =
+            tokio::sync::watch::channel(fluxsync_core::State::initial(&Config {
+                firewall: firewall.clone(),
+                ..Config::default()
+            }));
 
         // Real staging path: both items are Ask-deferred, so both land in
         // `outbox_stage`, neither in the real `outbox`.
         complete_reassembled_item(
-            &transport, &inflight, &mesh_seen, &event_tx, PEER_A, PEER_A, 1, hash_a, Kind::Text,
-            false, 0, b"secret-a".to_vec(), &outbox, &outbox_stage, &pending_pulls, &state_rx,
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            PEER_A,
+            PEER_A,
+            1,
+            hash_a,
+            Kind::Text,
+            false,
+            0,
+            b"secret-a".to_vec(),
+            &outbox,
+            &outbox_stage,
+            &pending_pulls,
+            &state_rx,
             &pending_pairs,
         )
         .await;
         complete_reassembled_item(
-            &transport, &inflight, &mesh_seen, &event_tx, PEER_B, PEER_B, 1, hash_b, Kind::Text,
-            false, 0, b"secret-b".to_vec(), &outbox, &outbox_stage, &pending_pulls, &state_rx,
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            PEER_B,
+            PEER_B,
+            1,
+            hash_b,
+            Kind::Text,
+            false,
+            0,
+            b"secret-b".to_vec(),
+            &outbox,
+            &outbox_stage,
+            &pending_pulls,
+            &state_rx,
             &pending_pairs,
         )
         .await;
@@ -9208,13 +9361,19 @@ mod tests {
         // Real core-side park: mirrors what the main loop's `app.handle`
         // would have done with the `Event::FrameReceivedClipboard` that
         // `complete_reassembled_item` sent via `event_tx` above.
-        let mut app = App::new(Config { firewall, ..Config::default() });
+        let mut app = App::new(Config {
+            firewall,
+            ..Config::default()
+        });
         let wall = StubWallClock::new("12:00", 1_000);
         // Distinct payloads per peer — the core content-dedup ring keys on
         // the PAYLOAD, not the hash param, so two identical payloads here
         // would make the second `handle` call a no-op duplicate and never
         // reach the firewall park at all.
-        for (peer_id, hash, text) in [(PEER_A, hash_a, "irrelevant-a"), (PEER_B, hash_b, "irrelevant-b")] {
+        for (peer_id, hash, text) in [
+            (PEER_A, hash_a, "irrelevant-a"),
+            (PEER_B, hash_b, "irrelevant-b"),
+        ] {
             app.handle(
                 Event::FrameReceivedClipboard {
                     peer_id,
@@ -9284,7 +9443,9 @@ mod tests {
         let transport = Arc::new(transport);
         // A second mesh peer with a live session — the relay TARGET that
         // must NOT receive a firewall-Blocked item.
-        transport.install_session(downstream_peer, sess_downstream).await;
+        transport
+            .install_session(downstream_peer, sess_downstream)
+            .await;
 
         let inflight = Arc::new(Mutex::new(HashMap::new()));
         let mesh_seen = Arc::new(Mutex::new(SeenSet::default()));
@@ -9295,16 +9456,35 @@ mod tests {
         let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
 
         // ── 1. Blocked (non-sensitive text): must NOT relay downstream. ──
-        let block_firewall =
-            FirewallPolicy { enabled: true, text: Rule::Deny, ..FirewallPolicy::default() };
-        let (_tx1, state_rx1) = tokio::sync::watch::channel(fluxsync_core::State::initial(
-            &Config { firewall: block_firewall, ..Config::default() },
-        ));
+        let block_firewall = FirewallPolicy {
+            enabled: true,
+            text: Rule::Deny,
+            ..FirewallPolicy::default()
+        };
+        let (_tx1, state_rx1) =
+            tokio::sync::watch::channel(fluxsync_core::State::initial(&Config {
+                firewall: block_firewall,
+                ..Config::default()
+            }));
         let hash_blocked = super::clipboard_dedup_hash("relay-blocked-text");
         complete_reassembled_item(
-            &transport, &inflight, &mesh_seen, &event_tx, SOURCE, SOURCE, 1, hash_blocked,
-            Kind::Text, false, 0, b"relay-blocked-text".to_vec(), &outbox, &outbox_stage,
-            &pending_pulls, &state_rx1, &pending_pairs,
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            SOURCE,
+            SOURCE,
+            1,
+            hash_blocked,
+            Kind::Text,
+            false,
+            0,
+            b"relay-blocked-text".to_vec(),
+            &outbox,
+            &outbox_stage,
+            &pending_pulls,
+            &state_rx1,
+            &pending_pairs,
         )
         .await;
         assert!(
@@ -9313,16 +9493,35 @@ mod tests {
         );
 
         // ── 2. control: Allow (Pass) — must relay downstream. ──
-        let pass_firewall =
-            FirewallPolicy { enabled: true, text: Rule::Allow, ..FirewallPolicy::default() };
-        let (_tx2, state_rx2) = tokio::sync::watch::channel(fluxsync_core::State::initial(
-            &Config { firewall: pass_firewall, ..Config::default() },
-        ));
+        let pass_firewall = FirewallPolicy {
+            enabled: true,
+            text: Rule::Allow,
+            ..FirewallPolicy::default()
+        };
+        let (_tx2, state_rx2) =
+            tokio::sync::watch::channel(fluxsync_core::State::initial(&Config {
+                firewall: pass_firewall,
+                ..Config::default()
+            }));
         let hash_passed = super::clipboard_dedup_hash("relay-passed-text");
         complete_reassembled_item(
-            &transport, &inflight, &mesh_seen, &event_tx, SOURCE, SOURCE, 2, hash_passed,
-            Kind::Text, false, 0, b"relay-passed-text".to_vec(), &outbox, &outbox_stage,
-            &pending_pulls, &state_rx2, &pending_pairs,
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            SOURCE,
+            SOURCE,
+            2,
+            hash_passed,
+            Kind::Text,
+            false,
+            0,
+            b"relay-passed-text".to_vec(),
+            &outbox,
+            &outbox_stage,
+            &pending_pulls,
+            &state_rx2,
+            &pending_pairs,
         )
         .await;
         assert!(
@@ -9339,9 +9538,23 @@ mod tests {
         //        must still receive them — never gated by content policy). ──
         let hash_sensitive = super::clipboard_dedup_hash("relay-sensitive-secret");
         complete_reassembled_item(
-            &transport, &inflight, &mesh_seen, &event_tx, SOURCE, SOURCE, 3, hash_sensitive,
-            Kind::Text, true, 0, b"relay-sensitive-secret".to_vec(), &outbox, &outbox_stage,
-            &pending_pulls, &state_rx1, &pending_pairs,
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            SOURCE,
+            SOURCE,
+            3,
+            hash_sensitive,
+            Kind::Text,
+            true,
+            0,
+            b"relay-sensitive-secret".to_vec(),
+            &outbox,
+            &outbox_stage,
+            &pending_pulls,
+            &state_rx1,
+            &pending_pairs,
         )
         .await;
         assert!(
@@ -9483,7 +9696,9 @@ mod tests {
         let transport = Arc::new(transport);
         // A second mesh peer with a live session — the relay TARGET that
         // must NOT receive a firewall-Blocked item.
-        transport.install_session(downstream_peer, sess_downstream).await;
+        transport
+            .install_session(downstream_peer, sess_downstream)
+            .await;
 
         let mesh_seen = Arc::new(Mutex::new(SeenSet::default()));
         let (event_tx, _event_rx) = mpsc::channel(1024);
@@ -9504,11 +9719,15 @@ mod tests {
         let pending_pulls = Arc::new(Mutex::new(HashMap::new()));
         let outbox_stage = Arc::new(Mutex::new(HashMap::new()));
 
-        let block_firewall =
-            FirewallPolicy { enabled: true, text: Rule::Deny, ..FirewallPolicy::default() };
-        let (_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
-            &Config { firewall: block_firewall, ..Config::default() },
-        ));
+        let block_firewall = FirewallPolicy {
+            enabled: true,
+            text: Rule::Deny,
+            ..FirewallPolicy::default()
+        };
+        let (_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(&Config {
+            firewall: block_firewall,
+            ..Config::default()
+        }));
 
         let hash = super::clipboard_dedup_hash("single-frame-relay-blocked");
         let item = ClipboardItem {
@@ -9522,7 +9741,10 @@ mod tests {
             event_seq: 7,
         };
         dispatch_inbound_frame(
-            Frame { version: PROTOCOL_VERSION, msg: Msg::ClipboardItem(item) },
+            Frame {
+                version: PROTOCOL_VERSION,
+                msg: Msg::ClipboardItem(item),
+            },
             peer_id,
             &mesh_seen,
             &event_tx,
@@ -9590,7 +9812,9 @@ mod tests {
         let (sess_pending, _) = pair_for_test(&self_id, &pending_id).expect("pair pending");
         // First install claims the primary slot, the second lands in `extra`
         // — both then show up in `linked_peer_ids()` (FluxMesh 2C-b).
-        transport.install_session(confirmed_peer, sess_confirmed).await;
+        transport
+            .install_session(confirmed_peer, sess_confirmed)
+            .await;
         transport.install_session(pending_peer, sess_pending).await;
         assert_eq!(
             transport.linked_peer_ids().await.len(),
@@ -9700,7 +9924,9 @@ mod tests {
         // deliberately never installed with a session: `forward_item`'s
         // targets come from `linked_peer_ids()`, and `ack_source`/relay both
         // tolerate a sourceless send failing silently.
-        transport.install_session(confirmed_peer, sess_confirmed).await;
+        transport
+            .install_session(confirmed_peer, sess_confirmed)
+            .await;
         transport.install_session(pending_peer, sess_pending).await;
 
         let trusted: crate::handshake::TrustedSet = Arc::new(Mutex::new(HashMap::new()));
@@ -9876,7 +10102,9 @@ mod tests {
         dispatch_inbound_frame(
             Frame {
                 version: PROTOCOL_VERSION,
-                msg: Msg::ResyncPull(ResyncPull { hashes: vec![hex::encode(hash)] }),
+                msg: Msg::ResyncPull(ResyncPull {
+                    hashes: vec![hex::encode(hash)],
+                }),
             },
             puller,
             &mesh_seen,
@@ -9963,10 +10191,16 @@ mod tests {
 
         // The item was cached before the policy tightened; the LIVE
         // firewall now denies text outright.
-        let firewall = FirewallPolicy { enabled: true, text: Rule::Deny, ..FirewallPolicy::default() };
-        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
-            &Config { firewall, ..Config::default() },
-        ));
+        let firewall = FirewallPolicy {
+            enabled: true,
+            text: Rule::Deny,
+            ..FirewallPolicy::default()
+        };
+        let (_state_tx, state_rx) =
+            tokio::sync::watch::channel(fluxsync_core::State::initial(&Config {
+                firewall,
+                ..Config::default()
+            }));
 
         let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -9989,7 +10223,9 @@ mod tests {
         dispatch_inbound_frame(
             Frame {
                 version: PROTOCOL_VERSION,
-                msg: Msg::ResyncPull(ResyncPull { hashes: vec![hex::encode(hash)] }),
+                msg: Msg::ResyncPull(ResyncPull {
+                    hashes: vec![hex::encode(hash)],
+                }),
             },
             puller,
             &mesh_seen,
@@ -10062,16 +10298,20 @@ mod tests {
                 .lock()
                 .await
                 .insert(peer_id, crate::handshake::tofu_trusted_peer(peer_id));
-            let peer_meta: super::PeerMetaMap = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+            let peer_meta: super::PeerMetaMap =
+                Arc::new(Mutex::new(std::collections::BTreeMap::new()));
             let outbox = Arc::new(Mutex::new(Outbox::new()));
             let pending_pulls = Arc::new(Mutex::new(HashMap::new()));
             let outbox_stage = Arc::new(Mutex::new(HashMap::new()));
-            let (_state_tx, state_rx) = tokio::sync::watch::channel(
-                fluxsync_core::State::initial(&fluxsync_core::Config::default()),
-            );
+            let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
+                &fluxsync_core::Config::default(),
+            ));
 
             dispatch_inbound_frame(
-                Frame { version: PROTOCOL_VERSION, msg: Msg::ClipboardItem(item) },
+                Frame {
+                    version: PROTOCOL_VERSION,
+                    msg: Msg::ClipboardItem(item),
+                },
                 peer_id,
                 &mesh_seen,
                 &event_tx,
@@ -10193,7 +10433,10 @@ mod tests {
             .await
             .expect("a line totalling exactly MAX_IPC_LINE bytes must be accepted");
 
-        assert_eq!(n, MAX_IPC_LINE, "accepted line must report its full byte count");
+        assert_eq!(
+            n, MAX_IPC_LINE,
+            "accepted line must report its full byte count"
+        );
         assert_eq!(out.len(), MAX_IPC_LINE);
     }
 
@@ -10257,7 +10500,11 @@ mod tests {
         );
 
         let naks = build_pending_naks(&map);
-        assert_eq!(naks.len(), 1, "one incomplete chunked transfer must produce one NAK");
+        assert_eq!(
+            naks.len(),
+            1,
+            "one incomplete chunked transfer must produce one NAK"
+        );
         let (dest, nak) = &naks[0];
         assert_eq!(
             *dest, source,
@@ -10267,7 +10514,11 @@ mod tests {
             nak.item_id, item_hash,
             "the NAK must carry the real content hash, not the composite reassembly-map key"
         );
-        assert_eq!(nak.missing, vec![1], "the NAK must list the still-missing chunk index");
+        assert_eq!(
+            nak.missing,
+            vec![1],
+            "the NAK must list the still-missing chunk index"
+        );
     }
 
     /// Bug #3 (inflight blind-insert clobber): `forward_frames` used to
@@ -10317,11 +10568,21 @@ mod tests {
 
         let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
 
-        forward_frames(&transport, &inflight, &pending_pairs, source, origin, hash, vec![vec![9u8; 1]])
-            .await;
+        forward_frames(
+            &transport,
+            &inflight,
+            &pending_pairs,
+            source,
+            origin,
+            hash,
+            vec![vec![9u8; 1]],
+        )
+        .await;
 
         let map = inflight.lock().await;
-        let entry = map.get(&hash).expect("inflight entry must survive the relay");
+        let entry = map
+            .get(&hash)
+            .expect("inflight entry must survive the relay");
         assert!(
             entry.pending_peers.contains(&existing_peer),
             "FIXED: a concurrent relay must not drop a peer an earlier Inflight entry \
@@ -10359,7 +10620,9 @@ mod tests {
         let confirmed_id = Identity::generate();
         let confirmed_peer = confirmed_id.peer_id();
         let (sess_confirmed, _) = pair_for_test(&self_id, &confirmed_id).expect("pair confirmed");
-        transport.install_session(confirmed_peer, sess_confirmed).await;
+        transport
+            .install_session(confirmed_peer, sess_confirmed)
+            .await;
 
         let hash = super::clipboard_dedup_hash("send-item-merge secret");
         let existing_peer = [0x66u8; 32];
@@ -10415,7 +10678,9 @@ mod tests {
         .await;
 
         let inf = inflight.lock().await;
-        let entry = inf.get(&hash).expect("inflight entry must survive SendItem");
+        let entry = inf
+            .get(&hash)
+            .expect("inflight entry must survive SendItem");
         assert!(
             entry.pending_peers.contains(&existing_peer),
             "FIXED: Action::SendItem must not drop a peer an earlier Inflight entry \
@@ -10496,14 +10761,18 @@ mod tests {
 
         let trusted: crate::handshake::TrustedSet = Arc::new(Mutex::new(HashMap::new()));
         for peer in [peer_a, peer_b] {
-            trusted.lock().await.insert(peer, crate::handshake::tofu_trusted_peer(peer));
+            trusted
+                .lock()
+                .await
+                .insert(peer, crate::handshake::tofu_trusted_peer(peer));
         }
 
         let hash = super::clipboard_dedup_hash("both-peers-offer-this");
         let outbox = Arc::new(Mutex::new(Outbox::new()));
         let pending_pulls = Arc::new(Mutex::new(HashMap::new()));
         let outbox_stage = Arc::new(Mutex::new(HashMap::new()));
-        let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> = Arc::new(Mutex::new(HashMap::new()));
+        let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let mesh_seen = Arc::new(Mutex::new(SeenSet::default()));
         let (event_tx, _event_rx) = mpsc::channel(1024);
         let metrics = Arc::new(Mutex::new(MetricsTracker::new()));
@@ -10512,10 +10781,15 @@ mod tests {
             &fluxsync_core::Config::default(),
         ));
 
-        let offer = ResyncOffer { hashes: vec![hex::encode(hash)] };
+        let offer = ResyncOffer {
+            hashes: vec![hex::encode(hash)],
+        };
 
         dispatch_inbound_frame(
-            Frame { version: PROTOCOL_VERSION, msg: Msg::ResyncOffer(offer.clone()) },
+            Frame {
+                version: PROTOCOL_VERSION,
+                msg: Msg::ResyncOffer(offer.clone()),
+            },
             peer_a,
             &mesh_seen,
             &event_tx,
@@ -10540,12 +10814,19 @@ mod tests {
         .await;
 
         assert!(
-            pending_pulls.lock().await.get(&peer_a).is_some_and(|m| m.contains_key(&hash)),
+            pending_pulls
+                .lock()
+                .await
+                .get(&peer_a)
+                .is_some_and(|m| m.contains_key(&hash)),
             "precondition: peer A's offer must start a ResyncPull"
         );
 
         dispatch_inbound_frame(
-            Frame { version: PROTOCOL_VERSION, msg: Msg::ResyncOffer(offer) },
+            Frame {
+                version: PROTOCOL_VERSION,
+                msg: Msg::ResyncOffer(offer),
+            },
             peer_b,
             &mesh_seen,
             &event_tx,
@@ -10612,23 +10893,57 @@ mod tests {
         let outbox_stage = Arc::new(Mutex::new(HashMap::new()));
         let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
 
-        let firewall = FirewallPolicy { enabled: true, text: Rule::Ask, ..FirewallPolicy::default() };
-        let (_state_tx, state_rx) = tokio::sync::watch::channel(fluxsync_core::State::initial(
-            &Config { firewall: firewall.clone(), ..Config::default() },
-        ));
+        let firewall = FirewallPolicy {
+            enabled: true,
+            text: Rule::Ask,
+            ..FirewallPolicy::default()
+        };
+        let (_state_tx, state_rx) =
+            tokio::sync::watch::channel(fluxsync_core::State::initial(&Config {
+                firewall: firewall.clone(),
+                ..Config::default()
+            }));
 
         // A arrives first: stages the item under its own origin/seq.
         complete_reassembled_item(
-            &transport, &inflight, &mesh_seen, &event_tx, PEER_A, PEER_A, 1, hash, Kind::Text,
-            false, 0, payload.clone(), &outbox, &outbox_stage, &pending_pulls, &state_rx,
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            PEER_A,
+            PEER_A,
+            1,
+            hash,
+            Kind::Text,
+            false,
+            0,
+            payload.clone(),
+            &outbox,
+            &outbox_stage,
+            &pending_pulls,
+            &state_rx,
             &pending_pairs,
         )
         .await;
         // B independently relays/copies the IDENTICAL content: same wire
         // hash, different peer/origin.
         complete_reassembled_item(
-            &transport, &inflight, &mesh_seen, &event_tx, PEER_B, PEER_B, 1, hash, Kind::Text,
-            false, 0, payload.clone(), &outbox, &outbox_stage, &pending_pulls, &state_rx,
+            &transport,
+            &inflight,
+            &mesh_seen,
+            &event_tx,
+            PEER_B,
+            PEER_B,
+            1,
+            hash,
+            Kind::Text,
+            false,
+            0,
+            payload.clone(),
+            &outbox,
+            &outbox_stage,
+            &pending_pulls,
+            &state_rx,
             &pending_pairs,
         )
         .await;
@@ -10638,7 +10953,10 @@ mod tests {
         // (and, for this identical-payload case, the dedup ring too) is
         // first-wins: A is the one credited in `state.pending`/
         // `pending_payloads`.
-        let mut app = App::new(Config { firewall, ..Config::default() });
+        let mut app = App::new(Config {
+            firewall,
+            ..Config::default()
+        });
         let wall = StubWallClock::new("12:00", 1_000);
         app.handle(
             Event::FrameReceivedClipboard {
@@ -10666,7 +10984,11 @@ mod tests {
             },
             &wall,
         );
-        assert_eq!(app.snapshot().pending.len(), 1, "precondition: only ONE parked row for this hash");
+        assert_eq!(
+            app.snapshot().pending.len(),
+            1,
+            "precondition: only ONE parked row for this hash"
+        );
         assert_eq!(
             app.snapshot().pending[0].peer_id,
             Some(hex::encode(PEER_A)),
@@ -10734,7 +11056,9 @@ mod tests {
             map.get(&solo_hash).is_none(),
             "FIXED: an entry left with no pending peers after the revoke must be dropped entirely"
         );
-        let shared = map.get(&shared_hash).expect("the other peer's item must survive");
+        let shared = map
+            .get(&shared_hash)
+            .expect("the other peer's item must survive");
         assert!(
             !shared.pending_peers.contains(&revoked),
             "the revoked peer must no longer be awaited"
@@ -10785,7 +11109,9 @@ mod tests {
         let peer_id_a = peer_id_for(&peer_a_identity.public_key());
         let peer_id_b = peer_id_for(&peer_b_identity.public_key());
 
-        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.expect("bind transport");
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind transport");
         let transport = Arc::new(transport);
 
         // Seed both sessions — A first (becomes primary), B second (routes
@@ -10799,19 +11125,33 @@ mod tests {
         transport.install_session(peer_id_b, sess_b).await;
         assert_eq!(transport.cached_peer_id().await, Some(peer_id_a));
 
-        let bare_a = UdpSocket::bind("127.0.0.1:0").await.expect("bind bare peer A socket");
-        let bare_b = UdpSocket::bind("127.0.0.1:0").await.expect("bind bare peer B socket");
-        transport.set_peer_addr_for(peer_id_a, bare_a.local_addr().unwrap()).await;
-        transport.set_peer_addr_for(peer_id_b, bare_b.local_addr().unwrap()).await;
+        let bare_a = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind bare peer A socket");
+        let bare_b = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind bare peer B socket");
+        transport
+            .set_peer_addr_for(peer_id_a, bare_a.local_addr().unwrap())
+            .await;
+        transport
+            .set_peer_addr_for(peer_id_b, bare_b.local_addr().unwrap())
+            .await;
 
         let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
         trusted.lock().await.insert(
             peer_id_a,
-            TrustedPeer { static_pub: peer_a_identity.public_key(), name: "peer-a".into() },
+            TrustedPeer {
+                static_pub: peer_a_identity.public_key(),
+                name: "peer-a".into(),
+            },
         );
         trusted.lock().await.insert(
             peer_id_b,
-            TrustedPeer { static_pub: peer_b_identity.public_key(), name: "peer-b".into() },
+            TrustedPeer {
+                static_pub: peer_b_identity.public_key(),
+                name: "peer-b".into(),
+            },
         );
 
         let generation_a_before = transport.session_generation_for(peer_id_a).await.unwrap();
@@ -10859,7 +11199,10 @@ mod tests {
 
         let mut rekeyed = false;
         for _ in 0..100 {
-            if transport.session_generation_for(peer_id_b).await.unwrap_or(generation_b_before)
+            if transport
+                .session_generation_for(peer_id_b)
+                .await
+                .unwrap_or(generation_b_before)
                 > generation_b_before
             {
                 rekeyed = true;
@@ -10882,7 +11225,10 @@ mod tests {
                 saw_handshake_ok = true;
             }
         }
-        assert!(saw_handshake_ok, "a completed secondary rekey must fire HandshakeOk");
+        assert!(
+            saw_handshake_ok,
+            "a completed secondary rekey must fire HandshakeOk"
+        );
 
         // Prove the primary path was truly untouched, not just "generation
         // didn't change by luck": A's bare socket must never receive anything.

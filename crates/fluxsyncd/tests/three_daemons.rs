@@ -123,10 +123,7 @@ async fn mesh_peers(ipc: &PathBuf) -> (usize, usize) {
     )
     .await;
     match resp.data {
-        Some(CmdData::State(s)) => (
-            s.peers.len(),
-            s.peers.iter().filter(|p| p.primary).count(),
-        ),
+        Some(CmdData::State(s)) => (s.peers.len(), s.peers.iter().filter(|p| p.primary).count()),
         _ => (0, 0),
     }
 }
@@ -282,8 +279,16 @@ async fn three_node_line_relays_one_item_exactly_once() {
     );
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(history_count(&ipc_b, &big).await, 1, "B applied chunked item twice");
-    assert_eq!(history_count(&ipc_c, &big).await, 1, "C applied chunked item twice");
+    assert_eq!(
+        history_count(&ipc_b, &big).await,
+        1,
+        "B applied chunked item twice"
+    );
+    assert_eq!(
+        history_count(&ipc_c, &big).await,
+        1,
+        "C applied chunked item twice"
+    );
     assert_eq!(
         history_count(&ipc_a, &big).await,
         1,
@@ -532,7 +537,10 @@ async fn revoke_secondary_drops_only_that_peer() {
         mesh_peers(&ipc_c).await == (0, 0)
     })
     .await;
-    assert!(c_down, "C did not tear down its session after being revoked");
+    assert!(
+        c_down,
+        "C did not tear down its session after being revoked"
+    );
 
     sd_a.cancel();
     sd_b.cancel();
@@ -688,7 +696,10 @@ async fn pair_confirm_reject_secondary_drops_only_that_peer() {
         mesh_peers(&ipc_c).await == (0, 0)
     })
     .await;
-    assert!(c_down, "C did not tear down its session after being rejected");
+    assert!(
+        c_down,
+        "C did not tear down its session after being rejected"
+    );
 
     // Positive proof A's session is genuinely alive, not just labeled so: a
     // fresh push from A must still reach B.
@@ -966,8 +977,7 @@ async fn secondary_peer_is_proactively_redialed_via_persisted_last_addr() {
     // B's `peers.json`. Generous window: the redial tick's first fire is
     // deliberately delayed 2s after boot (see `discovery_dispatcher`).
     let secondary_up = wait_until(Duration::from_secs(6), || async {
-        peer_name(&ipc_c).await.as_deref() == Some("node-b")
-            && mesh_peers(&ipc_b).await == (2, 1)
+        peer_name(&ipc_c).await.as_deref() == Some("node-b") && mesh_peers(&ipc_b).await == (2, 1)
     })
     .await;
     assert!(

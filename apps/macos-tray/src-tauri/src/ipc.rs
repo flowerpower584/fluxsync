@@ -22,7 +22,10 @@ const MAX_IPC_LINE: usize = 64 * 1024 * 1024;
 /// Sync capped line read, for the boot-time version guard which runs
 /// before the tokio runtime exists. Mirrors `read_line_capped` below.
 #[cfg(unix)]
-fn read_line_capped_sync<R: std::io::BufRead>(reader: &mut R, out: &mut String) -> std::io::Result<usize> {
+fn read_line_capped_sync<R: std::io::BufRead>(
+    reader: &mut R,
+    out: &mut String,
+) -> std::io::Result<usize> {
     let mut bytes: Vec<u8> = Vec::new();
     loop {
         let chunk = reader.fill_buf()?;

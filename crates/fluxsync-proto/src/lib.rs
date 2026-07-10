@@ -85,7 +85,9 @@ pub const RESYNC_HASH_LEN: usize = 64;
 /// non-hex byte is rejected — there is exactly one valid textual encoding
 /// for a `resync-1` hash.
 fn is_valid_resync_hash(s: &str) -> bool {
-    s.len() == RESYNC_HASH_LEN && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == RESYNC_HASH_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Validate a `resync-1` hash list against the wire bounds: at most

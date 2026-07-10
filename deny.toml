@@ -16,7 +16,28 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0194 (quadratic-time duplicate-attribute check) and
+    # RUSTSEC-2026-0195 (unbounded NsReader namespace-declaration
+    # allocation) both require quick-xml >= 0.41.0, which is unreachable
+    # here: our only quick-xml consumer is wayland-scanner v0.31.10, a
+    # proc-macro / build-time-only crate that pins `quick-xml = "^0.39"`.
+    # Chain (`cargo tree -i quick-xml --target all`): quick-xml <-
+    # wayland-scanner (proc-macro) <- wayland-client <-
+    # wayland-protocols(-wlr) <- wl-clipboard-rs <- arboard <- fluxsyncd
+    # (Linux clipboard backend, target-gated to non-Android; the
+    # wayland-data-control feature is itself Linux-gated inside arboard).
+    # wayland-scanner uses quick-xml only at compile time, to parse the
+    # wayland protocol's own vendored XML spec files into Rust bindings —
+    # it never ships in the built binary and never parses
+    # attacker-controlled or network-sourced XML, so both DoS vectors
+    # (crafted XML with pathological attribute/namespace counts) are not
+    # reachable in FluxSync. Revisit: re-run `cargo update -p quick-xml`
+    # periodically and drop this ignore once wayland-scanner requires
+    # quick-xml >= 0.41.0.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 # ─────────────────────────────────────────────────────────────────
 # License compliance

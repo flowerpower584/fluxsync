@@ -404,10 +404,22 @@ mod firewall_tests {
             image: Rule::Ask,
             sensitive: Rule::Allow,
         };
-        assert_eq!(p.decide(Kind::Text, false, Direction::Outbound), Decision::Pass);
-        assert_eq!(p.decide(Kind::Url, false, Direction::Outbound), Decision::Defer);
-        assert_eq!(p.decide(Kind::Code, false, Direction::Outbound), Decision::Block);
-        assert_eq!(p.decide(Kind::Image, false, Direction::Inbound), Decision::Defer);
+        assert_eq!(
+            p.decide(Kind::Text, false, Direction::Outbound),
+            Decision::Pass
+        );
+        assert_eq!(
+            p.decide(Kind::Url, false, Direction::Outbound),
+            Decision::Defer
+        );
+        assert_eq!(
+            p.decide(Kind::Code, false, Direction::Outbound),
+            Decision::Block
+        );
+        assert_eq!(
+            p.decide(Kind::Image, false, Direction::Inbound),
+            Decision::Defer
+        );
     }
 
     #[test]
@@ -421,8 +433,14 @@ mod firewall_tests {
             image: Rule::Allow,
             sensitive: Rule::Ask,
         };
-        assert_eq!(p.decide(Kind::Text, false, Direction::Outbound), Decision::Pass);
-        assert_eq!(p.decide(Kind::Text, true, Direction::Outbound), Decision::Defer);
+        assert_eq!(
+            p.decide(Kind::Text, false, Direction::Outbound),
+            Decision::Pass
+        );
+        assert_eq!(
+            p.decide(Kind::Text, true, Direction::Outbound),
+            Decision::Defer
+        );
     }
 
     #[test]
@@ -437,7 +455,10 @@ mod firewall_tests {
             image: Rule::Allow,
             sensitive: Rule::Ask,
         };
-        assert_eq!(p.decide(Kind::Text, true, Direction::Outbound), Decision::Block);
+        assert_eq!(
+            p.decide(Kind::Text, true, Direction::Outbound),
+            Decision::Block
+        );
     }
 
     #[test]
@@ -473,6 +494,9 @@ mod firewall_tests {
         assert!(p.enabled);
         assert_eq!(p.text, Rule::Allow);
         assert_eq!(p.sensitive, Rule::Ask);
-        assert_eq!(p.decide(Kind::Text, true, Direction::Outbound), Decision::Defer);
+        assert_eq!(
+            p.decide(Kind::Text, true, Direction::Outbound),
+            Decision::Defer
+        );
     }
 }

@@ -134,11 +134,49 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # `release` buildType signs with the debug key (see build.gradle.kts),
-      # so the APK is installable without a release keystore secret.
+      # Restore the release signing key from repo secrets when present.
+      # Without the secrets (e.g. a fork or the public origin) this step
+      # is a no-op and build.gradle.kts falls back to debug signing, so
+      # the APK stays installable either way.
+      - name: Restore release keystore
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_STOREPASS: ${{ secrets.ANDROID_KEYSTORE_STOREPASS }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
+          KS_KEYPASS: ${{ secrets.ANDROID_KEYSTORE_KEYPASS }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > apps/android/keystore/fluxsync-release.keystore
+            {
+              echo "storeFile=keystore/fluxsync-release.keystore"
+              echo "storePassword=$KS_STOREPASS"
+              echo "keyAlias=$KS_ALIAS"
+              echo "keyPassword=$KS_KEYPASS"
+            } > apps/android/keystore.properties
+            echo "Release keystore restored from secrets."
+          else
+            echo "No keystore secrets found — APK will be debug-signed."
+          fi
+
       - name: Build release APK
         working-directory: apps/android
         run: ./gradlew :app:assembleRelease
+
+      # Fail loudly if the keystore secrets were provided but the APK
+      # still ended up debug-signed — a silently debug-signed "release"
+      # would break the upgrade path for everyone who installs it.
+      - name: Verify APK signature
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          certs=$("$BT/apksigner" verify --print-certs \
+            apps/android/app/build/outputs/apk/release/app-release.apk)
+          echo "$certs"
+          if [ -n "$KS_B64" ] && echo "$certs" | grep -q "Android Debug"; then
+            echo "::error::Keystore secrets are set but the APK is debug-signed."
+            exit 1
+          fi
 
       - name: Rename APK
         run: |

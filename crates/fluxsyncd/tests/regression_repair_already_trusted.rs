@@ -68,7 +68,10 @@ fn install_panic_hook() {
 const BASE32_ALPHA: base32::Alphabet = base32::Alphabet::Rfc4648 { padding: false };
 
 fn pair_uri(pubkey: [u8; 32], addr: SocketAddr) -> String {
-    format!("fluxsync://pair/{}?a={addr}", base32::encode(BASE32_ALPHA, &pubkey))
+    format!(
+        "fluxsync://pair/{}?a={addr}",
+        base32::encode(BASE32_ALPHA, &pubkey)
+    )
 }
 
 async fn pick_free_udp_port() -> u16 {
@@ -78,7 +81,10 @@ async fn pick_free_udp_port() -> u16 {
 
 async fn ipc_send_recv(path: &Path, req: CmdRequest) -> CmdResponse {
     let mut stream = UnixStream::connect(path).await.expect("connect ipc");
-    stream.write_all(b"{\"subscribe\":\"cmd\"}\n").await.expect("subscribe");
+    stream
+        .write_all(b"{\"subscribe\":\"cmd\"}\n")
+        .await
+        .expect("subscribe");
     stream.flush().await.expect("flush subscribe");
     let line = serde_json::to_string(&req).unwrap() + "\n";
     stream.write_all(line.as_bytes()).await.unwrap();
@@ -108,7 +114,14 @@ where
 }
 
 async fn status(ipc: &Path) -> Box<fluxsync_core::State> {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 1, op: CmdOp::Status }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     match resp.data {
         Some(CmdData::State(s)) => s,
         other => panic!("expected State, got {other:?}"),
@@ -131,16 +144,34 @@ async fn sas_phase(ipc: &Path) -> String {
 }
 
 async fn history_has(ipc: &Path, preview: &str) -> bool {
-    status(ipc).await.history.iter().any(|h| h.preview == preview)
+    status(ipc)
+        .await
+        .history
+        .iter()
+        .any(|h| h.preview == preview)
 }
 
 async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(ipc, CmdRequest { id: 2, op: CmdOp::SetThreshold { value } }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 2,
+            op: CmdOp::SetThreshold { value },
+        },
+    )
+    .await;
     assert!(r.ok, "set-threshold failed: {r:?}");
 }
 
 async fn push(ipc: &Path, text: &str) {
-    let r = ipc_send_recv(ipc, CmdRequest { id: 3, op: CmdOp::Push { text: text.into() } }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 3,
+            op: CmdOp::Push { text: text.into() },
+        },
+    )
+    .await;
     assert!(r.ok, "push {text:?} failed: {r:?}");
 }
 
@@ -149,7 +180,14 @@ async fn push(ipc: &Path, text: &str) {
 /// — both serialize to `[]`. Mirrors `pair_confirm.rs`'s helper of the same
 /// name/shape.
 async fn pending_entries(ipc: &Path) -> Vec<fluxsyncd::cmd::PendingPairEntry> {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 4, op: CmdOp::PairPending {} }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 4,
+            op: CmdOp::PairPending {},
+        },
+    )
+    .await;
     match resp.data {
         Some(CmdData::PendingPairs(entries)) => entries,
         Some(CmdData::Peers(entries)) if entries.is_empty() => Vec::new(),
@@ -159,7 +197,11 @@ async fn pending_entries(ipc: &Path) -> Vec<fluxsyncd::cmd::PendingPairEntry> {
 }
 
 async fn pending_peer_ids(ipc: &Path) -> Vec<String> {
-    pending_entries(ipc).await.into_iter().map(|e| e.peer_id).collect()
+    pending_entries(ipc)
+        .await
+        .into_iter()
+        .map(|e| e.peer_id)
+        .collect()
 }
 
 /// The 6 SAS words of the pending entry for `peer_id_hex`, if present.
@@ -172,28 +214,53 @@ async fn pending_sas_words(ipc: &Path, peer_id_hex: &str) -> Option<Vec<String>>
 }
 
 async fn reconnect(ipc: &Path, id: u64) {
-    let r = ipc_send_recv(ipc, CmdRequest { id, op: CmdOp::Reconnect {} }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id,
+            op: CmdOp::Reconnect {},
+        },
+    )
+    .await;
     assert!(r.ok, "reconnect failed: {r:?}");
 }
 
 async fn revoke(ipc: &Path, id: u64, peer_id_hex: &str) {
     let r = ipc_send_recv(
         ipc,
-        CmdRequest { id, op: CmdOp::Revoke { peer_id: peer_id_hex.to_string() } },
+        CmdRequest {
+            id,
+            op: CmdOp::Revoke {
+                peer_id: peer_id_hex.to_string(),
+            },
+        },
     )
     .await;
     assert!(r.ok, "revoke failed: {r:?}");
 }
 
 async fn pair_show(ipc: &Path, id: u64) {
-    let r = ipc_send_recv(ipc, CmdRequest { id, op: CmdOp::PairShow {} }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id,
+            op: CmdOp::PairShow {},
+        },
+    )
+    .await;
     assert!(r.ok, "pair_show failed: {r:?}");
 }
 
 async fn pair_from_uri(ipc: &Path, id: u64, uri: String, name: &str) -> CmdResponse {
     ipc_send_recv(
         ipc,
-        CmdRequest { id, op: CmdOp::PairFromUri { uri, name: name.to_string() } },
+        CmdRequest {
+            id,
+            op: CmdOp::PairFromUri {
+                uri,
+                name: name.to_string(),
+            },
+        },
     )
     .await
 }
@@ -203,7 +270,10 @@ async fn pair_confirm(ipc: &Path, id: u64, peer_id_hex: &str, accept: bool) -> C
         ipc,
         CmdRequest {
             id,
-            op: CmdOp::PairConfirm { peer_id: peer_id_hex.to_string(), accept },
+            op: CmdOp::PairConfirm {
+                peer_id: peer_id_hex.to_string(),
+                accept,
+            },
         },
     )
     .await
@@ -339,7 +409,10 @@ async fn pair_from_uri_on_already_trusted_peer_silently_reconnects() {
     // Prove the link works before touching it.
     push(&b.ipc_a, "repair-sanity").await;
     assert!(
-        wait_until(Duration::from_secs(3), || async { history_has(&b.ipc_b, "repair-sanity").await }).await,
+        wait_until(Duration::from_secs(3), || async {
+            history_has(&b.ipc_b, "repair-sanity").await
+        })
+        .await,
         "sanity item never reached b before the repair scenario started"
     );
 
@@ -381,8 +454,14 @@ async fn pair_from_uri_on_already_trusted_peer_silently_reconnects() {
         "already-trusted repair must not create a pending entry immediately"
     );
 
-    let relinked = wait_until(Duration::from_secs(5), || async { phase_linked(&b.ipc_a).await }).await;
-    assert!(relinked, "a did not relink to b after the repair PairFromUri");
+    let relinked = wait_until(Duration::from_secs(5), || async {
+        phase_linked(&b.ipc_a).await
+    })
+    .await;
+    assert!(
+        relinked,
+        "a did not relink to b after the repair PairFromUri"
+    );
 
     assert!(
         !pending_peer_ids(&b.ipc_a).await.contains(&b.peer_id_b_hex),
@@ -401,12 +480,18 @@ async fn pair_from_uri_on_already_trusted_peer_silently_reconnects() {
     // Session/sync still works after the repair.
     push(&b.ipc_a, "repair-post-item").await;
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&b.ipc_b, "repair-post-item").await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&b.ipc_b, "repair-post-item").await
+        })
+        .await,
         "post-repair item never reached b"
     );
 
     shutdown_both(b).await;
-    assert!(!PANIC_TRIGGERED.load(Ordering::SeqCst), "a panic was captured by the test panic hook");
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a panic was captured by the test panic hook"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -446,7 +531,10 @@ async fn verify_restart_reopens_scanner_verify_screen_after_peer_side_revoke() {
         pending_peer_ids(&b.ipc_b).await.contains(&b.peer_id_a_hex)
     })
     .await;
-    assert!(b_pending, "b never created a pending entry for a's re-handshake");
+    assert!(
+        b_pending,
+        "b never created a pending entry for a's re-handshake"
+    );
 
     // verify-restart under test: B announces the fresh pairing once it
     // learns A's caps (Hello), and A re-opens its own verify screen — a
@@ -471,7 +559,11 @@ async fn verify_restart_reopens_scanner_verify_screen_after_peer_side_revoke() {
     let words_b = pending_sas_words(&b.ipc_b, &b.peer_id_a_hex)
         .await
         .expect("b's pending entry vanished before its words were read");
-    assert_eq!(words_a.len(), 6, "expected 6 SAS words on a, got {words_a:?}");
+    assert_eq!(
+        words_a.len(),
+        6,
+        "expected 6 SAS words on a, got {words_a:?}"
+    );
     assert_eq!(
         words_a, words_b,
         "the two sides derived DIFFERENT SAS words — the humans would be \
@@ -522,15 +614,24 @@ async fn verify_restart_reopens_scanner_verify_screen_after_peer_side_revoke() {
     // (the FS-052 gates on both sides must have disengaged).
     push(&b.ipc_b, "verifyrestart-b-to-a").await;
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&b.ipc_a, "verifyrestart-b-to-a").await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&b.ipc_a, "verifyrestart-b-to-a").await
+        })
+        .await,
         "post-confirm item never reached a"
     );
     push(&b.ipc_a, "verifyrestart-a-to-b").await;
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&b.ipc_b, "verifyrestart-a-to-b").await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&b.ipc_b, "verifyrestart-a-to-b").await
+        })
+        .await,
         "post-confirm item never reached b"
     );
 
     shutdown_both(b).await;
-    assert!(!PANIC_TRIGGERED.load(Ordering::SeqCst), "a panic was captured by the test panic hook");
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a panic was captured by the test panic hook"
+    );
 }

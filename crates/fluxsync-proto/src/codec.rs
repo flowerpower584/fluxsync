@@ -66,7 +66,11 @@ fn validate(frame: &Frame) -> Result<(), ProtoError> {
         Msg::Hello(h) if h.platform.len() > MAX_HELLO_PLATFORM => {
             Err(ProtoError::HelloPlatformTooLong(h.platform.len()))
         }
-        Msg::Hello(h) if h.name.chars().any(|c| c.is_control() || is_bidi_or_format_char(c)) => {
+        Msg::Hello(h)
+            if h.name
+                .chars()
+                .any(|c| c.is_control() || is_bidi_or_format_char(c)) =>
+        {
             Err(ProtoError::HelloNameNotPrintable)
         }
         Msg::Hello(h) if !is_ascii_printable_cap(&h.platform) => {

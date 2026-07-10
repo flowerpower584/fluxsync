@@ -20,9 +20,7 @@ use serde::{Deserialize, Serialize};
 /// `State` — the BLAKE3-derived id of a device's Noise static public key. A
 /// newtype keeps "device identity" distinct from a raw `[u8; 32]` (which is
 /// also a content hash, a public key, …) at the type level.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DeviceId([u8; 32]);
 
 impl DeviceId {
@@ -67,9 +65,7 @@ impl From<[u8; 32]> for DeviceId {
 /// may legitimately receive a *lower* `seq` from the same origin later (a
 /// delayed item on a different path), so anti-loop must be membership-based,
 /// never a per-origin high-water mark.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EventId {
     pub origin: DeviceId,
     pub seq: u64,

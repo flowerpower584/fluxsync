@@ -76,7 +76,14 @@ where
 }
 
 async fn history(ipc: &PathBuf) -> Vec<HistoryItem> {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 1, op: CmdOp::Status }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     match resp.data {
         Some(CmdData::State(s)) => s.history,
         _ => Vec::new(),
@@ -84,14 +91,25 @@ async fn history(ipc: &PathBuf) -> Vec<HistoryItem> {
 }
 
 async fn history_count(ipc: &PathBuf, text: &str) -> usize {
-    history(ipc).await.iter().filter(|h| h.preview == text).count()
+    history(ipc)
+        .await
+        .iter()
+        .filter(|h| h.preview == text)
+        .count()
 }
 
 async fn peer_name(ipc: &PathBuf) -> Option<String> {
     if !ipc.exists() {
         return None;
     }
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 2, op: CmdOp::Status }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 2,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     match resp.data {
         Some(CmdData::State(s)) => Some(s.peer_name),
         _ => None,
@@ -99,7 +117,14 @@ async fn peer_name(ipc: &PathBuf) -> Option<String> {
 }
 
 async fn set_threshold(ipc: &PathBuf, value: u8) {
-    let r = ipc_send_recv(ipc, CmdRequest { id: 3, op: CmdOp::SetThreshold { value } }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 3,
+            op: CmdOp::SetThreshold { value },
+        },
+    )
+    .await;
     assert!(r.ok, "set-threshold failed: {r:?}");
 }
 
@@ -210,15 +235,22 @@ async fn pending_secondary_peer_excluded_from_send_item_fan_out() {
     let text = "fs052-secondary-pending-must-not-leak";
     let push = ipc_send_recv(
         &ipc_b,
-        CmdRequest { id: 42, op: CmdOp::Push { text: text.into() } },
+        CmdRequest {
+            id: 42,
+            op: CmdOp::Push { text: text.into() },
+        },
     )
     .await;
     assert!(push.ok, "push on b failed: {push:?}");
 
-    let a_got_it =
-        wait_until(Duration::from_secs(3), || async { history_count(&ipc_a, text).await >= 1 })
-            .await;
-    assert!(a_got_it, "the CONFIRMED primary peer (a) must still receive the pushed item");
+    let a_got_it = wait_until(Duration::from_secs(3), || async {
+        history_count(&ipc_a, text).await >= 1
+    })
+    .await;
+    assert!(
+        a_got_it,
+        "the CONFIRMED primary peer (a) must still receive the pushed item"
+    );
 
     // Give C every chance to (incorrectly) receive it before asserting its
     // absence — a generous window well past normal delivery latency.

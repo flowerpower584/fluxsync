@@ -206,8 +206,12 @@ async fn rename_reaches_peer_only_on_next_session_establishment() {
     // and sends the real `Msg::Hello` B will decrypt. ──
     sd_a1.cancel();
     sd_b1.cancel();
-    let _ = timeout(Duration::from_secs(5), h_a1).await.expect("v1 A shutdown hung");
-    let _ = timeout(Duration::from_secs(5), h_b1).await.expect("v1 B shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_a1)
+        .await
+        .expect("v1 A shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b1)
+        .await
+        .expect("v1 B shutdown hung");
 
     let (sess_a2, sess_b2) = pair_for_test(&id_a, &id_b).expect("pair v2");
     let port_a2 = pick_free_udp_port().await;

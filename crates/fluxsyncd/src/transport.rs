@@ -865,7 +865,9 @@ impl Transport {
 
                 if tried_any {
                     self.metrics.lock().await.on_decrypt_failure();
-                    Err(anyhow!("encrypted frame failed to decrypt under any session"))
+                    Err(anyhow!(
+                        "encrypted frame failed to decrypt under any session"
+                    ))
                 } else {
                     Err(anyhow!("encrypted frame but no session"))
                 }
@@ -881,8 +883,8 @@ impl Transport {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_rekey_initiator, rekey_due, roam_allowed, ROAM_MIN_INTERVAL_MS, REKEY_MAX_AGE_MS,
-        REKEY_MAX_BYTES,
+        is_rekey_initiator, rekey_due, roam_allowed, REKEY_MAX_AGE_MS, REKEY_MAX_BYTES,
+        ROAM_MIN_INTERVAL_MS,
     };
 
     #[test]
@@ -894,7 +896,12 @@ mod tests {
     #[test]
     fn dir_p2_03_rekey_due_age_trigger() {
         // Age alone crosses the threshold; bytes stay well under.
-        assert!(rekey_due(REKEY_MAX_AGE_MS, 0, REKEY_MAX_AGE_MS, REKEY_MAX_BYTES));
+        assert!(rekey_due(
+            REKEY_MAX_AGE_MS,
+            0,
+            REKEY_MAX_AGE_MS,
+            REKEY_MAX_BYTES
+        ));
         assert!(rekey_due(
             REKEY_MAX_AGE_MS + 1,
             0,
@@ -912,7 +919,12 @@ mod tests {
     #[test]
     fn dir_p2_03_rekey_due_bytes_trigger() {
         // Bytes alone crosses the threshold; age stays well under.
-        assert!(rekey_due(0, REKEY_MAX_BYTES, REKEY_MAX_AGE_MS, REKEY_MAX_BYTES));
+        assert!(rekey_due(
+            0,
+            REKEY_MAX_BYTES,
+            REKEY_MAX_AGE_MS,
+            REKEY_MAX_BYTES
+        ));
         assert!(rekey_due(
             0,
             REKEY_MAX_BYTES + 1,
@@ -1324,7 +1336,9 @@ mod tests {
         let (sess_secondary_stale, _) = pair_for_test(&me, &Identity::generate()).unwrap();
         let (primary_id, secondary_id) = ([1u8; 32], [2u8; 32]);
         transport.install_session(primary_id, sess_primary).await;
-        transport.install_session(secondary_id, sess_secondary_stale).await;
+        transport
+            .install_session(secondary_id, sess_secondary_stale)
+            .await;
         assert_eq!(transport.cached_peer_id().await, Some(primary_id));
 
         // The original bug: the secondary's peer crashed/restarted and is
@@ -1332,7 +1346,9 @@ mod tests {
         // `Some`) session — the empty-slot-only CAS must reject this.
         let (sess_fresh, _) = pair_for_test(&me, &Identity::generate()).unwrap();
         assert!(
-            !transport.try_install_session(secondary_id, sess_fresh).await,
+            !transport
+                .try_install_session(secondary_id, sess_fresh)
+                .await,
             "the empty-slot CAS must reject a still-live stale secondary session"
         );
 
@@ -1407,7 +1423,10 @@ mod tests {
         // stub in place — established-time bookkeeping still resolves.
         transport.drop_session_for(secondary_id).await;
         assert!(
-            transport.session_established_at_for(secondary_id).await.is_some(),
+            transport
+                .session_established_at_for(secondary_id)
+                .await
+                .is_some(),
             "an ordinary drop must leave the extra stub in place"
         );
 

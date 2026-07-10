@@ -104,7 +104,8 @@ pub fn load(dir: &Path, key: &[u8; 32], now_ms: u64, ttl_secs: u64) -> Result<Ve
     if blob.is_empty() {
         return Ok(Vec::new());
     }
-    let plain = at_rest::open(key, &blob).map_err(|e| anyhow!("decrypt {}: {e}", path.display()))?;
+    let plain =
+        at_rest::open(key, &blob).map_err(|e| anyhow!("decrypt {}: {e}", path.display()))?;
     let vf: VaultFile =
         serde_json::from_slice(&plain).with_context(|| format!("parse {}", path.display()))?;
     Ok(prune(vf.entries, now_ms, ttl_secs, usize::MAX))
@@ -197,11 +198,8 @@ mod tests {
     impl TmpDir {
         fn new() -> Self {
             let n = SEQ.fetch_add(1, Ordering::Relaxed);
-            let p = std::env::temp_dir().join(format!(
-                "fluxvault-test-{}-{}",
-                std::process::id(),
-                n
-            ));
+            let p =
+                std::env::temp_dir().join(format!("fluxvault-test-{}-{}", std::process::id(), n));
             std::fs::create_dir_all(&p).unwrap();
             Self(p)
         }
@@ -237,8 +235,20 @@ mod tests {
     fn roundtrip_save_load() {
         let d = TmpDir::new();
         let key = [1u8; 32];
-        let items = vec![entry("c", 3000, false), entry("b", 2000, false), entry("a", 1000, false)];
-        save(d.path(), &key, &items, 3000, DEFAULT_TTL_SECS, DEFAULT_DISK_CAP).unwrap();
+        let items = vec![
+            entry("c", 3000, false),
+            entry("b", 2000, false),
+            entry("a", 1000, false),
+        ];
+        save(
+            d.path(),
+            &key,
+            &items,
+            3000,
+            DEFAULT_TTL_SECS,
+            DEFAULT_DISK_CAP,
+        )
+        .unwrap();
         let got = load(d.path(), &key, 3000, DEFAULT_TTL_SECS).unwrap();
         assert_eq!(got, items);
     }
@@ -247,7 +257,15 @@ mod tests {
     fn file_is_encrypted_at_rest() {
         let d = TmpDir::new();
         let key = [2u8; 32];
-        save(d.path(), &key, &[entry("TOPSECRET", 1000, false)], 1000, DEFAULT_TTL_SECS, DEFAULT_DISK_CAP).unwrap();
+        save(
+            d.path(),
+            &key,
+            &[entry("TOPSECRET", 1000, false)],
+            1000,
+            DEFAULT_TTL_SECS,
+            DEFAULT_DISK_CAP,
+        )
+        .unwrap();
         let raw = std::fs::read(d.path().join("history.enc")).unwrap();
         assert!(!raw.windows(9).any(|w| w == b"TOPSECRET"));
     }
@@ -255,7 +273,15 @@ mod tests {
     #[test]
     fn wrong_key_load_errors() {
         let d = TmpDir::new();
-        save(d.path(), &[3u8; 32], &[entry("x", 1000, false)], 1000, DEFAULT_TTL_SECS, DEFAULT_DISK_CAP).unwrap();
+        save(
+            d.path(),
+            &[3u8; 32],
+            &[entry("x", 1000, false)],
+            1000,
+            DEFAULT_TTL_SECS,
+            DEFAULT_DISK_CAP,
+        )
+        .unwrap();
         assert!(load(d.path(), &[4u8; 32], 1000, DEFAULT_TTL_SECS).is_err());
     }
 
@@ -290,21 +316,34 @@ mod tests {
 
         let got = load(d.path(), &key, 1000, DEFAULT_TTL_SECS).unwrap();
         assert_eq!(got.len(), 1);
-        assert!(!got[0].item.resync, "old entry missing `resync` must default to false");
+        assert!(
+            !got[0].item.resync,
+            "old entry missing `resync` must default to false"
+        );
         assert_eq!(got[0].item.preview, "pre-resync-field entry");
     }
 
     #[test]
     fn missing_file_loads_empty() {
         let d = TmpDir::new();
-        assert!(load(d.path(), &[0u8; 32], 0, DEFAULT_TTL_SECS).unwrap().is_empty());
+        assert!(load(d.path(), &[0u8; 32], 0, DEFAULT_TTL_SECS)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn clear_removes_file_and_is_idempotent() {
         let d = TmpDir::new();
         let key = [5u8; 32];
-        save(d.path(), &key, &[entry("x", 1000, false)], 1000, DEFAULT_TTL_SECS, DEFAULT_DISK_CAP).unwrap();
+        save(
+            d.path(),
+            &key,
+            &[entry("x", 1000, false)],
+            1000,
+            DEFAULT_TTL_SECS,
+            DEFAULT_DISK_CAP,
+        )
+        .unwrap();
         assert!(d.path().join("history.enc").exists());
         clear(d.path()).unwrap();
         assert!(!d.path().join("history.enc").exists());
@@ -317,7 +356,11 @@ mod tests {
         let now = 10 * 24 * 60 * 60 * 1000;
         let ttl = 24 * 60 * 60;
         let out = prune(
-            vec![entry("fresh", now, false), entry("old", 0, false), entry("oldfav", 0, true)],
+            vec![
+                entry("fresh", now, false),
+                entry("old", 0, false),
+                entry("oldfav", 0, true),
+            ],
             now,
             ttl,
             usize::MAX,

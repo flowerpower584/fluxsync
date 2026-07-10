@@ -4,7 +4,9 @@
 //! string and feed them to `decode()` — the real wire ingress. `decode()`
 //! re-runs `validate()`, so the oversized platform is rejected there too.
 
-use fluxsync_proto::{decode, encode, Frame, Hello, Msg, ProtoError, MAX_HELLO_PLATFORM, PROTOCOL_VERSION};
+use fluxsync_proto::{
+    decode, encode, Frame, Hello, Msg, ProtoError, MAX_HELLO_PLATFORM, PROTOCOL_VERSION,
+};
 
 /// Serialize a Frame straight through ciborium, skipping `encode()`'s
 /// `validate()` gate. This is exactly what an attacker's own (non-FluxSync)
@@ -54,7 +56,10 @@ fn boundary_16_ok_17_rejected_on_decode() {
         }),
     };
     let ok = decode(&raw_cbor(&at_cap));
-    assert!(ok.is_ok(), "platform == {MAX_HELLO_PLATFORM} must decode, got {ok:?}");
+    assert!(
+        ok.is_ok(),
+        "platform == {MAX_HELLO_PLATFORM} must decode, got {ok:?}"
+    );
 
     // One over the cap: must be rejected on decode.
     let over = Frame {

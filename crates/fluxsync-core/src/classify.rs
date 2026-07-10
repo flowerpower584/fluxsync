@@ -128,7 +128,10 @@ pub fn kind_of(text: &str) -> Kind {
 /// affects the hash key, never the bytes that go on the wire or into history.
 #[must_use]
 pub fn canon_text(s: &str) -> String {
-    s.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
+    s.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_string()
 }
 
 /// Heuristic: does this string look like something we should never persist?

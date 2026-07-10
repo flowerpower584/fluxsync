@@ -167,7 +167,14 @@ pub async fn run_initiator(
         return Ok(());
     }
     transport.set_peer_info(peer_id, peer_addr).await;
-    crate::driver::persist_last_addr(keystore_dir.as_deref(), &transport, &trusted, peer_id, peer_addr).await;
+    crate::driver::persist_last_addr(
+        keystore_dir.as_deref(),
+        &transport,
+        &trusted,
+        peer_id,
+        peer_addr,
+    )
+    .await;
 
     // FS-052: insert the pending entry BEFORE announcing the link so the
     // outbound gate engages immediately. Mirrors the responder's insert
@@ -277,7 +284,14 @@ pub async fn run_rekey_initiator(
         return Ok(());
     }
     transport.set_peer_info(peer_id, peer_addr).await;
-    crate::driver::persist_last_addr(keystore_dir.as_deref(), &transport, &trusted, peer_id, peer_addr).await;
+    crate::driver::persist_last_addr(
+        keystore_dir.as_deref(),
+        &transport,
+        &trusted,
+        peer_id,
+        peer_addr,
+    )
+    .await;
     let _ = event_tx.try_send(Event::HandshakeOk);
     Ok(())
 }
@@ -760,7 +774,9 @@ mod tests {
         use tokio::net::UdpSocket;
         use tokio::sync::{mpsc, Mutex};
 
-        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.expect("bind transport");
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind transport");
         let transport = Arc::new(transport);
 
         let my_identity = Identity::generate();
@@ -771,13 +787,18 @@ mod tests {
         // Stands in for the peer's own transport: real UDP socket, no
         // daemon behind it — just enough for run_initiator's msg1 send to
         // land somewhere real and for this test to play the responder.
-        let peer_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer socket");
+        let peer_sock = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind peer socket");
         let peer_addr = peer_sock.local_addr().expect("peer addr");
 
         let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
         trusted.lock().await.insert(
             peer_id,
-            TrustedPeer { static_pub: peer_static, name: "peer".into() },
+            TrustedPeer {
+                static_pub: peer_static,
+                name: "peer".into(),
+            },
         );
 
         let (event_tx, _event_rx) = mpsc::channel::<Event>(16);
@@ -835,7 +856,9 @@ mod tests {
     /// immediately and send a fresh msg2, instead of being silently dropped.
     #[tokio::test]
     async fn secondary_reconnect_replaces_a_stale_session_without_waiting_for_ghost_timeout() {
-        use super::{peer_id_for, run_responder, PairingWindow, PendingSet, TrustedPeer, TrustedSet};
+        use super::{
+            peer_id_for, run_responder, PairingWindow, PendingSet, TrustedPeer, TrustedSet,
+        };
         use crate::transport::{Transport, TYPE_HANDSHAKE_RESP};
         use fluxsync_core::Event;
         use fluxsync_crypto::{test_util::pair_for_test, Identity, Initiator};
@@ -844,7 +867,9 @@ mod tests {
         use tokio::net::UdpSocket;
         use tokio::sync::{mpsc, Mutex};
 
-        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.expect("bind transport");
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind transport");
         let transport = Arc::new(transport);
 
         // An unrelated PRIMARY already live — the peer under test must route
@@ -863,12 +888,17 @@ mod tests {
         let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
         trusted.lock().await.insert(
             secondary_id,
-            TrustedPeer { static_pub: secondary_static, name: "secondary".into() },
+            TrustedPeer {
+                static_pub: secondary_static,
+                name: "secondary".into(),
+            },
         );
         let pending: PendingSet = Arc::new(Mutex::new(HashMap::new()));
         let pairing_window: PairingWindow = Arc::new(Mutex::new(None));
 
-        let bare = UdpSocket::bind("127.0.0.1:0").await.expect("bind bare peer socket");
+        let bare = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind bare peer socket");
         let bare_addr = bare.local_addr().expect("bare addr");
         let (event_tx, _event_rx) = mpsc::channel::<Event>(16);
 
@@ -889,7 +919,11 @@ mod tests {
         .await
         .expect("first responder step must succeed");
         assert!(transport.has_session_for(secondary_id).await);
-        assert_eq!(transport.cached_peer_id().await, Some(primary_id), "must route to extra, not evict the primary");
+        assert_eq!(
+            transport.cached_peer_id().await,
+            Some(primary_id),
+            "must route to extra, not evict the primary"
+        );
         let mut buf = [0u8; 2048];
         let (n1, _from1) = bare.recv_from(&mut buf).await.expect("recv msg2 #1");
         assert_eq!(buf[0], TYPE_HANDSHAKE_RESP);
@@ -935,10 +969,13 @@ mod tests {
         // The fix's whole point: msg2 actually goes out this time, instead of
         // `run_responder` returning early with "install lost a race" and the
         // peer waiting on the ghost-timeout.
-        let (n2, _from2) = tokio::time::timeout(std::time::Duration::from_millis(500), bare.recv_from(&mut buf))
-            .await
-            .expect("a second msg2 must be sent immediately, not after a ghost-timeout wait")
-            .expect("recv msg2 #2");
+        let (n2, _from2) = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            bare.recv_from(&mut buf),
+        )
+        .await
+        .expect("a second msg2 must be sent immediately, not after a ghost-timeout wait")
+        .expect("recv msg2 #2");
         assert_eq!(buf[0], TYPE_HANDSHAKE_RESP);
         let _ = n2;
     }
@@ -964,7 +1001,9 @@ mod tests {
         use tokio::sync::{mpsc, Mutex};
         use tokio_util::sync::CancellationToken;
 
-        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.expect("bind transport");
+        let (transport, _port) = Transport::bind("127.0.0.1", 0)
+            .await
+            .expect("bind transport");
         let transport = Arc::new(transport);
 
         let me = Identity::generate();
@@ -974,12 +1013,20 @@ mod tests {
         // First install claims the primary slot; the second, arriving while
         // the primary is still live, routes to `extra` (FluxMesh 2C-b).
         transport.install_session(primary_id, sess_primary).await;
-        transport.install_session(secondary_id, sess_secondary).await;
+        transport
+            .install_session(secondary_id, sess_secondary)
+            .await;
         assert_eq!(transport.cached_peer_id().await, Some(primary_id));
 
         let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
-        trusted.lock().await.insert(primary_id, tofu_trusted_peer(primary_id));
-        trusted.lock().await.insert(secondary_id, tofu_trusted_peer(secondary_id));
+        trusted
+            .lock()
+            .await
+            .insert(primary_id, tofu_trusted_peer(primary_id));
+        trusted
+            .lock()
+            .await
+            .insert(secondary_id, tofu_trusted_peer(secondary_id));
 
         // Only the SECONDARY is still awaiting confirmation, and its window
         // is already expired — the primary is fully confirmed (no pending

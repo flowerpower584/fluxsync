@@ -372,7 +372,8 @@ fn verify_keychain_readback(entry: &keyring::Entry, expected: &Identity) -> Resu
         .get_password()
         .context("read back identity from OS keychain immediately after writing it")?;
     let hex = zeroize::Zeroizing::new(raw);
-    let id = decode_identity_hex(&hex).context("decode keychain identity during readback verification")?;
+    let id = decode_identity_hex(&hex)
+        .context("decode keychain identity during readback verification")?;
     if id.secret_bytes().as_ref() == expected.secret_bytes().as_ref() {
         Ok(())
     } else {
@@ -782,10 +783,8 @@ mod mac_acl {
         // `CFType` is valid (`CFRelease` doesn't need the concrete type).
         let app: CFType = unsafe {
             let mut app_ref: SecTrustedApplicationRef = ptr::null_mut();
-            let status = SecTrustedApplicationCreateFromPath(
-                ptr::null(),
-                std::ptr::addr_of_mut!(app_ref),
-            );
+            let status =
+                SecTrustedApplicationCreateFromPath(ptr::null(), std::ptr::addr_of_mut!(app_ref));
             if status != 0 || app_ref.is_null() {
                 return Err(anyhow!(
                     "SecTrustedApplicationCreateFromPath failed with OSStatus {status}"
@@ -840,7 +839,10 @@ mod mac_acl {
 
     fn access_pair(access: CFType) -> (CFString, CFType) {
         // Safety: `kSecAttrAccess` is a read-only constant (see above).
-        (unsafe { CFString::wrap_under_get_rule(kSecAttrAccess) }, access)
+        (
+            unsafe { CFString::wrap_under_get_rule(kSecAttrAccess) },
+            access,
+        )
     }
 
     fn data_pair(secret: &[u8]) -> (CFString, CFType) {
@@ -891,7 +893,10 @@ mod mac_acl {
         // don't need it, so it's released immediately.
         let status = unsafe {
             let mut result: CFTypeRef = ptr::null();
-            let status = SecItemAdd(add_dict.as_concrete_TypeRef(), std::ptr::addr_of_mut!(result));
+            let status = SecItemAdd(
+                add_dict.as_concrete_TypeRef(),
+                std::ptr::addr_of_mut!(result),
+            );
             if !result.is_null() {
                 CFRelease(result);
             }
@@ -1086,10 +1091,7 @@ mod tests {
             Some("Dethie's MacBook".to_string())
         );
 
-        let tmp = dir
-            .path()
-            .join(DEVICE_NAME_FILE)
-            .with_extension("json.tmp");
+        let tmp = dir.path().join(DEVICE_NAME_FILE).with_extension("json.tmp");
         assert!(!tmp.exists(), "the .tmp file must not survive the rename");
     }
 

@@ -101,7 +101,14 @@ fn cfg_for(id: &Identity, port: u16, keystore: &Path, ipc: &Path, name: &str) ->
 }
 
 async fn status(ipc: &Path) -> Box<fluxsync_core::State> {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 1, op: CmdOp::Status }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     match resp.data {
         Some(CmdData::State(s)) => s,
         other => panic!("expected State, got {other:?}"),
@@ -131,15 +138,28 @@ async fn ipc_up(ipc: &Path, dur: Duration) -> bool {
         if !ipc.exists() {
             return false;
         }
-        ipc_try_send_recv(ipc, CmdRequest { id: 0, op: CmdOp::Status })
-            .await
-            .is_some_and(|r| r.ok)
+        ipc_try_send_recv(
+            ipc,
+            CmdRequest {
+                id: 0,
+                op: CmdOp::Status,
+            },
+        )
+        .await
+        .is_some_and(|r| r.ok)
     })
     .await
 }
 
 async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(ipc, CmdRequest { id: 0, op: CmdOp::SetThreshold { value } }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 0,
+            op: CmdOp::SetThreshold { value },
+        },
+    )
+    .await;
     assert!(r.ok, "set-threshold failed: {r:?}");
 }
 
@@ -156,7 +176,11 @@ async fn push(ipc: &Path, text: &str) {
 }
 
 async fn history_has(ipc: &Path, preview: &str) -> bool {
-    status(ipc).await.history.iter().any(|h| h.preview == preview)
+    status(ipc)
+        .await
+        .history
+        .iter()
+        .any(|h| h.preview == preview)
 }
 
 async fn phase_linked(ipc: &Path) -> bool {
@@ -170,9 +194,20 @@ async fn phase_linked(ipc: &Path) -> bool {
 // NONE of this driving it.
 
 async fn pair_show(ipc: &Path) -> (String, String) {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 10, op: CmdOp::PairShow {} }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 10,
+            op: CmdOp::PairShow {},
+        },
+    )
+    .await;
     match resp.data {
-        Some(CmdData::PairInfo { peer_id_hex, pubkey_b32, .. }) => (peer_id_hex, pubkey_b32),
+        Some(CmdData::PairInfo {
+            peer_id_hex,
+            pubkey_b32,
+            ..
+        }) => (peer_id_hex, pubkey_b32),
         other => panic!("unexpected pair_show response: {other:?}"),
     }
 }
@@ -194,7 +229,14 @@ async fn pair_accept(ipc: &Path, pubkey_b32: String, peer_name: &str, addr: Sock
 }
 
 async fn pending_peer_id(ipc: &Path) -> Option<String> {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 12, op: CmdOp::PairPending {} }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 12,
+            op: CmdOp::PairPending {},
+        },
+    )
+    .await;
     match resp.data {
         Some(CmdData::PendingPairs(v)) if !v.is_empty() => Some(v[0].peer_id.clone()),
         _ => None,
@@ -211,14 +253,20 @@ async fn confirm_pending(ipc: &Path, dur: Duration) {
                 ipc,
                 CmdRequest {
                     id: 13,
-                    op: CmdOp::PairConfirm { peer_id, accept: true },
+                    op: CmdOp::PairConfirm {
+                        peer_id,
+                        accept: true,
+                    },
                 },
             )
             .await;
             assert!(resp.ok, "pair_confirm failed: {resp:?}");
             return;
         }
-        assert!(start.elapsed() < dur, "no pending pair to confirm within {dur:?}");
+        assert!(
+            start.elapsed() < dur,
+            "no pending pair to confirm within {dur:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -234,8 +282,14 @@ async fn pair_daemons(ipc_a: &Path, addr_a: SocketAddr, ipc_b: &Path) -> String 
     let (_a_id, a_pub) = pair_show(ipc_a).await;
     pair_accept(ipc_b, a_pub.clone(), "device-a", addr_a).await;
 
-    let linked_a = wait_until(Duration::from_secs(10), || async { phase_linked(ipc_a).await }).await;
-    let linked_b = wait_until(Duration::from_secs(10), || async { phase_linked(ipc_b).await }).await;
+    let linked_a = wait_until(Duration::from_secs(10), || async {
+        phase_linked(ipc_a).await
+    })
+    .await;
+    let linked_b = wait_until(Duration::from_secs(10), || async {
+        phase_linked(ipc_b).await
+    })
+    .await;
     assert!(linked_a, "a: did not reach linked phase while pairing");
     assert!(linked_b, "b: did not reach linked phase while pairing");
 
@@ -276,8 +330,14 @@ async fn b_relinks_via_persisted_last_addr_with_no_mdns_and_no_pair_accept() {
         shutdown_b.clone(),
     ));
 
-    assert!(ipc_up(&ipc_a, Duration::from_secs(5)).await, "a: ipc not up");
-    assert!(ipc_up(&ipc_b, Duration::from_secs(5)).await, "b: ipc not up");
+    assert!(
+        ipc_up(&ipc_a, Duration::from_secs(5)).await,
+        "a: ipc not up"
+    );
+    assert!(
+        ipc_up(&ipc_b, Duration::from_secs(5)).await,
+        "b: ipc not up"
+    );
 
     // Host-battery gate: sync does not proceed until both sides lower the
     // threshold below whatever the real host's battery reports.
@@ -290,13 +350,18 @@ async fn b_relinks_via_persisted_last_addr_with_no_mdns_and_no_pair_accept() {
     let sanity = "last-addr-sanity-item";
     push(&ipc_a, sanity).await;
     assert!(
-        wait_until(Duration::from_secs(5), || async { history_has(&ipc_b, sanity).await }).await,
+        wait_until(Duration::from_secs(5), || async {
+            history_has(&ipc_b, sanity).await
+        })
+        .await,
         "sanity item never reached b before the relink scenario started"
     );
 
     // Shut b down cleanly.
     shutdown_b.cancel();
-    let _ = timeout(Duration::from_secs(5), h_b).await.expect("b: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b)
+        .await
+        .expect("b: clean shutdown hung");
 
     // Restart b with the SAME identity, the SAME on-disk keystore dir (so
     // `peers.json` — including the `last_addr` persisted during the
@@ -316,7 +381,10 @@ async fn b_relinks_via_persisted_last_addr_with_no_mdns_and_no_pair_accept() {
     cfg_b2.start_on = true;
     let shutdown_b2 = CancellationToken::new();
     let h_b2 = tokio::spawn(run(cfg_b2, shutdown_b2.clone()));
-    assert!(ipc_up(&ipc_b, Duration::from_secs(5)).await, "b2: ipc not up after restart");
+    assert!(
+        ipc_up(&ipc_b, Duration::from_secs(5)).await,
+        "b2: ipc not up after restart"
+    );
 
     // The reload path uses `keystore_dir::load_peers`/`load_trusted_peers`
     // for the trust set, but a fresh boot's in-memory battery threshold
@@ -363,9 +431,10 @@ async fn b_relinks_via_persisted_last_addr_with_no_mdns_and_no_pair_accept() {
         attempt += 1;
         let payload = format!("last-addr-post-relink-item-{attempt}");
         push(&ipc_a, &payload).await;
-        let arrived =
-            wait_until(Duration::from_secs(3), || async { history_has(&ipc_b, &payload).await })
-                .await;
+        let arrived = wait_until(Duration::from_secs(3), || async {
+            history_has(&ipc_b, &payload).await
+        })
+        .await;
         if arrived {
             relink_is_live = true;
             break;
@@ -379,6 +448,10 @@ async fn b_relinks_via_persisted_last_addr_with_no_mdns_and_no_pair_accept() {
 
     shutdown_a.cancel();
     shutdown_b2.cancel();
-    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
-    let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_a)
+        .await
+        .expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b2)
+        .await
+        .expect("b2: clean shutdown hung");
 }

@@ -413,7 +413,10 @@ mod tests {
             // the same version must agree on the wire shape either way.
             let req = CmdRequest {
                 id: 1,
-                op: CmdOp::PushImage { data: "AAAA".into(), sensitive: want },
+                op: CmdOp::PushImage {
+                    data: "AAAA".into(),
+                    sensitive: want,
+                },
             };
             let s = serde_json::to_string(&req).expect("serialize");
             let back: CmdRequest = serde_json::from_str(&s).expect("deserialize own output");
@@ -429,10 +432,9 @@ mod tests {
     /// must decode into the ops they're meant to drive.
     #[test]
     fn dir_p3_09_new_fluxctl_subcommand_wire_shapes_decode() {
-        let op: CmdOp = serde_json::from_str(
-            r#"{"op":"set_favorite","hash":"abc123","favorite":true}"#,
-        )
-        .expect("set_favorite must deserialize");
+        let op: CmdOp =
+            serde_json::from_str(r#"{"op":"set_favorite","hash":"abc123","favorite":true}"#)
+                .expect("set_favorite must deserialize");
         match op {
             CmdOp::SetFavorite { hash, favorite } => {
                 assert_eq!(hash, "abc123");
@@ -449,10 +451,9 @@ mod tests {
             serde_json::from_str(r#"{"op":"shutdown"}"#).expect("shutdown must deserialize");
         assert!(matches!(op, CmdOp::Shutdown {}));
 
-        let op: CmdOp = serde_json::from_str(
-            r#"{"op":"pair_from_pin","pin":"123456","name":"Phone"}"#,
-        )
-        .expect("pair_from_pin must deserialize");
+        let op: CmdOp =
+            serde_json::from_str(r#"{"op":"pair_from_pin","pin":"123456","name":"Phone"}"#)
+                .expect("pair_from_pin must deserialize");
         match op {
             CmdOp::PairFromPin { pin, name } => {
                 assert_eq!(pin, "123456");

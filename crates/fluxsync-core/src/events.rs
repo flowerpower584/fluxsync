@@ -142,7 +142,9 @@ pub enum Event {
     /// `State.sas_peer` (L3 fix) so a later `SasPeerConfirmed`/
     /// `SasPeerRejected` from an unrelated peer can't stomp this one's
     /// verify UI.
-    SasPairingStarted { peer_id: [u8; 32] },
+    SasPairingStarted {
+        peer_id: [u8; 32],
+    },
     /// The local user confirmed the SAS words (`fluxctl pair confirm
     /// --accept`). Moves `sas_phase` to `"confirmed"` if the peer already
     /// confirmed (or is a legacy build treated as auto-confirmed), else to
@@ -152,7 +154,9 @@ pub enum Event {
     /// peer while a second pairing with a different peer is also in flight
     /// could advance the WRONG peer's phase if `sas_peer` had since been
     /// overwritten by the second pairing's `SasPairingStarted`.
-    SasLocalConfirmed { peer_id: [u8; 32] },
+    SasLocalConfirmed {
+        peer_id: [u8; 32],
+    },
     /// The peer confirmed the SAS words — either via an inbound
     /// `Msg::PairConfirm { accept: true }`, or because its `Hello` did not
     /// advertise the `sas-confirm` capability (legacy build, auto-treated
@@ -161,13 +165,17 @@ pub enum Event {
     /// confirmed, else to `"peer_confirmed"`. L3 fix: `peer_id` must match
     /// `State.sas_peer` or the transition is ignored — an unrelated peer's
     /// confirm must not advance a DIFFERENT peer's in-flight SAS phase.
-    SasPeerConfirmed { peer_id: [u8; 32] },
+    SasPeerConfirmed {
+        peer_id: [u8; 32],
+    },
     /// The peer explicitly rejected the pairing (inbound
     /// `Msg::PairConfirm { accept: false }`). Sets `sas_phase` to
     /// `"peer_rejected"` unconditionally. L3 fix: `peer_id` must match
     /// `State.sas_peer` or the transition is ignored — see
     /// `SasPeerConfirmed`.
-    SasPeerRejected { peer_id: [u8; 32] },
+    SasPeerRejected {
+        peer_id: [u8; 32],
+    },
     /// The pending reaper revoked an unconfirmed pair after the 90s
     /// pairing window expired. Resets `sas_phase` to `"idle"`.
     SasReset,
@@ -246,7 +254,9 @@ pub enum Action {
     /// matching `PendingOutboxStage` staged entries (see `driver.rs`'s
     /// `purge_dropped_pending_from_outbox_stage`); without this they would
     /// otherwise outlive the `state.pending` row they mirrored.
-    PendingDropped { hashes: Vec<[u8; 32]> },
+    PendingDropped {
+        hashes: Vec<[u8; 32]>,
+    },
 }
 
 /// A friendly log entry. Routed both to `tracing` (structured) and to the

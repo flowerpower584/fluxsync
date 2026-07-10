@@ -90,7 +90,11 @@ async fn history_len(ipc: &PathBuf) -> usize {
 }
 
 async fn items_sent(ipc: &PathBuf) -> u64 {
-    status(ipc).await.metrics.as_ref().map_or(0, |m| m.items_sent)
+    status(ipc)
+        .await
+        .metrics
+        .as_ref()
+        .map_or(0, |m| m.items_sent)
 }
 
 async fn items_received(ipc: &PathBuf) -> u64 {
@@ -102,7 +106,11 @@ async fn items_received(ipc: &PathBuf) -> u64 {
 }
 
 async fn dedup_drops(ipc: &PathBuf) -> u64 {
-    status(ipc).await.metrics.as_ref().map_or(0, |m| m.dedup_drops)
+    status(ipc)
+        .await
+        .metrics
+        .as_ref()
+        .map_or(0, |m| m.dedup_drops)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -221,12 +229,18 @@ async fn counters_advance_on_send_receive_and_duplicate() {
     );
 
     assert!(
-        wait_until(Duration::from_secs(2), || async { items_sent(&ipc_a).await == n }).await,
+        wait_until(Duration::from_secs(2), || async {
+            items_sent(&ipc_a).await == n
+        })
+        .await,
         "items_sent on A never reached {n} (was {})",
         items_sent(&ipc_a).await
     );
     assert!(
-        wait_until(Duration::from_secs(2), || async { items_received(&ipc_b).await == n }).await,
+        wait_until(Duration::from_secs(2), || async {
+            items_received(&ipc_b).await == n
+        })
+        .await,
         "items_received on B never reached {n} (was {})",
         items_received(&ipc_b).await
     );
@@ -237,7 +251,10 @@ async fn counters_advance_on_send_receive_and_duplicate() {
     push(&ipc_a, texts[0]).await;
 
     assert!(
-        wait_until(Duration::from_secs(2), || async { dedup_drops(&ipc_a).await >= 1 }).await,
+        wait_until(Duration::from_secs(2), || async {
+            dedup_drops(&ipc_a).await >= 1
+        })
+        .await,
         "duplicates_dropped (dedup_drops) never advanced on A after resending a duplicate"
     );
 

@@ -92,7 +92,14 @@ fn cfg_for(id: &Identity, port: u16, keystore: &Path, ipc: &Path, name: &str) ->
 }
 
 async fn status(ipc: &Path) -> Box<fluxsync_core::State> {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 1, op: CmdOp::Status }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     match resp.data {
         Some(CmdData::State(s)) => s,
         other => panic!("expected State, got {other:?}"),
@@ -118,9 +125,15 @@ async fn ipc_up(ipc: &Path, dur: Duration) -> bool {
         if !ipc.exists() {
             return false;
         }
-        ipc_try_send_recv(ipc, CmdRequest { id: 0, op: CmdOp::Status })
-            .await
-            .is_some_and(|r| r.ok)
+        ipc_try_send_recv(
+            ipc,
+            CmdRequest {
+                id: 0,
+                op: CmdOp::Status,
+            },
+        )
+        .await
+        .is_some_and(|r| r.ok)
     })
     .await
 }
@@ -129,40 +142,71 @@ async fn ipc_up(ipc: &Path, dur: Duration) -> bool {
 /// sync (the battery-policy `Paused` gate). Floor both daemons' thresholds
 /// right after boot.
 async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(ipc, CmdRequest { id: 0, op: CmdOp::SetThreshold { value } }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 0,
+            op: CmdOp::SetThreshold { value },
+        },
+    )
+    .await;
     assert!(r.ok, "set-threshold failed: {r:?}");
 }
 
 async fn push(ipc: &Path, text: &str) {
     let r = ipc_send_recv(
         ipc,
-        CmdRequest { id: 2, op: CmdOp::Push { text: text.into() } },
+        CmdRequest {
+            id: 2,
+            op: CmdOp::Push { text: text.into() },
+        },
     )
     .await;
     assert!(r.ok, "push {text:?} failed: {r:?}");
 }
 
 async fn set_firewall(ipc: &Path, policy: FirewallPolicy) {
-    let r = ipc_send_recv(ipc, CmdRequest { id: 3, op: CmdOp::SetFirewall { policy } }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 3,
+            op: CmdOp::SetFirewall { policy },
+        },
+    )
+    .await;
     assert!(r.ok, "set-firewall failed: {r:?}");
 }
 
 async fn resolve_pending(ipc: &Path, hash: String, allow: bool) {
-    let r = ipc_send_recv(ipc, CmdRequest { id: 4, op: CmdOp::ResolvePending { hash, allow } }).await;
+    let r = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 4,
+            op: CmdOp::ResolvePending { hash, allow },
+        },
+    )
+    .await;
     assert!(r.ok, "resolve-pending failed: {r:?}");
 }
 
 async fn clear_history(ipc: &Path, include_favorites: bool) {
     let r = ipc_send_recv(
         ipc,
-        CmdRequest { id: 9, op: CmdOp::ClearHistory { include_favorites } },
+        CmdRequest {
+            id: 9,
+            op: CmdOp::ClearHistory { include_favorites },
+        },
     )
     .await;
     assert!(r.ok, "clear-history failed: {r:?}");
 }
 
 async fn history_has(ipc: &Path, preview: &str) -> bool {
-    status(ipc).await.history.iter().any(|h| h.preview == preview)
+    status(ipc)
+        .await
+        .history
+        .iter()
+        .any(|h| h.preview == preview)
 }
 
 /// Read the on-disk vault directly with the REAL load path + REAL at-rest
@@ -216,9 +260,20 @@ async fn first_pending_hash(ipc: &Path) -> Option<String> {
 // chaos_harness.rs's subprocess-based helpers of the same names/shape).
 
 async fn pair_show(ipc: &Path) -> (String, String) {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 10, op: CmdOp::PairShow {} }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 10,
+            op: CmdOp::PairShow {},
+        },
+    )
+    .await;
     match resp.data {
-        Some(CmdData::PairInfo { peer_id_hex, pubkey_b32, .. }) => (peer_id_hex, pubkey_b32),
+        Some(CmdData::PairInfo {
+            peer_id_hex,
+            pubkey_b32,
+            ..
+        }) => (peer_id_hex, pubkey_b32),
         other => panic!("unexpected pair_show response: {other:?}"),
     }
 }
@@ -240,7 +295,14 @@ async fn pair_accept(ipc: &Path, pubkey_b32: String, peer_name: &str, addr: Sock
 }
 
 async fn pending_peer_id(ipc: &Path) -> Option<String> {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 12, op: CmdOp::PairPending {} }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 12,
+            op: CmdOp::PairPending {},
+        },
+    )
+    .await;
     match resp.data {
         Some(CmdData::PendingPairs(v)) if !v.is_empty() => Some(v[0].peer_id.clone()),
         _ => None,
@@ -253,13 +315,22 @@ async fn confirm_pending(ipc: &Path, dur: Duration) {
         if let Some(peer_id) = pending_peer_id(ipc).await {
             let resp = ipc_send_recv(
                 ipc,
-                CmdRequest { id: 13, op: CmdOp::PairConfirm { peer_id, accept: true } },
+                CmdRequest {
+                    id: 13,
+                    op: CmdOp::PairConfirm {
+                        peer_id,
+                        accept: true,
+                    },
+                },
             )
             .await;
             assert!(resp.ok, "pair_confirm failed: {resp:?}");
             return;
         }
-        assert!(start.elapsed() < dur, "no pending pair to confirm within {dur:?}");
+        assert!(
+            start.elapsed() < dur,
+            "no pending pair to confirm within {dur:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -268,8 +339,14 @@ async fn pair_daemons(ipc_a: &Path, addr_a: SocketAddr, ipc_b: &Path) -> String 
     let (_a_id, a_pub) = pair_show(ipc_a).await;
     pair_accept(ipc_b, a_pub.clone(), "device-a", addr_a).await;
 
-    let linked_a = wait_until(Duration::from_secs(10), || async { phase_linked(ipc_a).await }).await;
-    let linked_b = wait_until(Duration::from_secs(10), || async { phase_linked(ipc_b).await }).await;
+    let linked_a = wait_until(Duration::from_secs(10), || async {
+        phase_linked(ipc_a).await
+    })
+    .await;
+    let linked_b = wait_until(Duration::from_secs(10), || async {
+        phase_linked(ipc_b).await
+    })
+    .await;
     assert!(linked_a, "a: did not reach linked phase while pairing");
     assert!(linked_b, "b: did not reach linked phase while pairing");
 
@@ -311,26 +388,45 @@ async fn boot_and_pair() -> (
 
     let shutdown_a = CancellationToken::new();
     let shutdown_b = CancellationToken::new();
-    let h_a = tokio::spawn(run(cfg_for(&id_a, port_a, &keystore_a, &ipc_a, "device-a"), shutdown_a.clone()));
-    let h_b = tokio::spawn(run(cfg_for(&id_b, port_b, &keystore_b, &ipc_b, "device-b"), shutdown_b.clone()));
+    let h_a = tokio::spawn(run(
+        cfg_for(&id_a, port_a, &keystore_a, &ipc_a, "device-a"),
+        shutdown_a.clone(),
+    ));
+    let h_b = tokio::spawn(run(
+        cfg_for(&id_b, port_b, &keystore_b, &ipc_b, "device-b"),
+        shutdown_b.clone(),
+    ));
 
-    assert!(ipc_up(&ipc_a, Duration::from_secs(5)).await, "a: ipc not up");
-    assert!(ipc_up(&ipc_b, Duration::from_secs(5)).await, "b: ipc not up");
+    assert!(
+        ipc_up(&ipc_a, Duration::from_secs(5)).await,
+        "a: ipc not up"
+    );
+    assert!(
+        ipc_up(&ipc_b, Duration::from_secs(5)).await,
+        "b: ipc not up"
+    );
 
     set_threshold(&ipc_a, 5).await;
     set_threshold(&ipc_b, 5).await;
 
     let a_pub = pair_daemons(&ipc_a, addr_a, &ipc_b).await;
 
-    (ipc_a, shutdown_a, h_a, id_b, keystore_b, ipc_b, addr_a, a_pub, shutdown_b, h_b)
+    (
+        ipc_a, shutdown_a, h_a, id_b, keystore_b, ipc_b, addr_a, a_pub, shutdown_b, h_b,
+    )
 }
 
 /// Cleanly stop `b`'s FIRST incarnation (from `boot_and_pair`) before a test
 /// restarts it as `b2` on the same `ipc_b`/keystore path — otherwise the
 /// still-listening original socket would collide with the fresh one.
-async fn shutdown_first_b(shutdown_b: CancellationToken, h_b: tokio::task::JoinHandle<anyhow::Result<()>>) {
+async fn shutdown_first_b(
+    shutdown_b: CancellationToken,
+    h_b: tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
     shutdown_b.cancel();
-    let _ = timeout(Duration::from_secs(5), h_b).await.expect("b (first incarnation): clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b)
+        .await
+        .expect("b (first incarnation): clean shutdown hung");
 }
 
 async fn restart_b_and_relink(
@@ -340,18 +436,33 @@ async fn restart_b_and_relink(
     addr_a: SocketAddr,
     a_pub: String,
     ipc_a: &Path,
-) -> (CancellationToken, tokio::task::JoinHandle<anyhow::Result<()>>) {
+) -> (
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
     let port_b2 = pick_free_udp_port().await;
     let shutdown_b2 = CancellationToken::new();
-    let h_b2 = tokio::spawn(run(cfg_for(id_b, port_b2, keystore_b, ipc_b, "device-b-v2"), shutdown_b2.clone()));
-    assert!(ipc_up(ipc_b, Duration::from_secs(5)).await, "b2: ipc not up after restart");
+    let h_b2 = tokio::spawn(run(
+        cfg_for(id_b, port_b2, keystore_b, ipc_b, "device-b-v2"),
+        shutdown_b2.clone(),
+    ));
+    assert!(
+        ipc_up(ipc_b, Duration::from_secs(5)).await,
+        "b2: ipc not up after restart"
+    );
 
     pair_accept(ipc_b, a_pub, "device-a", addr_a).await;
 
     let relinked_a = wait_until(RECONNECT_ENVELOPE, || async { phase_linked(ipc_a).await }).await;
     let relinked_b = wait_until(RECONNECT_ENVELOPE, || async { phase_linked(ipc_b).await }).await;
-    assert!(relinked_a, "a: did not recover to linked within {RECONNECT_ENVELOPE:?} of b's restart");
-    assert!(relinked_b, "b2: did not reach linked within {RECONNECT_ENVELOPE:?} of restart");
+    assert!(
+        relinked_a,
+        "a: did not recover to linked within {RECONNECT_ENVELOPE:?} of b's restart"
+    );
+    assert!(
+        relinked_b,
+        "b2: did not reach linked within {RECONNECT_ENVELOPE:?} of restart"
+    );
 
     (shutdown_b2, h_b2)
 }
@@ -369,7 +480,11 @@ async fn firewall_blocked_inbound_item_never_resyncs() {
     // a: Deny every inbound text item outright.
     set_firewall(
         &ipc_a,
-        FirewallPolicy { enabled: true, text: Rule::Deny, ..FirewallPolicy::default() },
+        FirewallPolicy {
+            enabled: true,
+            text: Rule::Deny,
+            ..FirewallPolicy::default()
+        },
     )
     .await;
 
@@ -381,7 +496,12 @@ async fn firewall_blocked_inbound_item_never_resyncs() {
     push(&ipc_b, blocked).await;
     let control_resp = ipc_send_recv(
         &ipc_b,
-        CmdRequest { id: 20, op: CmdOp::Push { text: format!("https://example.com/{control}") } },
+        CmdRequest {
+            id: 20,
+            op: CmdOp::Push {
+                text: format!("https://example.com/{control}"),
+            },
+        },
     )
     .await;
     assert!(control_resp.ok, "control push failed: {control_resp:?}");
@@ -419,7 +539,8 @@ async fn firewall_blocked_inbound_item_never_resyncs() {
     // a stays up the whole time — only b goes down and relinks.
     shutdown_first_b(shutdown_b, h_b).await;
     wait_a_notices_disconnect(&ipc_a).await;
-    let (shutdown_b2, h_b2) = restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub, &ipc_a).await;
+    let (shutdown_b2, h_b2) =
+        restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub, &ipc_a).await;
 
     // Control item proves resync-1 genuinely ran.
     assert!(
@@ -442,8 +563,12 @@ async fn firewall_blocked_inbound_item_never_resyncs() {
 
     shutdown_a.cancel();
     shutdown_b2.cancel();
-    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
-    let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_a)
+        .await
+        .expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b2)
+        .await
+        .expect("b2: clean shutdown hung");
 }
 
 /// (b) An `Ask`-parked inbound item, explicitly denied via
@@ -459,7 +584,11 @@ async fn ask_denied_inbound_item_never_resyncs() {
     // a: Ask (defer) every inbound text item.
     set_firewall(
         &ipc_a,
-        FirewallPolicy { enabled: true, text: Rule::Ask, ..FirewallPolicy::default() },
+        FirewallPolicy {
+            enabled: true,
+            text: Rule::Ask,
+            ..FirewallPolicy::default()
+        },
     )
     .await;
 
@@ -469,7 +598,12 @@ async fn ask_denied_inbound_item_never_resyncs() {
     push(&ipc_b, denied).await;
     let control_resp = ipc_send_recv(
         &ipc_b,
-        CmdRequest { id: 21, op: CmdOp::Push { text: format!("https://example.com/{control}") } },
+        CmdRequest {
+            id: 21,
+            op: CmdOp::Push {
+                text: format!("https://example.com/{control}"),
+            },
+        },
     )
     .await;
     assert!(control_resp.ok, "control push failed: {control_resp:?}");
@@ -480,7 +614,10 @@ async fn ask_denied_inbound_item_never_resyncs() {
         first_pending_hash(&ipc_a).await.is_some()
     })
     .await;
-    assert!(got_pending, "a's firewall Ask rule never parked the pushed item");
+    assert!(
+        got_pending,
+        "a's firewall Ask rule never parked the pushed item"
+    );
     let pending_hash = first_pending_hash(&ipc_a).await.expect("pending hash");
     resolve_pending(&ipc_a, pending_hash, false).await;
 
@@ -504,7 +641,8 @@ async fn ask_denied_inbound_item_never_resyncs() {
 
     shutdown_first_b(shutdown_b, h_b).await;
     wait_a_notices_disconnect(&ipc_a).await;
-    let (shutdown_b2, h_b2) = restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub, &ipc_a).await;
+    let (shutdown_b2, h_b2) =
+        restart_b_and_relink(&id_b, &keystore_b, &ipc_b, addr_a, a_pub, &ipc_a).await;
 
     assert!(
         wait_until(Duration::from_secs(15), || async {
@@ -522,8 +660,12 @@ async fn ask_denied_inbound_item_never_resyncs() {
 
     shutdown_a.cancel();
     shutdown_b2.cancel();
-    let _ = timeout(Duration::from_secs(5), h_a).await.expect("a: clean shutdown hung");
-    let _ = timeout(Duration::from_secs(5), h_b2).await.expect("b2: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_a)
+        .await
+        .expect("a: clean shutdown hung");
+    let _ = timeout(Duration::from_secs(5), h_b2)
+        .await
+        .expect("b2: clean shutdown hung");
 }
 
 /// (d) FIX 4: `MAX_TOTAL_BYTES` used to be 8 MiB, smaller than
@@ -548,6 +690,8 @@ fn max_size_admitted_item_survives_cap_fix() {
         },
     );
 
-    let got = ob.get(hash).expect("a ~9 MiB item must survive its own insert");
+    let got = ob
+        .get(hash)
+        .expect("a ~9 MiB item must survive its own insert");
     assert_eq!(got.payload.len(), big.len());
 }

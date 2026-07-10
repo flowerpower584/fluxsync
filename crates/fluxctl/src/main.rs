@@ -429,8 +429,11 @@ async fn main() -> Result<()> {
                 let mut fw = fetch_firewall(&ipc_path).await?;
                 fw["enabled"] = json!(true);
                 (
-                    one_shot(&ipc_path, json!({"id": 1, "op": "set_firewall", "policy": fw}))
-                        .await?,
+                    one_shot(
+                        &ipc_path,
+                        json!({"id": 1, "op": "set_firewall", "policy": fw}),
+                    )
+                    .await?,
                     Kind::Ack("firewall enabled"),
                 )
             }
@@ -438,8 +441,11 @@ async fn main() -> Result<()> {
                 let mut fw = fetch_firewall(&ipc_path).await?;
                 fw["enabled"] = json!(false);
                 (
-                    one_shot(&ipc_path, json!({"id": 1, "op": "set_firewall", "policy": fw}))
-                        .await?,
+                    one_shot(
+                        &ipc_path,
+                        json!({"id": 1, "op": "set_firewall", "policy": fw}),
+                    )
+                    .await?,
                     Kind::Ack("firewall disabled"),
                 )
             }
@@ -447,8 +453,11 @@ async fn main() -> Result<()> {
                 let mut fw = fetch_firewall(&ipc_path).await?;
                 fw[field.key()] = json!(rule.wire());
                 (
-                    one_shot(&ipc_path, json!({"id": 1, "op": "set_firewall", "policy": fw}))
-                        .await?,
+                    one_shot(
+                        &ipc_path,
+                        json!({"id": 1, "op": "set_firewall", "policy": fw}),
+                    )
+                    .await?,
                     Kind::Ack("rule updated"),
                 )
             }
@@ -545,7 +554,11 @@ async fn main() -> Result<()> {
         if let Ok(s) = serde_json::to_string_pretty(&value) {
             println!("{s}");
         }
-        return if ok { Ok(()) } else { Err(anyhow!(daemon_err(&value))) };
+        return if ok {
+            Ok(())
+        } else {
+            Err(anyhow!(daemon_err(&value)))
+        };
     }
 
     match kind {
@@ -659,7 +672,11 @@ fn render_firewall_pending(resp: &Value) {
     println!("Awaiting approval ({n}):", n = items.len());
     for it in &items {
         let dir = it.get("direction").and_then(Value::as_str).unwrap_or("?");
-        let arrow = if dir == "outbound" { "→ out" } else { "← in " };
+        let arrow = if dir == "outbound" {
+            "→ out"
+        } else {
+            "← in "
+        };
         let kind = it.get("kind").and_then(Value::as_str).unwrap_or("?");
         let preview = it.get("preview").and_then(Value::as_str).unwrap_or("");
         let hash = it.get("hash").and_then(Value::as_str).unwrap_or("");
@@ -953,7 +970,9 @@ mod ipc_read_tests {
     async fn errors_when_line_exceeds_cap() {
         let mut reader = BufReader::new(std::io::Cursor::new(b"0123456789\n".to_vec()));
         let mut buf = String::new();
-        let err = read_line_capped(&mut reader, &mut buf, 5).await.unwrap_err();
+        let err = read_line_capped(&mut reader, &mut buf, 5)
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
@@ -1036,7 +1055,9 @@ mod cli_parse_tests {
     fn pair_from_pin_parses_required_flags() {
         let a = parse(&["pair", "from-pin", "--pin", "123456", "--name", "Phone"]);
         match a.cmd {
-            Cmd::Pair { sub: PairSub::FromPin { pin, name } } => {
+            Cmd::Pair {
+                sub: PairSub::FromPin { pin, name },
+            } => {
                 assert_eq!(pin, "123456");
                 assert_eq!(name, "Phone");
             }

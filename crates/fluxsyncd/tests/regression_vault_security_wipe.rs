@@ -97,7 +97,14 @@ where
 // ── local helpers ─────────────────────────────────────────────────────────
 
 async fn status(ipc: &PathBuf) -> Option<fluxsync_core::State> {
-    let resp = ipc_send_recv(ipc, CmdRequest { id: 99, op: CmdOp::Status }).await;
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 99,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
     if let Some(CmdData::State(s)) = resp.data {
         Some(*s)
     } else {
@@ -108,9 +115,14 @@ async fn status(ipc: &PathBuf) -> Option<fluxsync_core::State> {
 /// Read the on-disk vault with the REAL load path + REAL at-rest key.
 fn disk_history(dir: &std::path::Path, id: &Identity) -> Vec<HistoryItem> {
     let key = id.derive_at_rest_key(history_store::AT_REST_CONTEXT);
-    history_store::load(dir, &key, fluxsyncd_now_ms(), history_store::DEFAULT_TTL_SECS)
-        .map(|v| v.into_iter().map(|e| e.item).collect())
-        .unwrap_or_default()
+    history_store::load(
+        dir,
+        &key,
+        fluxsyncd_now_ms(),
+        history_store::DEFAULT_TTL_SECS,
+    )
+    .map(|v| v.into_iter().map(|e| e.item).collect())
+    .unwrap_or_default()
 }
 
 fn fluxsyncd_now_ms() -> u64 {
@@ -155,10 +167,19 @@ fn security_wipe_clears_history_and_bumps_vault_wipe_gen() {
     {
         let mut app = App::new(Config::default());
         app.restore_history(fav_history("h1"));
-        assert_eq!(app.snapshot().history.len(), 1, "precondition: 1 favorited item");
+        assert_eq!(
+            app.snapshot().history.len(),
+            1,
+            "precondition: 1 favorited item"
+        );
         let gen0 = app.snapshot().vault_wipe_gen;
 
-        app.handle(Event::UntrustedPeerSeen { name: "stranger".into() }, &wall);
+        app.handle(
+            Event::UntrustedPeerSeen {
+                name: "stranger".into(),
+            },
+            &wall,
+        );
 
         assert!(
             app.snapshot().history.is_empty(),
@@ -197,7 +218,10 @@ fn security_wipe_clears_history_and_bumps_vault_wipe_gen() {
         let mut app = App::new(Config::default());
         app.handle(Event::ToggleOn, &wall);
         app.handle(
-            Event::PeerSeen { peer_id: [7u8; 32], name: "DeviceX".into() },
+            Event::PeerSeen {
+                peer_id: [7u8; 32],
+                name: "DeviceX".into(),
+            },
             &wall,
         );
         app.handle(Event::HandshakeTimeout, &wall); // back to Discovering
@@ -206,7 +230,10 @@ fn security_wipe_clears_history_and_bumps_vault_wipe_gen() {
         let gen0 = app.snapshot().vault_wipe_gen;
 
         app.handle(
-            Event::PeerSeen { peer_id: [9u8; 32], name: "DeviceY".into() },
+            Event::PeerSeen {
+                peer_id: [9u8; 32],
+                name: "DeviceY".into(),
+            },
             &wall,
         );
 
@@ -256,7 +283,11 @@ fn security_wipe_clears_history_and_bumps_vault_wipe_gen() {
 #[test]
 fn security_wipe_scopes_to_lost_peer_when_secondary_still_linked() {
     let wall = StubWallClock::new("12:01", fluxsyncd_now_ms());
-    let ask_text = FirewallPolicy { enabled: true, text: Rule::Ask, ..FirewallPolicy::default() };
+    let ask_text = FirewallPolicy {
+        enabled: true,
+        text: Rule::Ask,
+        ..FirewallPolicy::default()
+    };
 
     // ── GhostTimeout while a secondary is still linked: scoped, not global. ──
     {
@@ -264,7 +295,10 @@ fn security_wipe_scopes_to_lost_peer_when_secondary_still_linked() {
         app.set_firewall(ask_text.clone());
         app.handle(Event::ToggleOn, &wall);
         app.handle(
-            Event::PeerSeen { peer_id: [7u8; 32], name: "Ghosting".into() },
+            Event::PeerSeen {
+                peer_id: [7u8; 32],
+                name: "Ghosting".into(),
+            },
             &wall,
         );
         app.handle(Event::HandshakeTimeout, &wall); // back to Discovering, peer_id stays [7;32]
@@ -283,7 +317,11 @@ fn security_wipe_scopes_to_lost_peer_when_secondary_still_linked() {
             },
             &wall,
         );
-        assert_eq!(app.snapshot().pending.len(), 1, "precondition: 1 parked item");
+        assert_eq!(
+            app.snapshot().pending.len(),
+            1,
+            "precondition: 1 parked item"
+        );
         let gen0 = app.snapshot().vault_wipe_gen;
 
         // A confirmed secondary is still linked.
@@ -312,7 +350,10 @@ fn security_wipe_scopes_to_lost_peer_when_secondary_still_linked() {
         app.set_firewall(ask_text);
         app.handle(Event::ToggleOn, &wall);
         app.handle(
-            Event::PeerSeen { peer_id: [7u8; 32], name: "DeviceX".into() },
+            Event::PeerSeen {
+                peer_id: [7u8; 32],
+                name: "DeviceX".into(),
+            },
             &wall,
         );
         app.handle(Event::HandshakeTimeout, &wall); // back to Discovering
@@ -330,13 +371,20 @@ fn security_wipe_scopes_to_lost_peer_when_secondary_still_linked() {
             },
             &wall,
         );
-        assert_eq!(app.snapshot().pending.len(), 1, "precondition: 1 parked item");
+        assert_eq!(
+            app.snapshot().pending.len(),
+            1,
+            "precondition: 1 parked item"
+        );
         let gen0 = app.snapshot().vault_wipe_gen;
 
         // A confirmed secondary is still linked.
         app.set_other_linked_peers([[42u8; 32]]);
         app.handle(
-            Event::PeerSeen { peer_id: [9u8; 32], name: "DeviceY".into() },
+            Event::PeerSeen {
+                peer_id: [9u8; 32],
+                name: "DeviceY".into(),
+            },
             &wall,
         );
 
@@ -417,7 +465,12 @@ async fn favorited_secret_does_not_survive_security_wipe_on_disk() {
 
     let push = ipc_send_recv(
         &ipc_a1,
-        CmdRequest { id: 1, op: CmdOp::Push { text: SECRET.into() } },
+        CmdRequest {
+            id: 1,
+            op: CmdOp::Push {
+                text: SECRET.into(),
+            },
+        },
     )
     .await;
     assert!(push.ok, "push failed: {push:?}");
@@ -445,7 +498,10 @@ async fn favorited_secret_does_not_survive_security_wipe_on_disk() {
         &ipc_a1,
         CmdRequest {
             id: 2,
-            op: CmdOp::SetFavorite { hash: hash.clone(), favorite: true },
+            op: CmdOp::SetFavorite {
+                hash: hash.clone(),
+                favorite: true,
+            },
         },
     )
     .await;
@@ -538,7 +594,10 @@ async fn favorited_secret_does_not_survive_security_wipe_on_disk() {
             .collect::<Vec<_>>()
     );
 
-    assert!(!PANIC_TRIGGERED.load(Ordering::SeqCst), "a panic was captured");
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a panic was captured"
+    );
 
     // FIXED behaviour: the favorited secret must NOT survive the security wipe
     // and must NOT be rehydrated on restart.
@@ -549,7 +608,9 @@ async fn favorited_secret_does_not_survive_security_wipe_on_disk() {
     );
     // Disk is the source of truth for rehydrate — confirm it is still clean.
     assert!(
-        disk_history(&kdir, &id_a).iter().all(|h| h.preview != SECRET),
+        disk_history(&kdir, &id_a)
+            .iter()
+            .all(|h| h.preview != SECRET),
         "C2 REGRESSION: the on-disk vault re-grew the wiped favorite"
     );
 }

@@ -329,9 +329,13 @@ mod tests {
     #[test]
     fn link_local_is_filtered() {
         assert!(is_link_local(&Ipv4Addr::new(169, 254, 1, 2).into()));
-        assert!(is_link_local(&Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).into()));
+        assert!(is_link_local(
+            &Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).into()
+        ));
         assert!(!is_link_local(&Ipv4Addr::new(192, 168, 1, 9).into()));
-        assert!(!is_link_local(&Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 1).into()));
+        assert!(!is_link_local(
+            &Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 1).into()
+        ));
     }
 
     #[tokio::test(start_paused = true)]
