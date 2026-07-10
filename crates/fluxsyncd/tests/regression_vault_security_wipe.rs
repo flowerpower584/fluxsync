@@ -26,7 +26,9 @@
 
 #![cfg(unix)]
 
-use fluxsync_core::{App, Config, Event, HistoryItem, HistorySource, Kind, StubWallClock};
+use fluxsync_core::{
+    App, Config, Event, FirewallPolicy, HistoryItem, HistorySource, Kind, Rule, StubWallClock,
+};
 use fluxsync_crypto::{test_util::pair_for_test, Identity};
 use fluxsyncd::{
     cmd::{CmdData, CmdOp, CmdRequest, CmdResponse},
@@ -135,6 +137,7 @@ fn fav_history(hash: &str) -> Vec<HistoryItem> {
         hash: hash.into(),
         favorite: true,
         resync: false,
+        source_peer_id: None,
     }]
 }
 
@@ -239,6 +242,123 @@ fn security_wipe_clears_history_and_bumps_vault_wipe_gen() {
     }
 
     println!("TEST 1: all 3 security triggers wipe + bump; ManualUnpair control keeps history.");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// TEST 1b (REAL core): when a confirmed SECONDARY peer is still linked at
+// ghost/swap time, the wipe scopes to the lost/swapped peer's own parked
+// items only — history and `vault_wipe_gen` (an unrelated peer's secrets)
+// must survive. Only a ghost/swap that leaves NO peer linked still earns the
+// TEST-1 full wipe. `App::set_other_linked_peers` is the daemon's one
+// synchronous handle into this (see `driver.rs`'s single event-loop choke
+// point) — `App` itself never touches the transport.
+// ───────────────────────────────────────────────────────────────────────────
+#[test]
+fn security_wipe_scopes_to_lost_peer_when_secondary_still_linked() {
+    let wall = StubWallClock::new("12:01", fluxsyncd_now_ms());
+    let ask_text = FirewallPolicy { enabled: true, text: Rule::Ask, ..FirewallPolicy::default() };
+
+    // ── GhostTimeout while a secondary is still linked: scoped, not global. ──
+    {
+        let mut app = App::new(Config::default());
+        app.set_firewall(ask_text.clone());
+        app.handle(Event::ToggleOn, &wall);
+        app.handle(
+            Event::PeerSeen { peer_id: [7u8; 32], name: "Ghosting".into() },
+            &wall,
+        );
+        app.handle(Event::HandshakeTimeout, &wall); // back to Discovering, peer_id stays [7;32]
+        app.restore_history(fav_history("unrelated-secret"));
+        // Park an Ask item tied to the about-to-ghost peer [7;32].
+        app.handle(
+            Event::FrameReceivedClipboard {
+                hash: [9u8; 32],
+                kind: Kind::Text,
+                payload: b"deferred-from-7".to_vec(),
+                preview: "deferred-from-7".into(),
+                sensitive: false,
+                lamport: 1,
+                resync: false,
+                peer_id: [7u8; 32],
+            },
+            &wall,
+        );
+        assert_eq!(app.snapshot().pending.len(), 1, "precondition: 1 parked item");
+        let gen0 = app.snapshot().vault_wipe_gen;
+
+        // A confirmed secondary is still linked.
+        app.set_other_linked_peers([[42u8; 32]]);
+        app.handle(Event::GhostTimeout, &wall);
+
+        assert_eq!(
+            app.snapshot().history.len(),
+            1,
+            "GhostTimeout with a linked secondary must NOT clear history"
+        );
+        assert_eq!(
+            app.snapshot().vault_wipe_gen,
+            gen0,
+            "GhostTimeout with a linked secondary must NOT bump vault_wipe_gen"
+        );
+        assert!(
+            app.snapshot().pending.is_empty(),
+            "the ghosted peer's own parked item must still be dropped"
+        );
+    }
+
+    // ── FS-046 peer-swap while a secondary is still linked: scoped, not global. ──
+    {
+        let mut app = App::new(Config::default());
+        app.set_firewall(ask_text);
+        app.handle(Event::ToggleOn, &wall);
+        app.handle(
+            Event::PeerSeen { peer_id: [7u8; 32], name: "DeviceX".into() },
+            &wall,
+        );
+        app.handle(Event::HandshakeTimeout, &wall); // back to Discovering
+        app.restore_history(fav_history("unrelated-secret"));
+        app.handle(
+            Event::FrameReceivedClipboard {
+                hash: [9u8; 32],
+                kind: Kind::Text,
+                payload: b"deferred-from-7".to_vec(),
+                preview: "deferred-from-7".into(),
+                sensitive: false,
+                lamport: 1,
+                resync: false,
+                peer_id: [7u8; 32],
+            },
+            &wall,
+        );
+        assert_eq!(app.snapshot().pending.len(), 1, "precondition: 1 parked item");
+        let gen0 = app.snapshot().vault_wipe_gen;
+
+        // A confirmed secondary is still linked.
+        app.set_other_linked_peers([[42u8; 32]]);
+        app.handle(
+            Event::PeerSeen { peer_id: [9u8; 32], name: "DeviceY".into() },
+            &wall,
+        );
+
+        assert_eq!(
+            app.snapshot().history.len(),
+            1,
+            "FS-046 peer-swap with a linked secondary must NOT clear history"
+        );
+        assert_eq!(
+            app.snapshot().vault_wipe_gen,
+            gen0,
+            "FS-046 peer-swap with a linked secondary must NOT bump vault_wipe_gen"
+        );
+        assert!(
+            app.snapshot().pending.is_empty(),
+            "the replaced peer's own parked item must still be dropped"
+        );
+    }
+
+    println!(
+        "TEST 1b: GhostTimeout/FS-046-swap scope to the lost peer when a secondary stays linked."
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────────

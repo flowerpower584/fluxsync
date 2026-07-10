@@ -88,6 +88,15 @@ backBtn.addEventListener('click', () => {
   resetState();
   showScreen('entry');
 });
+// DIR-P3-06: `back-btn` is a `<span role="button">`, not a real `<button>`,
+// so it needs its own Enter/Space activation to be keyboard-operable.
+backBtn.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    resetState();
+    showScreen('entry');
+  }
+});
 
 function resetState() {
   if (unlistenPair) { unlistenPair(); unlistenPair = null; }
@@ -98,6 +107,7 @@ function resetState() {
   pinAttempts = 0; // QA #3: never leave the PIN flow permanently locked out.
   verifyLocalConfirmed = false;
   lastSasPhase = 'idle';
+  advancingToVerify = false;
 }
 
 $('done-btn').addEventListener('click', () => {
@@ -129,7 +139,28 @@ async function pairShowWithRetry({ tries = 8, delayMs = 400 } = {}) {
   throw lastErr ?? new Error('pair_show failed after retries');
 }
 
+// Poll `pair_pending` briefly: a fresh pairing writes an entry from the
+// responder's transport_recv path, which races whatever daemon signal
+// (the `pairing-success` event, or `sas_phase`/`pending` on a `state-update`
+// tick) triggered the caller. Shared by `watchForPair`'s flap guard below and
+// the second-device advance path (`maybeAdvanceQrToVerify`) so both agree on
+// what counts as a REAL fresh pair vs. a reconnect bounce.
+async function hasPendingPairEntry(tries = 5, delayMs = 150) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const list = await invoke('fluxsync_pair_pending');
+      if (Array.isArray(list) && list.length > 0) return true;
+    } catch (_) {}
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+  return false;
+}
+
 let unlistenPair = null;
+// Shared between `watchForPair`'s `pairing-success` handler and
+// `maybeAdvanceQrToVerify` (below) so only one of the two possible
+// first-device advance signals ever wins a race — see both call sites.
+let advancingToVerify = false;
 async function watchForPair() {
   if (unlistenPair) { unlistenPair(); unlistenPair = null; }
   let initialPeerName = '';
@@ -142,30 +173,98 @@ async function watchForPair() {
   setTimeout(() => { initialPeerName = ''; }, 3000);
 
   unlistenPair = await listen('pairing-success', async (event) => {
+    // Shares `advancingToVerify` with `maybeAdvanceQrToVerify` (below): for
+    // a FIRST-device pairing both this event and the `sas_phase` signal that
+    // drives that function can fire within the same window (Hello, which
+    // carries the real name this event needs, lands independently of and
+    // often right alongside the SAS stage). Whichever handler's synchronous
+    // prefix runs first claims the flag, so only one ever proceeds to
+    // `enterVerifyScreen`.
+    if (advancingToVerify) return;
     const name = event.payload || 'peer';
     if (name && name !== 'pending' && name === initialPeerName) return;
-    // A reconnect / link flap re-fires this event while the QR is on screen
-    // (a peer on both Wi-Fi and cellular makes peer_name bounce empty→name).
-    // Only a REAL fresh pair leaves a pending SAS entry to verify — confirm
-    // one exists before abandoning the QR. If none surfaces, it's a flap:
-    // do nothing, keep the listener armed, and stay on the current screen so
-    // the QR the user came to show is never swallowed by a false "paired".
-    let hasPending = false;
-    for (let i = 0; i < 5; i++) {
-      try {
-        const list = await invoke('fluxsync_pair_pending');
-        if (Array.isArray(list) && list.length > 0) { hasPending = true; break; }
-      } catch (_) {}
-      await new Promise(r => setTimeout(r, 150));
+    advancingToVerify = true;
+    try {
+      // A reconnect / link flap re-fires this event while the QR is on
+      // screen (a peer on both Wi-Fi and cellular makes peer_name bounce
+      // empty→name). Only a REAL fresh pair leaves a pending SAS entry to
+      // verify — confirm one exists before abandoning the QR. If none
+      // surfaces, it's a flap: do nothing, keep the listener armed, and
+      // stay on the current screen so the QR the user came to show is never
+      // swallowed by a false "paired".
+      const hasPending = await hasPendingPairEntry();
+      if (!hasPending) return;
+      if (unlistenPair) { unlistenPair(); unlistenPair = null; }
+      const displayName = name === 'pending' ? 'your device' : name;
+      // Both QR ('show') and PIN ('enter') must clear the SAS gate: the
+      // daemon drops every clipboard frame until `pair_confirm`, so a direct
+      // jump to "paired" yields a peer that looks linked but never syncs.
+      await enterVerifyScreen(displayName);
+    } finally {
+      advancingToVerify = false;
     }
-    if (!hasPending) return;
-    if (unlistenPair) { unlistenPair(); unlistenPair = null; }
-    const displayName = name === 'pending' ? 'your device' : name;
-    // Both QR ('show') and PIN ('enter') must clear the SAS gate: the
-    // daemon drops every clipboard frame until `pair_confirm`, so a direct
-    // jump to "paired" yields a peer that looks linked but never syncs.
-    await enterVerifyScreen(displayName);
   });
+}
+
+function currentScreenName() {
+  const el = document.querySelector('.screen.active');
+  return el ? el.dataset.screen : null;
+}
+
+// Guarded route into the verify screen, shared by the second-device advance
+// (`maybeAdvanceQrToVerify` below) and the reopen-with-live-SAS path
+// (`watchPairReopened` further down). Only fires when the CURRENT screen is
+// one of `allowedScreens` — callers list the idle/originating screens it may
+// divert; verify/paired (and, for the state-update trigger, the PIN screens)
+// stay excluded so an in-progress or terminal flow is never yanked.
+//
+// Double-fire guard: `advancingToVerify` (declared above, next to
+// `unlistenPair`) is set synchronously (no `await` between the check and
+// the set), so a second trigger arriving while the pending-entry poll below
+// is still in flight hits the early return instead of racing a second
+// `enterVerifyScreen` call. The `allowedScreens` re-check after the poll
+// catches the same thing from the other side (already moved on).
+async function advanceToVerifyGuarded(allowedScreens) {
+  if (advancingToVerify) return;
+  if (!allowedScreens.includes(currentScreenName())) return;
+  advancingToVerify = true;
+  try {
+    // Same flap tolerance as the `pairing-success` handler above: confirm a
+    // pending SAS entry genuinely exists via the RPC (not just the
+    // `sas_phase` string on a snapshot) before abandoning the current
+    // screen — a reconnect of an already-confirmed peer can otherwise
+    // bounce `sas_phase` without a real fresh pair.
+    const hasPending = await hasPendingPairEntry();
+    if (!hasPending) return;
+    if (!allowedScreens.includes(currentScreenName())) return; // moved on while polling
+    if (unlistenPair) { unlistenPair(); unlistenPair = null; }
+    await enterVerifyScreen('your device');
+  } finally {
+    advancingToVerify = false;
+  }
+}
+
+// Second-device flow: pairing an Nth device while a peer is already linked
+// never fires `pairing-success` above (that event only fires on the legacy
+// single-peer `peer_name` field's unpaired->paired transition; an existing
+// primary keeps that field populated, so the transition never happens — see
+// the Rust `pairing-success` emitter). The daemon still reports the fresh
+// pairing on the SAME `state-update` channel: `sas_phase` flips to
+// "showing" (mirrored into `lastSasPhase` by `handleSasPhase`, called just
+// before this on every tick) the instant a peer reaches the SAS stage,
+// first pairing or Nth alike. Drive the advance off that instead.
+//
+// Allowed origins: the QR screen ('show'), plus 'entry' — a symmetric
+// re-verify request (daemon wire msg `PairVerifyStarted`: the peer's side
+// was reset, so its daemon re-created a pending pair and our `sas_phase`
+// flipped to "showing") can land while this window just sits on the entry
+// screen, and the user must be routed to the words. verify/paired/pin
+// screens stay excluded so nothing yanks an in-progress flow.
+async function maybeAdvanceQrToVerify(data) {
+  const phase = data.sas_phase || '';
+  const freshSas = phase === 'showing' || phase === 'peer_confirmed' || phase === 'local_confirmed';
+  if (!freshSas) return;
+  await advanceToVerifyGuarded(['show', 'entry']);
 }
 
 function showPaired(peerName, peerPlatform) {
@@ -198,6 +297,10 @@ function showPaired(peerName, peerPlatform) {
     // stays current no matter which screen is active.
     handleSasPhase(data);
 
+    // Bug A (second-device advance): self-guarded on the QR screen being
+    // active, so this is a no-op on every other screen/tick.
+    maybeAdvanceQrToVerify(data);
+
     const pairedScreen = document.querySelector('.screen[data-screen="paired"]');
     if (!pairedScreen || !pairedScreen.classList.contains('active')) return;
     const peerName = data.peer_name || '';
@@ -213,6 +316,29 @@ function showPaired(peerName, peerPlatform) {
     const better = friendlyPeerName(peerName, peerPlatform);
     const nameEl = $('paired-name');
     if (nameEl && nameEl.textContent !== better) nameEl.textContent = better;
+  });
+})();
+
+// Bug B: this window is hidden, not destroyed, on close (see the Rust
+// `CloseRequested` handler / `open_pair_window`) — its DOM and this
+// module's state persist across re-opens. `open_pair_window` emits
+// "pair-reopened" (window-scoped, only this WebView hears it) every time it
+// re-shows the window, so a stale terminal screen from hours ago (e.g.
+// "Successfully paired", or a hung PIN attempt) doesn't greet the user on
+// the next open. Only reset when there's nothing live to lose: `lastSasPhase`
+// (kept current by `handleSasPhase` above regardless of screen) says whether
+// a SAS round is actually in flight right now.
+(async function watchPairReopened() {
+  await listen('pair-reopened', () => {
+    const liveSas = ['showing', 'peer_confirmed', 'local_confirmed'].includes(lastSasPhase);
+    if (liveSas) {
+      // A SAS round is in flight (e.g. the peer requested re-verification):
+      // land the user on the words instead of a stale or entry screen.
+      advanceToVerifyGuarded(['entry', 'show']);
+      return;
+    }
+    resetState();
+    showScreen('entry');
   });
 })();
 

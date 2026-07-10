@@ -479,6 +479,18 @@ impl Transport {
         self.conn.roaming_history.lock().await.clone()
     }
 
+    /// Like [`Self::roaming_history_snapshot`] but for any peer (primary or
+    /// a FluxMesh `extra` secondary) instead of assuming the primary. Empty
+    /// if `id` has never held a session on this transport this boot (no
+    /// `PeerConn` exists for it yet). Used by the proactive redial tick to
+    /// also retry known-trusted secondaries whose session has gone down.
+    pub async fn roaming_history_snapshot_for(&self, id: [u8; 32]) -> Vec<SocketAddr> {
+        match self.conn_for(id).await {
+            Some(c) => c.roaming_history.lock().await.clone(),
+            None => Vec::new(),
+        }
+    }
+
     #[must_use]
     pub fn last_rx(&self) -> u64 {
         self.conn.last_rx_ms.load(Ordering::Relaxed)
@@ -596,6 +608,20 @@ impl Transport {
             Some(c) => c.session.lock().await.is_some(),
             None => false,
         }
+    }
+
+    /// Noise handshake transcript hash (`h`) of the live session with
+    /// `peer_id`, if any. Identical on both ends of the same handshake, so
+    /// either side can derive the session-binding SAS words from it —
+    /// `verify-restart` uses this to re-open the verify screen on a peer
+    /// that silently reconnected without keeping the handshake-time words.
+    pub async fn session_handshake_hash_for(
+        &self,
+        peer_id: [u8; 32],
+    ) -> Option<[u8; fluxsync_crypto::HANDSHAKE_HASH_LEN]> {
+        let conn = self.conn_for(peer_id).await?;
+        let g = conn.session.lock().await;
+        g.as_ref().map(|s| *s.handshake_hash())
     }
 
     /// Drop only `peer_id`'s session (other peers stay linked).

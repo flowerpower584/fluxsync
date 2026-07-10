@@ -17,7 +17,7 @@
 **Universal clipboard. Local-first. Peer-to-peer. End-to-end encrypted.**
 One Rust daemon, dedicated apps for macOS, Windows, Linux + Android, zero servers.
 
-> **Platform status (v0.6.2):** Android, macOS, Windows and Linux all ship a GUI. macOS = Dock app (Tauri v2, built from source — no signed DMG until an Apple Dev ID is funded). Windows = NSIS tray app (x64 + ARM64). Linux = full Tauri GUI (deb / AppImage) plus a native ksni `StatusNotifierItem` system-tray. Android is the first-class mobile client. The daemon + CLI also build cleanly everywhere for headless use.
+> **Platform status (v0.6.2):** Android, macOS, Windows and Linux all ship a GUI. macOS = menu-bar app, no Dock icon (Tauri v2, built from source — no signed DMG until an Apple Dev ID is funded). Windows = NSIS tray app (x64 + ARM64). Linux = full Tauri GUI (deb / AppImage) plus a native ksni `StatusNotifierItem` system-tray. Android is the first-class mobile client. The daemon + CLI also build cleanly everywhere for headless use.
 
 See [CHANGELOG.md](CHANGELOG.md) for the per-release history.
 
@@ -30,9 +30,9 @@ Prebuilt apps for every platform are on the [**latest release**](https://github.
 ### 📱 Android
 1. Download [**FluxSync-v0.6.2-arm64-v8a.apk**](https://github.com/flowerpower584/fluxsync/releases/download/v0.6.2/FluxSync-v0.6.2-arm64-v8a.apk) (~25 MB, arm64-v8a).
 2. On the device, allow installs from the browser/Files app (Settings → Apps → Special access → Install unknown apps).
-3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access.
+3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access. You'll also be prompted for **Accessibility** permission — it's optional and only used as a fallback clipboard-capture path; see [`docs/WHY-ACCESSIBILITY.md`](docs/WHY-ACCESSIBILITY.md) for exactly what it does and how to disable it.
 
-### 🍎 macOS — Dock app
+### 🍎 macOS — menu-bar app
 Download the DMG for your chip: [`aarch64`](https://github.com/flowerpower584/fluxsync/releases/latest) (Apple Silicon) or [`x64`](https://github.com/flowerpower584/fluxsync/releases/latest) (Intel). It's **unsigned**, so on first launch right-click the app → **Open** (or run `xattr -dr com.apple.quarantine /Applications/FluxSync.app`). Prefer to build it yourself? Needs Rust (`rustup`) + Node.js:
 
 ```sh
@@ -167,6 +167,14 @@ flowchart LR
 
     A_udp <-- "ChaCha20-Poly1305 ciphertext" --> B_udp
 ```
+
+## Documentation
+
+- [Troubleshooting](docs/TROUBLESHOOTING.md) — mDNS discovery failures, router client isolation, Android battery kills, `scrcpy` clipboard conflicts, daemon-offline symptoms.
+- [FAQ](docs/FAQ.md) — why no iOS, why LAN-only, why Accessibility, why sideload instead of Play Store.
+- [Why FluxSync asks for Accessibility (Android)](docs/WHY-ACCESSIBILITY.md) — exactly what the permission is used for and how to turn it off.
+- [Headless Linux](docs/HEADLESS-LINUX.md) — `systemd --user` setup for daemon + optional tray, pairing without a GUI, manual-IP-only setups.
+- [Security policy & threat model](docs/SECURITY.md) — how to report a vulnerability, scope, and known accepted risks.
 
 ## Support
 

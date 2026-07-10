@@ -189,6 +189,16 @@ mod tests {
         assert_eq!(decode(&bytes).unwrap(), f);
     }
 
+    /// verify-restart: the payload-less announcement round-trips like the
+    /// other unit variants (`Bye`/`Revoke`). Guards the append-only ABI
+    /// position too — a reorder would change the CBOR tag and break this.
+    #[test]
+    fn round_trip_pair_verify_started() {
+        let f = frame(Msg::PairVerifyStarted);
+        let bytes = encode(&f).unwrap();
+        assert_eq!(decode(&bytes).unwrap(), f);
+    }
+
     #[test]
     fn round_trip_ack() {
         let f = frame(Msg::Ack(Ack {

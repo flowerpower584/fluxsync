@@ -51,7 +51,7 @@
           <span id="hero-label">INACTIVE</span>
         </div>
       </div>
-      <button class="toggle" id="toggle" aria-label="Toggle sync">
+      <button class="toggle" id="toggle" aria-label="Toggle sync" role="switch" aria-checked="false">
         <span class="knob"></span>
       </button>
     </section>
@@ -130,6 +130,17 @@
 
     <!-- Pairing entry (single-window: shown here when no device is linked) -->
     <section class="pairing-entry" id="pairing-entry" style="display:none">
+      <!-- DIR-P3-12: first-run onboarding. Purely additive: hidden once
+           dismissed (paired or skipped), leaving the plain empty state
+           below untouched for every subsequent unpaired render. -->
+      <div class="onboarding-steps" id="onboarding-steps" style="display:none">
+        <ol class="onboarding-list">
+          <li><span class="ob-num" aria-hidden="true">1</span><span class="ob-text">Install FluxSync on your other device — macOS, Windows, Linux, Android or iPhone.</span></li>
+          <li><span class="ob-num" aria-hidden="true">2</span><span class="ob-text">Scan the QR code or enter the 6-digit PIN shown there.</span></li>
+          <li><span class="ob-num" aria-hidden="true">3</span><span class="ob-text">Compare the 6 verification words on both screens and confirm.</span></li>
+        </ol>
+        <button class="onboarding-skip" id="onboarding-skip" aria-label="Skip the onboarding intro">Skip intro</button>
+      </div>
       <div class="pair-empty-glyph">
         <svg width="76" height="46" viewBox="0 0 72 44" fill="none" stroke="currentColor" stroke-width="1.4">
           <rect x="2" y="7" width="19" height="30" rx="4" />
@@ -140,10 +151,10 @@
           <g class="wave w2"><path d="M25.5 23c4.5-4.5 11-4.5 15.5 0" opacity=".45" /></g>
         </svg>
       </div>
-      <h3>No device linked</h3>
-      <p class="pair-hint">Pair a phone or another computer to sync<br>your clipboard, end-to-end encrypted.</p>
+      <h3 id="pair-empty-title">No device linked</h3>
+      <p class="pair-hint" id="pair-empty-hint">Pair a phone or another computer to sync<br>your clipboard, end-to-end encrypted.</p>
       <button class="pair-cta" id="pair-cta">Pair a device</button>
-      <span class="pair-cta-sub">QR code or 6-digit code · local network only</span>
+      <span class="pair-cta-sub" id="pair-cta-sub">QR code or 6-digit code · local network only</span>
     </section>
 
     <!-- Scrollable lower area: history + firewall stack and scroll as one -->
@@ -156,6 +167,16 @@
             <span class="count" id="recent-count">0 ITEMS</span>
             <button class="history-clear-btn" id="clear-history-btn" title="Clear clipboard history (favorites kept)">Clear</button>
           </span>
+        </div>
+        <div class="history-search-row">
+          <input
+            type="search"
+            id="history-search"
+            class="history-search-input"
+            placeholder="Search history…"
+            aria-label="Search clipboard history"
+            autocomplete="off"
+          />
         </div>
         <div class="history-list" id="recent">
           <!-- History items injected here -->

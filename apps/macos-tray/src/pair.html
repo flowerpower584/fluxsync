@@ -222,7 +222,7 @@
 <div class="app">
 
   <div class="tb" id="tb">
-    <span class="title"><span class="back" id="back-btn">←</span> <span id="tb-title">Pair a device</span></span>
+    <span class="title"><span class="back" id="back-btn" role="button" tabindex="0" aria-label="Back">←</span> <span id="tb-title">Pair a device</span></span>
   </div>
 
   <div class="body">
@@ -279,7 +279,7 @@
 
       <div class="spacer"></div>
       <div class="wait"><span class="pulse"></span><span>Waiting for peer…</span></div>
-      <div id="pair-error" class="err" style="display:none"></div>
+      <div id="pair-error" class="err" style="display:none" role="alert" aria-live="assertive"></div>
       <button class="btn ghost" id="unpair-btn">Unpair all devices</button>
     </div>
 
@@ -288,16 +288,16 @@
       <p class="lede">Type the 6-digit code shown on the other device.</p>
 
       <div class="pin-input" id="pin-input">
-        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
-        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
-        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
-        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
-        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
-        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" aria-label="PIN digit 1 of 6" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" aria-label="PIN digit 2 of 6" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" aria-label="PIN digit 3 of 6" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" aria-label="PIN digit 4 of 6" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" aria-label="PIN digit 5 of 6" />
+        <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" aria-label="PIN digit 6 of 6" />
       </div>
 
       <p class="pin-hint" id="pin-hint">Both devices must be on the same network.</p>
-      <div id="pin-error" class="err" style="display:none"></div>
+      <div id="pin-error" class="err" style="display:none" role="alert" aria-live="assertive"></div>
 
       <div class="spacer"></div>
       <button class="btn primary" id="pin-submit-btn" disabled>Connect</button>
@@ -327,7 +327,7 @@
 
       <p class="verify-hint" id="verify-peer-note" style="display:none">Other device confirmed</p>
 
-      <div id="verify-error" class="err" style="display:none"></div>
+      <div id="verify-error" class="err" style="display:none" role="alert" aria-live="assertive"></div>
       <div class="spacer"></div>
       <div class="verify-actions" id="verify-actions">
         <button class="btn danger" id="verify-reject-btn">Don't match</button>

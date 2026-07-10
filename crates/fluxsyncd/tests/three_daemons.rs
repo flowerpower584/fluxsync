@@ -847,6 +847,158 @@ async fn three_node_center_push_reaches_both_leaves() {
     );
 }
 
+/// Item 4: the proactive redial tick used to retry ONLY the primary
+/// (`Transport::cached_peer_id`) — a known-trusted SECONDARY peer B has
+/// never held a live session with this boot (reachable only via its
+/// persisted `peers.json` `last_addr`) was left stranded forever, with no
+/// mDNS-independent path to ever reach it. Here B boots already linked to A
+/// (primary, via `test_pair`, so B's PRIMARY already has a live session —
+/// the OLD primary-only redial never even looks past it) and separately
+/// trusts C only via a REAL on-disk `peers.json` (`last_addr` = C's real
+/// bound address) with no `test_pairs` entry at all. C is a plain fresh
+/// daemon boot (no `test_pair`/`test_pairs`) that independently trusts B
+/// back, so its handshake responder accepts without needing a pairing
+/// window. Zero mDNS anywhere in this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn secondary_peer_is_proactively_redialed_via_persisted_last_addr() {
+    let _ = tracing_subscriber::fmt::try_init();
+    install_panic_hook();
+
+    // Tie-break (`identity.public_key() >= peer.static_pub`) decides which
+    // side initiates a proactive probe; retry generation until B's key
+    // sorts below C's so B is the side whose redial tick is under test.
+    let (id_b, id_c) = loop {
+        let b = Identity::generate();
+        let c = Identity::generate();
+        if b.public_key() < c.public_key() {
+            break (b, c);
+        }
+    };
+    let id_a = Identity::generate();
+    let (pid_a, pid_b, pid_c) = (id_a.peer_id(), id_b.peer_id(), id_c.peer_id());
+    let (sess_a_b, sess_b_a) = pair_for_test(&id_a, &id_b).expect("pair a-b");
+
+    let (port_a, port_b, port_c) = (
+        pick_free_udp_port().await,
+        pick_free_udp_port().await,
+        pick_free_udp_port().await,
+    );
+    let addr_a: SocketAddr = format!("127.0.0.1:{port_a}").parse().unwrap();
+    let addr_b: SocketAddr = format!("127.0.0.1:{port_b}").parse().unwrap();
+    let addr_c: SocketAddr = format!("127.0.0.1:{port_c}").parse().unwrap();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ipc_a = dir.path().join("a.sock");
+    let ipc_b = dir.path().join("b.sock");
+    let ipc_c = dir.path().join("c.sock");
+    let keystore_b = dir.path().join("keystore-b");
+    let keystore_c = dir.path().join("keystore-c");
+
+    // B's on-disk trust: knows C, with C's real bound address persisted —
+    // exactly the `peers.json` `last_addr` an already-paired mesh would have.
+    fluxsyncd::keystore::save_peers(
+        &keystore_b,
+        &[fluxsyncd::keystore::StoredPeer {
+            peer_id_hex: hex::encode(pid_c),
+            static_pub_hex: hex::encode(id_c.public_key()),
+            name: "node-c".into(),
+            last_addr: Some(addr_c.to_string()),
+        }],
+    )
+    .expect("write B's peers.json");
+    // C's on-disk trust: knows B back (mutual pairing), so C's responder
+    // accepts B's incoming handshake without needing an open pairing window.
+    fluxsyncd::keystore::save_peers(
+        &keystore_c,
+        &[fluxsyncd::keystore::StoredPeer {
+            peer_id_hex: hex::encode(pid_b),
+            static_pub_hex: hex::encode(id_b.public_key()),
+            name: "node-b".into(),
+            last_addr: None,
+        }],
+    )
+    .expect("write C's peers.json");
+
+    let mut cfg_a = base_cfg(id_a, port_a, ipc_a.clone(), "node-a");
+    cfg_a.test_pair = Some(TestPair {
+        session: sess_a_b,
+        peer_addr: addr_b,
+        peer_name: "node-b".into(),
+        peer_id: pid_b,
+    });
+
+    let mut cfg_b = base_cfg(id_b, port_b, ipc_b.clone(), "node-b");
+    cfg_b.test_pair = Some(TestPair {
+        session: sess_b_a,
+        peer_addr: addr_a,
+        peer_name: "node-a".into(),
+        peer_id: pid_a,
+    });
+    // No `test_pairs` for C — B must reach it purely via the redial tick
+    // under test, using the persisted `last_addr` seeded above.
+    cfg_b.keystore_dir = Some(keystore_b);
+
+    // C: a plain fresh boot, no injected session at all. `start_on` mirrors
+    // the real "State-Aware Boot" behaviour a rebooted daemon with existing
+    // `peers.json` entries gets.
+    let mut cfg_c = base_cfg(id_c, port_c, ipc_c.clone(), "node-c");
+    cfg_c.keystore_dir = Some(keystore_c);
+    cfg_c.start_on = true;
+
+    let sd_a = CancellationToken::new();
+    let sd_b = CancellationToken::new();
+    let sd_c = CancellationToken::new();
+    let (ca, cb, cc) = (sd_a.clone(), sd_b.clone(), sd_c.clone());
+    let h_a = tokio::spawn(async move { run(cfg_a, ca).await });
+    let h_b = tokio::spawn(async move { run(cfg_b, cb).await });
+    let h_c = tokio::spawn(async move { run(cfg_c, cc).await });
+
+    // A and B link immediately (test_pair injection).
+    let ab_up = wait_until(Duration::from_secs(2), || async {
+        peer_name(&ipc_a).await.as_deref() == Some("node-b")
+            && peer_name(&ipc_b).await.as_deref() == Some("node-a")
+    })
+    .await;
+    assert!(ab_up, "A/B (test_pair) did not link within 2s");
+
+    // FIXED: B's proactive redial tick must reach C on its own — no mDNS,
+    // no explicit pair command — purely from the persisted `last_addr` in
+    // B's `peers.json`. Generous window: the redial tick's first fire is
+    // deliberately delayed 2s after boot (see `discovery_dispatcher`).
+    let secondary_up = wait_until(Duration::from_secs(6), || async {
+        peer_name(&ipc_c).await.as_deref() == Some("node-b")
+            && mesh_peers(&ipc_b).await == (2, 1)
+    })
+    .await;
+    assert!(
+        secondary_up,
+        "FIXED: B never proactively redialed known-trusted secondary C \
+         (C peer_name={:?}, B mesh_peers={:?})",
+        peer_name(&ipc_c).await,
+        mesh_peers(&ipc_b).await,
+    );
+    assert_eq!(
+        mesh_peers(&ipc_c).await,
+        (1, 1),
+        "C should list only B (primary)"
+    );
+
+    sd_a.cancel();
+    sd_b.cancel();
+    sd_c.cancel();
+    for (h, who) in [(h_a, "A"), (h_b, "B"), (h_c, "C")] {
+        timeout(Duration::from_millis(500), h)
+            .await
+            .unwrap_or_else(|_| panic!("daemon {who} did not shut down in 500ms"))
+            .unwrap_or_else(|_| panic!("daemon {who} task panicked"))
+            .unwrap_or_else(|_| panic!("daemon {who} run() returned Err"));
+    }
+    assert!(
+        !PANIC_TRIGGERED.load(Ordering::SeqCst),
+        "a panic was captured by the test panic hook"
+    );
+}
+
 /// Read `State.firewall.enabled` from the daemon at `ipc`.
 async fn firewall_enabled(ipc: &PathBuf) -> bool {
     let resp = ipc_send_recv(

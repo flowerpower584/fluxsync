@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -9,6 +11,24 @@ val gitSha: String = runCatching {
         commandLine("git", "rev-parse", "--short", "HEAD")
     }.standardOutput.asText.get().trim()
 }.getOrDefault("unknown")
+
+// Release signing (DIR-P4-02). Credentials live in an untracked
+// apps/android/keystore.properties (see keystore/README.md) — never
+// committed. Falls back to debug signing when that file is absent
+// (e.g. a fresh checkout without the owner's keystore) so
+// `assembleRelease` still produces an installable, if debug-signed, APK.
+val keystorePropsFile = rootProject.file("keystore.properties")
+val hasReleaseKeystore = keystorePropsFile.exists()
+val keystoreProps = Properties().apply {
+    if (hasReleaseKeystore) {
+        keystorePropsFile.inputStream().use { load(it) }
+    } else {
+        logger.warn(
+            "apps/android/keystore.properties not found — assembleRelease " +
+                "will fall back to debug signing. See keystore/README.md.",
+        )
+    }
+}
 
 android {
     namespace = "sn.kaolack.fluxsync"
@@ -27,10 +47,23 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            // No R8/minify yet — FFI/JNA under proguard is untested
+            // (explicitly out of scope for DIR-P4-02).
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (hasReleaseKeystore) "release" else "debug")
         }
     }
     compileOptions {

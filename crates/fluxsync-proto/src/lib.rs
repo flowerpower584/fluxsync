@@ -102,9 +102,11 @@ pub fn validate_resync_hashes(hashes: &[String]) -> bool {
 /// the intersection of the peer's caps with this list — see
 /// [`negotiate_caps`]; everything else is ignored (docs/PROTOCOL.md). Ships
 /// with `core-1` (baseline), `resync-1` (resync-on-reconnect, §6.2 of
-/// `docs/PROTOCOL.md`), and `sas-confirm` (wire-level mutual SAS
-/// confirmation via `Msg::PairConfirm`).
-pub const SUPPORTED_CAPS: &[&str] = &["core-1", "resync-1", "sas-confirm"];
+/// `docs/PROTOCOL.md`), `sas-confirm` (wire-level mutual SAS confirmation
+/// via `Msg::PairConfirm`), and `verify-restart` (symmetric SAS re-verify
+/// announcement via `Msg::PairVerifyStarted` when one side re-pairs while
+/// the other silently reconnects as already-trusted).
+pub const SUPPORTED_CAPS: &[&str] = &["core-1", "resync-1", "sas-confirm", "verify-restart"];
 
 /// Negotiate the working capability set with a peer: the intersection of
 /// what they sent in `Hello.caps` and what this build understands
@@ -144,6 +146,11 @@ mod tests {
     #[test]
     fn supported_caps_includes_resync_1() {
         assert!(SUPPORTED_CAPS.contains(&"resync-1"));
+    }
+
+    #[test]
+    fn supported_caps_includes_verify_restart() {
+        assert!(SUPPORTED_CAPS.contains(&"verify-restart"));
     }
 
     /// A well-formed 64-char lowercase-hex `resync-1` hash for test fixtures.

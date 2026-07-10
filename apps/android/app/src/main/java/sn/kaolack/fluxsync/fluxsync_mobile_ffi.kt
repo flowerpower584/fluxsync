@@ -719,7 +719,7 @@ external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_accept(`pt
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_confirm(`ptr`: Long,`peerId`: RustBuffer.ByValue,`accept`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_from_uri(`ptr`: Long,`uri`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
+): Byte
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_pending(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_show(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -888,7 +888,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_confirm() != 53681.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_from_uri() != 26161.toShort()) {
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_from_uri() != 10633.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_pair_pending() != 12529.toShort()) {
@@ -1413,8 +1413,17 @@ public interface FluxsyncHandleInterface {
     /**
      * Trust a peer described by a `fluxsync://pair/...` URI (typically
      * from a scanned QR). `name` is the nickname for the peer.
+     *
+     * Returns `true` when the daemon reports `already_paired`: the
+     * scanned peer was already trusted and it took the silent-reconnect
+     * path (no fresh pending pair, no SAS re-verify). The Kotlin caller
+     * uses this to skip straight to the linked screen instead of routing
+     * to the verify-words screen, whose `pair_pending` poll would come up
+     * empty and strand the pairing flow. Missing/older-daemon responses
+     * (no `data`, or `data` without `already_paired`) default to `false`
+     * so a legacy daemon always falls through to the normal SAS flow.
      */
-    fun `pairFromUri`(`uri`: kotlin.String, `name`: kotlin.String)
+    fun `pairFromUri`(`uri`: kotlin.String, `name`: kotlin.String): kotlin.Boolean
     
     /**
      * FS-052: list TOFU pairs awaiting verbal SAS confirmation. Returns the
@@ -1740,9 +1749,18 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
     /**
      * Trust a peer described by a `fluxsync://pair/...` URI (typically
      * from a scanned QR). `name` is the nickname for the peer.
+     *
+     * Returns `true` when the daemon reports `already_paired`: the
+     * scanned peer was already trusted and it took the silent-reconnect
+     * path (no fresh pending pair, no SAS re-verify). The Kotlin caller
+     * uses this to skip straight to the linked screen instead of routing
+     * to the verify-words screen, whose `pair_pending` poll would come up
+     * empty and strand the pairing flow. Missing/older-daemon responses
+     * (no `data`, or `data` without `already_paired`) default to `false`
+     * so a legacy daemon always falls through to the normal SAS flow.
      */
-    @Throws(FluxException::class)override fun `pairFromUri`(`uri`: kotlin.String, `name`: kotlin.String)
-        = 
+    @Throws(FluxException::class)override fun `pairFromUri`(`uri`: kotlin.String, `name`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
     callWithHandle {
     uniffiRustCallWithError(FluxException) { _status ->
     UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_pair_from_uri(
@@ -1750,7 +1768,8 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
         FfiConverterString.lower(`uri`),FfiConverterString.lower(`name`),_status)
 }
     }
-    
+    )
+    }
     
 
     

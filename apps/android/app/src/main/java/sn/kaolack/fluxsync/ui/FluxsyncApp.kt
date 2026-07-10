@@ -140,19 +140,52 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
         vm.clearTransientError()
     }
 
-    // Auto-advance to the Linked screen when a peer appears. A peer
-    // dropping never triggers navigation — the user keeps their screen.
+    // Auto-advance to the Linked screen when a peer APPEARS — i.e. only on
+    // the no-live-peer → live-peer transition, never as a continuous
+    // enforcement of "linked means LINKED". A user who is already linked
+    // and deliberately opens the pairing dashboard to add another device
+    // (multipeer) must not be bounced back by a snapshot whose peerName was
+    // live all along, nor by a reconnect flap or mesh primary-name switch
+    // (both live→live, no transition). `hadLivePeer == null` (no snapshot
+    // observed yet) counts as "was not live", so the very first snapshot
+    // carrying a live peer still advances if the user is on the dashboard
+    // at that moment. A peer dropping never triggers navigation — the user
+    // keeps their screen.
+    var hadLivePeer by remember { mutableStateOf<Boolean?>(null) }
     androidx.compose.runtime.LaunchedEffect(state?.peerName) {
         val s = state ?: return@LaunchedEffect
-        // Only auto-advance from the dashboard. Never yank the user off the
-        // scan or SAS-verify screens — FS-052 requires an explicit confirm
-        // there, and peerName populates the moment the handshake lands.
+        val hasLivePeer = s.peerName.isNotEmpty()
+        val wasLive = hadLivePeer ?: false
+        hadLivePeer = hasLivePeer
+        if (!hasLivePeer || wasLive) return@LaunchedEffect
+        // Only auto-advance from the dashboard — the sole pairing route
+        // besides scan/verify. Never yank the user off the scan or
+        // SAS-verify screens: FS-052 requires an explicit confirm there,
+        // and peerName populates the moment the handshake lands.
         val route = nav.currentBackStackEntry?.destination?.route
-        if (s.peerName.isNotEmpty() && route == Routes.PAIR_DASHBOARD) {
+        if (route == Routes.PAIR_DASHBOARD) {
             nav.navigate(Routes.LINKED) {
-                popUpTo(Routes.PAIR_DASHBOARD) { inclusive = true }
+                popUpTo(Routes.LINKED) { inclusive = true }
             }
         }
+    }
+
+    // Symmetric re-verify (Msg::PairVerifyStarted, cap "verify-restart") and
+    // responder-side TOFU: the daemon can (re)start a SAS flow while the app
+    // sits anywhere — e.g. on LINKED after an already_paired short-circuit
+    // against a peer that was reset and now announces fresh verify words.
+    // Route to the verify screen so the words actually show. Same FS-052
+    // rule as above: never yank the user OFF the scan/verify screens —
+    // navigating TO verify is the whole point here. Loop safety: the effect
+    // is keyed on the sasPhase *string*, so it restarts exactly once per
+    // phase transition (state snapshots with an unchanged phase do not
+    // re-run it), and the route check makes a re-run while already on
+    // scan/verify a no-op.
+    androidx.compose.runtime.LaunchedEffect(state?.sasPhase) {
+        if (state?.sasPhase != "showing") return@LaunchedEffect
+        val route = nav.currentBackStackEntry?.destination?.route
+        if (route == Routes.PAIR_SCAN || route == Routes.PAIR_VERIFY) return@LaunchedEffect
+        nav.navigate(Routes.PAIR_VERIFY) { launchSingleTop = true }
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -160,7 +193,10 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
         composable(Routes.PAIR_DASHBOARD) {
             PairingDashboardScreen(
                 vm = vm,
-                onBack = { /* Stay here */ },
+                // Backing out of an add-device visit returns to Linked (the
+                // start destination is always underneath). No-op if the
+                // stack has nothing to pop.
+                onBack = { nav.popBackStack() },
                 onScan = { nav.navigate(Routes.PAIR_SCAN) },
                 onSuccess = {
                     maybeOfferBatteryPrompt()
@@ -176,21 +212,37 @@ fun FluxsyncApp(vm: FluxsyncViewModel) {
                 // FS-052: a scan only TOFU-trusts; the SAS verify gate decides
                 // whether clipboard flows. Hand off to the verify screen.
                 onPaired = { nav.navigate(Routes.PAIR_VERIFY) },
+                // The daemon reported `already_paired`: it took a silent
+                // reconnect path with no fresh SAS to verify, so skip the
+                // verify screen entirely and go straight to Linked.
+                onAlreadyPaired = {
+                    nav.navigate(Routes.LINKED) {
+                        popUpTo(Routes.PAIR_DASHBOARD) { inclusive = true }
+                    }
+                },
                 onBack = { nav.popBackStack() },
             )
         }
         composable(Routes.PAIR_VERIFY) {
             PairVerifyScreen(
                 vm = vm,
+                // Both exits anchor popUpTo on LINKED (the start destination,
+                // always at the bottom of the stack) so they produce a clean
+                // back stack from EITHER entry path — the normal
+                // dashboard→scan→verify flow, or the direct LINKED→verify
+                // hop the sasPhase router above takes on a re-verify.
+                // Anchoring on PAIR_DASHBOARD/PAIR_SCAN (as before) was a
+                // no-op popUpTo on the LINKED→verify path and left a stale
+                // verify screen underneath for the back button to find.
                 onConfirmed = {
                     maybeOfferBatteryPrompt()
                     nav.navigate(Routes.LINKED) {
-                        popUpTo(Routes.PAIR_DASHBOARD) { inclusive = true }
+                        popUpTo(Routes.LINKED) { inclusive = true }
                     }
                 },
                 onRejected = {
                     nav.navigate(Routes.PAIR_DASHBOARD) {
-                        popUpTo(Routes.PAIR_SCAN) { inclusive = true }
+                        popUpTo(Routes.LINKED) { inclusive = false }
                     }
                 },
             )

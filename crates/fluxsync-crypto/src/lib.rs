@@ -28,7 +28,7 @@ pub use error::CryptoError;
 pub use fingerprint::{fingerprint, fingerprint_from_handshake_hash, FINGERPRINT_WORDS};
 pub use handshake::{Initiator, Responder};
 pub use identity::{validate_peer_pubkey, Identity};
-pub use session::Session;
+pub use session::{Session, HANDSHAKE_HASH_LEN};
 pub use wordlist::WORDLIST;
 
 /// Noise pattern in use. Changing this is a wire-protocol break.

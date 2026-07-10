@@ -74,6 +74,7 @@ import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 fun PairScanScreen(
     vm: FluxsyncViewModel,
     onPaired: () -> Unit,
+    onAlreadyPaired: () -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -100,7 +101,7 @@ fun PairScanScreen(
         if (!hasPerm) {
             PermissionPrompt(onRequest = { launcher.launch(Manifest.permission.CAMERA) })
         } else {
-            ScannerView(vm = vm, onPaired = onPaired)
+            ScannerView(vm = vm, onPaired = onPaired, onAlreadyPaired = onAlreadyPaired)
         }
     }
 }
@@ -173,7 +174,7 @@ private fun PermissionPrompt(onRequest: () -> Unit) {
 }
 
 @Composable
-private fun ScannerView(vm: FluxsyncViewModel, onPaired: () -> Unit) {
+private fun ScannerView(vm: FluxsyncViewModel, onPaired: () -> Unit, onAlreadyPaired: () -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -228,8 +229,17 @@ private fun ScannerView(vm: FluxsyncViewModel, onPaired: () -> Unit) {
                 processFrame(proxy, scanner) { uri ->
                     detected = true
                     scope.launch {
-                        vm.pairFromUri(uri, "Peer")
-                        onPaired()
+                        // already_paired means the daemon took a silent
+                        // reconnect path — there is no fresh SAS pending
+                        // pair to verify, so the verify screen must not
+                        // be entered (its `pairPending` poll would come up
+                        // empty and strand the user on that gate forever).
+                        val alreadyPaired = vm.pairFromUri(uri, "Peer")
+                        if (alreadyPaired) {
+                            onAlreadyPaired()
+                        } else {
+                            onPaired()
+                        }
                     }
                 }
             }

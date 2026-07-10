@@ -2,7 +2,9 @@ name: release
 
 # Builds the FluxSync desktop app (Tauri) for macOS, Windows and Linux and
 # attaches the bundles to a GitHub Release. Triggered by pushing a vX.Y.Z tag.
-# The release is created as a DRAFT — review the artifacts, then publish.
+# The release is published immediately (not a draft) once all 7 artifacts are
+# built; a final job then generates SHA256SUMS.txt over all of them and
+# uploads it to the same release.
 #
 # The daemon (`fluxsyncd`) ships inside the app as a Tauri sidecar. It is
 # gitignored and staged by `apps/macos-tray/src-tauri/build.rs`, which builds
@@ -85,7 +87,7 @@ jobs:
         working-directory: apps/macos-tray
         run: pnpm install --frozen-lockfile
 
-      - name: Build app + publish to release (draft)
+      - name: Build app + publish to release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -104,7 +106,7 @@ jobs:
             More info → Run anyway (Windows).
 
             See [CHANGELOG.md](https://github.com/flowerpower584/fluxsync/blob/main/CHANGELOG.md) for the full release notes.
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           # No auto-updater wired up — skip the latest.json / .app.tar.gz
           # updater artifacts that otherwise clutter the release.
@@ -145,9 +147,37 @@ jobs:
           cp "$src" "FluxSync-${{ github.ref_name }}-arm64-v8a.apk"
           ls -la FluxSync-*.apk
 
-      - name: Attach APK to release (draft)
+      - name: Attach APK to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          draft: true
+          draft: false
           files: FluxSync-${{ github.ref_name }}-arm64-v8a.apk
+
+  checksums:
+    name: Generate SHA256SUMS
+    needs: [desktop, android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --dir release-assets
+
+      - name: Generate SHA256SUMS.txt
+        working-directory: release-assets
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload SHA256SUMS.txt to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            release-assets/SHA256SUMS.txt \
+            --repo "${{ github.repository }}" \
+            --clobber

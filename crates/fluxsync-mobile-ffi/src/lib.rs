@@ -517,9 +517,19 @@ impl FluxsyncHandle {
 
     /// Trust a peer described by a `fluxsync://pair/...` URI (typically
     /// from a scanned QR). `name` is the nickname for the peer.
+    ///
+    /// Returns `true` when the daemon reports `already_paired`: the
+    /// scanned peer was already trusted and it took the silent-reconnect
+    /// path (no fresh pending pair, no SAS re-verify). The Kotlin caller
+    /// uses this to skip straight to the linked screen instead of routing
+    /// to the verify-words screen, whose `pair_pending` poll would come up
+    /// empty and strand the pairing flow. Missing/older-daemon responses
+    /// (no `data`, or `data` without `already_paired`) default to `false`
+    /// so a legacy daemon always falls through to the normal SAS flow.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn pair_from_uri(&self, uri: String, name: String) -> Result<(), FluxError> {
-        self.runtime
+    pub fn pair_from_uri(&self, uri: String, name: String) -> Result<bool, FluxError> {
+        let resp = self
+            .runtime
             .block_on(send_cmd(
                 &self.ipc_path,
                 serde_json::json!({
@@ -529,8 +539,12 @@ impl FluxsyncHandle {
                     "name": name,
                 }),
             ))
-            .map(|_| ())
-            .map_err(|e| FluxError::Ipc(e.to_string()))
+            .map_err(|e| FluxError::Ipc(e.to_string()))?;
+        Ok(resp
+            .get("data")
+            .and_then(|d| d.get("already_paired"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false))
     }
 
     /// Manually unpair from the current peer and reset the FSM state.

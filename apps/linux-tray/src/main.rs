@@ -157,6 +157,88 @@ fn send(req: &'static str) {
     let _ = ipc(&ipc_path(), req);
 }
 
+/// DIR-P3-11: "Pair device…" entry for this minimal tray. It has no
+/// QR/PIN/verify-words screens of its own (deliberately — "no webkit, no
+/// GTK, no embedded UI", per the module doc comment), so it:
+///   1. Prefers handing off to the full Tauri GUI build if one is
+///      installed — it has the real pairing flow this tray doesn't
+///      reimplement. Best-effort PATH probe only; there is no install
+///      registry to consult, so this covers the common case (a Tauri
+///      `.deb`/AppImage on PATH) and silently falls through otherwise.
+///   2. Otherwise asks the daemon directly for pair info — the exact same
+///      `pair_show` op `fluxctl pair show` and the macOS/Windows tray use
+///      (see `fluxsyncd::cmd::CmdOp::PairShow`) — reusing this file's own
+///      `ipc()` helper rather than shelling out to `fluxctl`, so this
+///      doesn't gain a new "is fluxctl installed?" failure mode.
+///   3. Surfaces the PIN + verification words + URI via a desktop
+///      notification (`notify-send`, present on virtually every
+///      freedesktop desktop) AND stdout — zenity may not be installed,
+///      and stdout is a guaranteed fallback for a tray started from a
+///      terminal with no notification daemon running.
+fn pair_device() {
+    if let Some(gui) = locate_full_gui() {
+        if std::process::Command::new(&gui).spawn().is_ok() {
+            return;
+        }
+    }
+    match ipc(&ipc_path(), r#"{"id":1,"op":"pair_show"}"#) {
+        Some(v) if v.get("ok").and_then(Value::as_bool).unwrap_or(false) => {
+            let d = &v["data"];
+            let pin = d["pin"].as_str().unwrap_or("");
+            let uri = d["uri"].as_str().unwrap_or("");
+            let words: Vec<&str> = d["fingerprint_words"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let mut body = String::new();
+            if !pin.is_empty() {
+                body.push_str(&format!("PIN: {pin}\n"));
+            }
+            if !words.is_empty() {
+                body.push_str(&format!("Words: {}\n", words.join(" ")));
+            }
+            body.push_str(uri);
+            notify("FluxSync — pair this device", &body);
+        }
+        Some(v) => {
+            let err = v["err"].as_str().unwrap_or("unknown error");
+            notify("FluxSync — pairing unavailable", err);
+        }
+        None => notify("FluxSync — pairing unavailable", "daemon unreachable"),
+    }
+}
+
+/// Best-effort lookup of a full FluxSync GUI build on PATH. There is no
+/// registry of Linux install locations for the Tauri build today, so this
+/// only checks a couple of plausible binary names (the Cargo package name
+/// used by a `cargo build`/dev checkout, and a product-name-derived name a
+/// packaged `.deb`/AppImage might install as) — never a hard requirement,
+/// `pair_device` falls back to the daemon-direct path if nothing matches.
+fn locate_full_gui() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for name in ["fluxsync", "fluxsync-macos-tray"] {
+        for dir in std::env::split_paths(&path) {
+            let cand = dir.join(name);
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    None
+}
+
+/// Show a desktop notification via `notify-send`, plus an unconditional
+/// stdout `println!` — the tray must never block its event loop on this,
+/// and a headless/no-notification-daemon session still needs a way to see
+/// the PIN.
+fn notify(title: &str, body: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .arg(title)
+        .arg(body)
+        .spawn();
+    println!("{title}\n{body}");
+}
+
 struct FluxTray {
     snap: Snapshot,
 }
@@ -257,6 +339,12 @@ impl Tray for FluxTray {
             StandardItem {
                 label: "Reconnect".into(),
                 activate: Box::new(|_: &mut FluxTray| send(r#"{"id":1,"op":"reconnect"}"#)),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Pair device…".into(),
+                activate: Box::new(|_: &mut FluxTray| pair_device()),
                 ..Default::default()
             }
             .into(),

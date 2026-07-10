@@ -116,7 +116,6 @@ pub enum CmdOp {
     },
     /// Manually unpair from the current active peer and reset state.
     Unpair {},
-    DebugCapture {},
     Shutdown {},
     /// Force a reconnection by dropping the current session and starting discovery.
     Reconnect {},
@@ -164,9 +163,6 @@ pub enum CmdOp {
     SetSelfBattery {
         level: u8,
         charging: bool,
-    },
-    SetLaunchAtLogin {
-        value: bool,
     },
     /// FS-052: list peers that were auto-trusted under the TOFU window
     /// but have not yet been verbally confirmed by the user. Each entry
@@ -248,6 +244,15 @@ pub enum CmdData {
     PendingPairs(Vec<PendingPairEntry>),
     /// H2: every persisted trusted peer.
     TrustList(Vec<TrustedEntry>),
+    /// Reply to `PairFromUri`/`PairFromPin`. `already_paired` is true when
+    /// the target peer was already in the trusted set with no fresh pending
+    /// entry — the daemon took the silent-reconnect path (no SAS re-verify)
+    /// instead of starting a new pairing flow. `#[serde(default)]` keeps
+    /// this decodable even if a payload of this shape ever omits the key.
+    PairResult {
+        #[serde(default)]
+        already_paired: bool,
+    },
     Pong,
 }
 
@@ -417,5 +422,54 @@ mod tests {
                 other => panic!("expected PushImage, got {other:?}"),
             }
         }
+    }
+
+    /// DIR-P3-09 (fluxctl parity): the exact wire shapes the new `fluxctl
+    /// favorite` / `unpair` / `shutdown` / `pair from-pin` subcommands send
+    /// must decode into the ops they're meant to drive.
+    #[test]
+    fn dir_p3_09_new_fluxctl_subcommand_wire_shapes_decode() {
+        let op: CmdOp = serde_json::from_str(
+            r#"{"op":"set_favorite","hash":"abc123","favorite":true}"#,
+        )
+        .expect("set_favorite must deserialize");
+        match op {
+            CmdOp::SetFavorite { hash, favorite } => {
+                assert_eq!(hash, "abc123");
+                assert!(favorite);
+            }
+            other => panic!("expected SetFavorite, got {other:?}"),
+        }
+
+        let op: CmdOp =
+            serde_json::from_str(r#"{"op":"unpair"}"#).expect("unpair must deserialize");
+        assert!(matches!(op, CmdOp::Unpair {}));
+
+        let op: CmdOp =
+            serde_json::from_str(r#"{"op":"shutdown"}"#).expect("shutdown must deserialize");
+        assert!(matches!(op, CmdOp::Shutdown {}));
+
+        let op: CmdOp = serde_json::from_str(
+            r#"{"op":"pair_from_pin","pin":"123456","name":"Phone"}"#,
+        )
+        .expect("pair_from_pin must deserialize");
+        match op {
+            CmdOp::PairFromPin { pin, name } => {
+                assert_eq!(pin, "123456");
+                assert_eq!(name, "Phone");
+            }
+            other => panic!("expected PairFromPin, got {other:?}"),
+        }
+    }
+
+    /// DIR-P3-04: the removed `debug_capture` op must now be an ordinary
+    /// unknown-tag decode error (handled gracefully by the IPC line parser
+    /// as a `CmdResponse::err`, never a crash) rather than a variant that
+    /// silently does nothing.
+    #[test]
+    fn dir_p3_04_debug_capture_op_no_longer_decodes() {
+        let err = serde_json::from_str::<CmdOp>(r#"{"op":"debug_capture"}"#)
+            .expect_err("debug_capture must no longer be a known op");
+        assert!(err.to_string().to_lowercase().contains("unknown variant"));
     }
 }

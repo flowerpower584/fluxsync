@@ -372,7 +372,19 @@ fn check_identity(no_keychain: bool, strict: bool, platform: &str, identity_file
              from a failed keychain-wipe after migration",
         );
     }
-    Check::new("identity", Level::Info, msg)
+    // DIR-P2-06: surface the same advisory the daemon logs at startup —
+    // the identity secret sits unencrypted on disk in this mode. `Warn`,
+    // not `Fail`: it's an intentional, opt-in escape hatch for headless/
+    // dark-wake boots where the OS keychain is unavailable, not a bug.
+    let level = if no_keychain {
+        msg.push_str(
+            " — unencrypted on disk; intended for headless/dark-wake boots only",
+        );
+        Level::Warn
+    } else {
+        Level::Info
+    };
+    Check::new("identity", level, msg)
 }
 
 // ── 8. version ──────────────────────────────────────────────────────────
@@ -741,6 +753,17 @@ mod tests {
     fn identity_no_stray_note_when_no_keychain_env_set() {
         let c = check_identity(true, false, "linux", true);
         assert!(!c.message.contains("also exists on disk"));
+    }
+
+    /// DIR-P2-06: `fluxctl doctor` must flag `FLUXSYNC_NO_KEYCHAIN=1` as a
+    /// `Warn`, not silently `Info` — the identity secret sits unencrypted
+    /// on disk in this mode.
+    #[test]
+    fn identity_check_warns_when_no_keychain_env_set() {
+        let c = check_identity(true, false, "linux", false);
+        assert_eq!(c.level, Level::Warn);
+        assert!(c.message.contains("unencrypted"));
+        assert!(c.message.contains("headless"));
     }
 
     #[test]

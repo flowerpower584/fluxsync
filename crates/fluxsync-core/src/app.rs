@@ -135,6 +135,15 @@ pub struct App {
     /// to emit the item if the user approves it. The display half lives in
     /// `state.pending`; this half never leaves the daemon.
     pending_payloads: BTreeMap<String, PendingPayload>,
+    /// FluxMesh: ids of confirmed secondary peers (every peer OTHER than the
+    /// primary) currently holding a live session. `App` never touches the
+    /// (async) transport itself, so the daemon refreshes this synchronously
+    /// right before dispatching an event that might trigger a security wipe
+    /// (`GhostTimeout`, the FS-046 peer-swap) — see `App::set_other_linked_peers`.
+    /// Consulted by those two sites to decide whether a lost/swapped primary
+    /// should scope its cleanup to just that peer (other secondaries still
+    /// linked) or wipe globally (it was the only linked peer).
+    other_linked_peers: std::collections::BTreeSet<[u8; 32]>,
 }
 
 impl App {
@@ -153,6 +162,7 @@ impl App {
             seen: SeenSet::default(),
             links: BTreeMap::new(),
             pending_payloads: BTreeMap::new(),
+            other_linked_peers: std::collections::BTreeSet::new(),
         }
     }
 
@@ -400,6 +410,21 @@ impl App {
         dropped_hashes
     }
 
+    /// FluxMesh: replace the live secondary-peer set (see the field's doc).
+    /// The daemon calls this right before dispatching `GhostTimeout` or
+    /// `PeerSeen` so the scoping decision in `App::handle` always sees a
+    /// fresh view without `App` itself reaching into the transport.
+    pub fn set_other_linked_peers(&mut self, peers: impl IntoIterator<Item = [u8; 32]>) {
+        self.other_linked_peers = peers.into_iter().collect();
+    }
+
+    /// True when at least one OTHER (non-primary) peer currently holds a live
+    /// session — i.e. a lost/swapped primary is not this device's only
+    /// linked relationship. See `other_linked_peers`.
+    fn other_peers_linked(&self) -> bool {
+        !self.other_linked_peers.is_empty()
+    }
+
     // ── FluxMesh coordinator API (Phase 1 foundation) ───────────────────
     // Pure, peer-keyed primitives that the daemon adopts in Phase 2. They
     // own only per-peer phase + the mesh seen-set; they never touch the
@@ -560,9 +585,19 @@ impl App {
                     // BurstReplay — the prior peer's secrets.
                     if self.last_paired_peer_id != [0u8; 32] && *peer_id != self.last_paired_peer_id
                     {
-                        self.state.history.clear();
-                        self.drop_pending_all();
-                        self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
+                        // Approved scoping: a swap only needs to forget the
+                        // REPLACED peer's secrets. If other confirmed
+                        // secondaries are still linked, their history/pending
+                        // items are unrelated and must survive — only a
+                        // swap that leaves NO peer linked still earns the
+                        // full wipe (single-peer security story unchanged).
+                        if self.other_peers_linked() {
+                            pending_dropped = self.drop_pending_for(self.last_paired_peer_id);
+                        } else {
+                            self.state.history.clear();
+                            self.drop_pending_all();
+                            self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
+                        }
                     }
                     self.last_paired_peer_id = *peer_id;
                     self.state.peer_id = *peer_id;
@@ -608,6 +643,7 @@ impl App {
                         hash: hex32(hash),
                         favorite: false,
                         resync: false,
+                        source_peer_id: None,
                     });
                 }
             }
@@ -619,6 +655,7 @@ impl App {
                 sensitive,
                 lamport,
                 resync,
+                peer_id,
                 ..
             } => {
                 suppress_resync_apply = *resync;
@@ -689,6 +726,11 @@ impl App {
                             hash: hex32(hash),
                             favorite: false,
                             resync: *resync,
+                            // Multipeer #14: the direct sender of this hop —
+                            // lets the notification path attribute this item
+                            // to the peer that actually sent it instead of
+                            // always naming the legacy single-peer primary.
+                            source_peer_id: Some(hex32(peer_id)),
                         });
                     }
                 }
@@ -759,15 +801,24 @@ impl App {
             Event::GhostTimeout
                 if !matches!(self.phase, Phase::Linked | Phase::Paused | Phase::Halted) =>
             {
+                let lost_peer_id = self.state.peer_id;
                 self.state.peer_name.clear();
                 self.state.peer_platform.clear();
                 self.state.peer_caps.clear();
                 self.state.peer_id = [0u8; 32];
                 self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
-                self.state.history.clear();
-                self.drop_pending_all();
-                self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
+                // Approved scoping (same rationale as the FS-046 swap above):
+                // a ghosted primary only needs its OWN secrets forgotten when
+                // a confirmed secondary is still linked; only a primary that
+                // was the sole linked peer earns the full wipe.
+                if self.other_peers_linked() {
+                    pending_dropped = self.drop_pending_for(lost_peer_id);
+                } else {
+                    self.state.history.clear();
+                    self.drop_pending_all();
+                    self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
+                }
                 self.state.sas_phase = "idle".to_string();
                 self.state.sas_peer = None;
             }
@@ -1180,6 +1231,53 @@ mod tests {
         assert_eq!(app.state.status, Status::Syncing);
         assert_eq!(app.phase, Phase::Linked);
         assert_eq!(app.state.peer_name, "Galaxy S21 Ultra");
+    }
+
+    /// Multipeer #14: `HistoryItem.source_peer_id` must name the item's
+    /// actual direct sender, not the legacy single-peer primary projection
+    /// (`State.peer_id`/`peer_name`) — otherwise a notification path that
+    /// only reads the primary's name misattributes an item a SECONDARY
+    /// mesh peer sent.
+    #[test]
+    fn history_item_source_peer_id_names_the_actual_sender_not_the_primary() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Mac".into(),
+            },
+            &wall(),
+        );
+        app.handle(Event::HandshakeOk, &wall());
+        assert_eq!(app.state.peer_id, [7; 32], "primary is peer 7");
+
+        // A SECONDARY mesh peer (9), not the primary, sends an item.
+        app.handle(
+            Event::FrameReceivedClipboard {
+                peer_id: [9; 32],
+                hash: [3; 32],
+                kind: Kind::Text,
+                payload: b"from secondary".to_vec(),
+                preview: "from secondary".into(),
+                sensitive: false,
+                lamport: 1,
+                resync: false,
+            },
+            &wall(),
+        );
+
+        let item = app.state.history.first().expect("history must have the item");
+        assert_eq!(
+            item.source_peer_id,
+            Some(hex32(&[9u8; 32])),
+            "must name the secondary that actually sent it, not the primary"
+        );
+        assert_ne!(
+            item.source_peer_id,
+            Some(hex32(&app.state.peer_id)),
+            "must not be attributed to the primary peer_id"
+        );
     }
 
     /// FluxMesh robustness slice 2: when the primary link dies but a secondary

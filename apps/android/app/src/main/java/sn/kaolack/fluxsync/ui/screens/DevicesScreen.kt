@@ -8,11 +8,16 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -125,15 +130,22 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
                     batt = d.battery,
                     charging = d.charging,
                     threshold = s.threshold,
-                    // Only the primary link carries metrics + the global
-                    // Disable/Unpair actions. Secondaries get a per-peer
-                    // unpair that revokes just that peer (daemon `revoke`).
+                    // Only the primary link carries metrics + the Disable
+                    // action. Unpair is peer-scoped for every card (daemon
+                    // `revoke`) whenever a peer_id is available — it drops
+                    // only that device, leaving every other paired peer
+                    // linked. The legacy single-peer projection (older
+                    // daemon, no peer_id) falls back to the global op, but
+                    // there is only ever one peer to unpair in that case.
                     metrics = if (d.primary) s.metrics else null,
                     primary = d.primary,
                     peerId = d.peerId,
                     onDisable = { scope.launch { vm.toggle(false) } },
-                    onUnpair = { scope.launch { vm.unpair() } },
-                    onRevoke = { scope.launch { vm.revoke(d.peerId) } }
+                    onUnpair = {
+                        scope.launch {
+                            if (d.peerId.isNotEmpty()) vm.revoke(d.peerId) else vm.unpair()
+                        }
+                    },
                 )
             }
         }
@@ -191,8 +203,8 @@ private fun DeviceItem(
     peerId: String,
     onDisable: () -> Unit,
     onUnpair: () -> Unit,
-    onRevoke: () -> Unit,
 ) {
+    var showUnpairConfirm by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(FsRadius.Item)
     Column(
         Modifier
@@ -230,8 +242,9 @@ private fun DeviceItem(
                 fontSize = 10.sp,
             )
         }
-        // Global Disable/Unpair act on the primary link only — hide them on
-        // secondary mesh peers (no per-peer unpair in the daemon yet).
+        // Disable acts on the primary link only. Unpair is peer-scoped for
+        // every card — it revokes just this device, leaving every other
+        // paired peer linked.
         if (primary) {
             Spacer(Modifier.height(12.dp))
             androidx.compose.material3.HorizontalDivider(thickness = 1.dp, color = FsDarkBorder)
@@ -253,7 +266,7 @@ private fun DeviceItem(
                         .weight(1f)
                         .clip(RoundedCornerShape(8.dp))
                         .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
-                        .clickable { onUnpair() }
+                        .clickable { showUnpairConfirm = true }
                         .padding(vertical = 7.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -272,13 +285,41 @@ private fun DeviceItem(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
                     .border(1.dp, FsDarkBorderStrong, RoundedCornerShape(8.dp))
-                    .clickable { onRevoke() }
+                    .clickable { showUnpairConfirm = true }
                     .padding(vertical = 7.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text("Unpair", color = FsCrit, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
             }
         }
+    }
+
+    if (showUnpairConfirm) {
+        AlertDialog(
+            onDismissRequest = { showUnpairConfirm = false },
+            containerColor = FsDarkSurface,
+            title = { Text("Unpair $name?", color = FsDarkFg) },
+            text = {
+                Text(
+                    "Removes only this device. Other paired devices stay linked. This cannot be undone.",
+                    color = FsDarkMuted,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onUnpair()
+                    showUnpairConfirm = false
+                }) {
+                    Text("UNPAIR", color = FsCrit)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUnpairConfirm = false }) {
+                    Text("CANCEL", color = FsDarkMuted)
+                }
+            },
+        )
     }
 }
 

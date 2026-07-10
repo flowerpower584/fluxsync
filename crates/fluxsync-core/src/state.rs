@@ -247,6 +247,20 @@ pub struct HistoryItem {
     /// apart from items that should be applied to the OS clipboard.
     #[serde(default)]
     pub resync: bool,
+    /// Multipeer #14: hex-encoded id of the peer this item was actually
+    /// received from (`Event::FrameReceivedClipboard.peer_id`) — the direct
+    /// sender of this hop, not necessarily the mesh's original author.
+    /// `None` for a locally-originated item (`HistorySource::Local`) or an
+    /// older daemon build that hadn't stamped one yet. Lets a notification
+    /// path resolve the true sender's name against `State.peers` instead of
+    /// always attributing it to the legacy single-peer `State.peer_name`
+    /// projection (which only ever names the PRIMARY). Local IPC/state/vault
+    /// projection only — never part of the wire protocol. Mirrors
+    /// `PendingItem::peer_id`. `#[serde(default)]` keeps older state/vault
+    /// JSON (pre-this-field) deserializing; clients that don't recognize the
+    /// key ignore it.
+    #[serde(default)]
+    pub source_peer_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

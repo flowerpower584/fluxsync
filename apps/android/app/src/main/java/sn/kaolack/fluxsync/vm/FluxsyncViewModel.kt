@@ -143,10 +143,16 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun setDeviceName(name: String) = ffi("Rename device") { it.setDeviceName(name) }
 
+    /** Global unpair: clears every trusted peer and resets pairing state.
+     *  Only used by the Settings "Unpair all devices" action and as a
+     *  fallback for the legacy single-peer projection (older daemon, no
+     *  peer_id available). Never call this for a per-device card action
+     *  when a peer_id is known — use [revoke] instead. */
     fun unpair() = ffi("Unpair") { it.unpair() }
 
     /** FluxMesh: revoke one specific peer by hex peer-id, leaving every
-     *  other paired device linked. Drives the per-secondary unpair button. */
+     *  other paired device linked. Drives every per-device "Unpair" card
+     *  action (primary and secondary alike) whenever a peer_id is known. */
     fun revoke(peerId: String) = ffi("Unpair") { it.revoke(peerId) }
 
     suspend fun pairShow(): String? = withContext(Dispatchers.IO) {
@@ -163,8 +169,34 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun pairFromUri(uri: String, name: String) =
-        ffi("Pair") { it.pairFromUri(uri, name) }
+    /**
+     * Trust a peer from a scanned `fluxsync://pair/...` URI. Returns
+     * `true` when the daemon reports `already_paired`: the peer was
+     * already trusted and it took the silent-reconnect path (no fresh
+     * pending pair, no SAS re-verify). The caller uses this to route
+     * straight to the linked screen instead of the verify-words screen,
+     * whose `pairPending` poll would come up empty and strand the flow.
+     * Returns `false` both for a normal fresh pair and for an FFI/daemon
+     * failure (reported separately via [transientError]) — either way the
+     * caller falls through to the ordinary verify-words path.
+     */
+    suspend fun pairFromUri(uri: String, name: String): Boolean = withContext(Dispatchers.IO) {
+        val h = getHandle()
+        if (h == null) {
+            FluxsyncManager.reportError("Pair failed: daemon not running")
+            return@withContext false
+        }
+        try {
+            val alreadyPaired = h.pairFromUri(uri, name)
+            if (alreadyPaired) {
+                FluxsyncManager.reportError("Already paired with this device")
+            }
+            alreadyPaired
+        } catch (t: Throwable) {
+            FluxsyncManager.reportError("Pair failed: ${t.message}")
+            false
+        }
+    }
 
     fun pairAccept(pubkeyB32: String, name: String, addr: String = "") =
         ffi("Accept pairing") { it.pairAccept(pubkeyB32, name, addr) }

@@ -75,24 +75,27 @@ fun PairVerifyScreen(
     val daemonState by vm.state.collectAsStateWithLifecycle()
     val sasPhase = daemonState?.sasPhase ?: "idle"
 
-    // Poll pair_pending: run_initiator inserts the entry once the handshake
-    // completes, which races the navigation into this screen.
+    // Poll pair_pending FIRST: run_initiator inserts the entry once the
+    // handshake completes, which races the navigation into this screen. A
+    // fresh pending pair must never be skipped — if we short-circuited on
+    // peerName before this poll, a rescan or a fast-landing handshake could
+    // populate peerName before this screen even mounts, this LaunchedEffect
+    // would bail out immediately, and the pending entry would never get
+    // confirmed. The peer's outbound gate then keeps stripping clipboard
+    // forever and the daemon's 90s reaper eventually revokes the peer.
     LaunchedEffect(Unit) {
-        // At screen entry a FRESH pair's handshake is still in flight, so the
-        // link is NOT up yet — peerName is empty (or "pending"). A real,
-        // non-"pending" peer name HERE means a genuine already-linked reconnect
-        // with nothing to verify: short-circuit ONCE, before polling.
-        val st0 = vm.state.value
-        if (st0 != null && st0.peerName.isNotEmpty() && st0.peerName != "pending") {
-            onConfirmed()
-            return@LaunchedEffect
-        }
-        // Then poll ONLY for the pending SAS entry. The initiator inserts it
-        // just before the link comes up, so the words PULL must NOT be
-        // pre-empted by the always-on peerName PUSH — consulting peerName inside
-        // the loop is exactly the race that used to throw the words away. Give
-        // the entry the full window to surface.
-        repeat(25) {
+        // The words PULL must NOT be pre-empted by the always-on peerName
+        // PUSH — consulting peerName inside the loop is exactly the race
+        // that used to throw the words away. Give the entry the full base
+        // window to surface. Past that window, keep polling for as long as
+        // the daemon signals an active SAS flow ("showing" /
+        // "peer_confirmed" / "local_confirmed"): an active flow means the
+        // pending entry IS coming (e.g. a re-verify where the peer was
+        // reset and the daemon re-creates the pending pair after this
+        // screen mounted) — the flow ending ("idle" via SasReset/reaper,
+        // or "peer_rejected") breaks the wait.
+        var polls = 0
+        while (true) {
             val json = vm.pairPending()
             if (json != null) {
                 val arr = runCatching { JSONArray(json) }.getOrNull()
@@ -105,13 +108,33 @@ fun PairVerifyScreen(
                     return@LaunchedEffect
                 }
             }
+            polls++
+            if (polls >= 25) {
+                val phase = vm.state.value?.sasPhase ?: "idle"
+                val activeFlow = phase == "showing" ||
+                    phase == "peer_confirmed" ||
+                    phase == "local_confirmed"
+                if (!activeFlow) break
+            }
             delay(200)
         }
-        // No SAS entry surfaced in the window. Do NOT navigate to Linked here:
-        // a fresh pair's pending entry always surfaces within this window, so
-        // "nothing surfaced" means the handshake never completed — show the
-        // reject/retry path rather than silently skipping a gate that the
-        // daemon would later reap (which would kill the link).
+        // No SAS entry surfaced and no active flow remains — the loop above
+        // only exits with the SAS machine quiet, so a live pending pair can
+        // no longer be racing us. If the state shows a real, non-"pending"
+        // peer name and the flow didn't just end in a peer rejection (which
+        // the sasPhase effect below turns into a rejection exit), this is a
+        // genuine already-linked reconnect with nothing to verify (e.g. an
+        // older daemon that didn't report `already_paired` on the scan, so
+        // we still landed here) — treat it as confirmed. Otherwise the
+        // handshake never completed: show the reject/retry path rather than
+        // silently skipping a gate that the daemon would later reap (which
+        // would kill the link).
+        val st = vm.state.value
+        val quietPhase = (st?.sasPhase ?: "idle") != "peer_rejected"
+        if (st != null && quietPhase && st.peerName.isNotEmpty() && st.peerName != "pending") {
+            onConfirmed()
+            return@LaunchedEffect
+        }
         failed = true
     }
 

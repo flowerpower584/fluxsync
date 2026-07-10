@@ -227,6 +227,7 @@ mod tests {
                 hash: "00".repeat(32),
                 favorite,
                 resync: false,
+                source_peer_id: None,
             },
             created_ms,
         }

@@ -36,6 +36,44 @@ let syncOn = false;
 let isToggling = false;
 let daemonReachable = true;
 
+// DIR-P3-02(a): last full history snapshot from the daemon + the current
+// search-box value, kept separate so filtering is a pure local re-render
+// (no daemon round-trip) and the raw list survives across filter changes.
+let currentHistory = [];
+let historyFilter = '';
+
+function filterHistory(history) {
+  const q = historyFilter.trim().toLowerCase();
+  if (!q) return history;
+  return history.filter((h) => {
+    const kind = (h.kind || 'text').toLowerCase();
+    if (kind.includes(q)) return true;
+    // Sensitive previews are masked in the UI — never search their real
+    // text (it isn't even sent to the tray unmasked).
+    if (h.sensitive) return false;
+    return (h.preview || '').toLowerCase().includes(q);
+  });
+}
+
+// DIR-P3-12: first-run onboarding is dismissed forever once the user pairs
+// a device, or taps "Skip intro" — persisted so it never resurfaces after
+// a later unpair.
+const ONBOARDING_KEY = 'fs.onboardingDismissed';
+function onboardingDismissed() {
+  try { return localStorage.getItem(ONBOARDING_KEY) === '1'; } catch (_) { return false; }
+}
+function dismissOnboarding() {
+  try { localStorage.setItem(ONBOARDING_KEY, '1'); } catch (_) {}
+  const el = document.getElementById('onboarding-steps');
+  if (el) el.style.display = 'none';
+}
+
+// TOFU placeholder the daemon projects into `peer_name` between handshake
+// completion and the `Msg::Hello` that carries the peer's real device name
+// (see `fluxsyncd::handshake::TOFU_PLACEHOLDER_NAME`). Never a real identity
+// — must not count as "paired" any more than the empty/"pending" cases below.
+const TOFU_PLACEHOLDER = 'New Peer';
+
 // Apply a state snapshot to the DOM. Called both from the safety poll
 // (`refreshState`) and the `state-update` Tauri event listener.
 function applyState(s) {
@@ -43,7 +81,21 @@ function applyState(s) {
   daemonReachable = true;
   if (s) syncOn = !!s.on;
 
-  const isPaired = s && s.peer_name && s.peer_name.trim() !== "" && s.peer_name !== "pending";
+  // Bug C: an unverified SAS pairing must not unlock the main UI. `sas_phase`
+  // is the authoritative "a fresh pairing is in flight" signal — NOT
+  // `s.pending`, which is a different field entirely: the FluxFirewall
+  // Ask-queue (`fluxsync_core::state::PendingItem` — hash/kind/direction/
+  // sensitive/preview, rendered by `renderFirewall` below), unrelated to SAS
+  // pairing. Folding it in here would hide the dashboard (and the firewall
+  // approve/reject buttons themselves) whenever a single linked peer has an
+  // ordinary Ask item queued — a self-inflicted lockout, not a fix.
+  const activeSas = !!s && ['showing', 'peer_confirmed', 'local_confirmed'].includes(s.sas_phase);
+  // Only gate when the unverified pairing is the ONLY connection: with a
+  // second peer already linked (`peers.length >= 2`), the dashboard for the
+  // confirmed primary must keep showing while a second device verifies.
+  const soleUnverified = activeSas && (!s.peers || s.peers.length <= 1);
+  const isPaired = s && s.peer_name && s.peer_name.trim() !== "" && s.peer_name !== "pending" &&
+    s.peer_name !== TOFU_PLACEHOLDER && !soleUnverified;
   // Single-window UX: this menu is the only window. Show the dashboard +
   // history when linked, or an inline "Pair a device" CTA when not — never
   // auto-spawn the separate pair window (that left two windows at launch).
@@ -54,16 +106,50 @@ function applyState(s) {
   if (fwSection) fwSection.style.display = isPaired ? 'block' : 'none';
   document.getElementById('pairing-entry').style.display = isPaired ? 'none' : 'flex';
 
+  // While the only connection is an unverified SAS flow, the empty state
+  // must not read "No device linked" next to the verify window — swap it
+  // for a verification prompt whose CTA lands on the words.
+  const emptyTitle = document.getElementById('pair-empty-title');
+  const emptyHint = document.getElementById('pair-empty-hint');
+  const ctaBtn = document.getElementById('pair-cta');
+  const ctaSub = document.getElementById('pair-cta-sub');
+  if (emptyTitle && emptyHint && ctaBtn && ctaSub) {
+    if (soleUnverified) {
+      emptyTitle.textContent = 'Verification in progress';
+      emptyHint.innerHTML = 'Compare the 6 words shown on both devices,<br>then confirm on each one.';
+      ctaBtn.textContent = 'Show verification words';
+      ctaSub.style.display = 'none';
+    } else {
+      emptyTitle.textContent = 'No device linked';
+      emptyHint.innerHTML = 'Pair a phone or another computer to sync<br>your clipboard, end-to-end encrypted.';
+      ctaBtn.textContent = 'Pair a device';
+      ctaSub.style.display = '';
+    }
+  }
+
+  // DIR-P3-12: onboarding lives at the top of the SAME unpaired empty
+  // state above — never touches the isPaired branching itself. Dismissed
+  // forever the moment a device is paired.
+  if (isPaired) {
+    dismissOnboarding();
+  } else {
+    const ob = document.getElementById('onboarding-steps');
+    if (ob) ob.style.display = soleUnverified ? 'none'
+      : (onboardingDismissed() ? 'none' : 'flex');
+  }
+
   if (isPaired) {
     renderHero(s);
     renderPeer(s);
     renderMesh(s);
     renderSelf(s);
-    renderRecent(s.history || []);
+    currentHistory = s.history || [];
+    renderRecent(filterHistory(currentHistory));
     renderFirewall(s);
     maybePulse(s);
   } else {
     setHero('off', 'NO DEVICE PAIRED');
+    currentHistory = [];
     renderRecent([]);
   }
   renderLink(s, isPaired);
@@ -96,7 +182,9 @@ function setHero(state, label) {
   document.getElementById('hero-label').textContent = label;
 
   const t = document.getElementById('toggle');
-  t.classList.toggle('on', state === 'ok' || state === 'warn');
+  const toggleOn = state === 'ok' || state === 'warn';
+  t.classList.toggle('on', toggleOn);
+  t.setAttribute('aria-checked', String(toggleOn));
 
   const glyph = document.getElementById('brand-glyph');
   const dot = glyph.querySelector('.active-dot');
@@ -419,11 +507,17 @@ async function copyText(text) {
 function renderRecent(history) {
   const list = document.getElementById('recent');
   document.getElementById('recent-count').textContent = `${history.length} items`;
+  // The whole list is rebuilt from scratch on every render (existing
+  // pattern — see the rest of this function). Drop any thumbnail targets
+  // still being watched from the previous render so a row that never
+  // scrolled into view before being replaced doesn't linger in the
+  // observer forever.
+  if (thumbObserver) thumbObserver.disconnect();
   list.innerHTML = '';
   if (!history.length) {
     const empty = document.createElement('div');
     empty.className = 'history-empty';
-    empty.textContent = 'Nothing copied yet.';
+    empty.textContent = historyFilter.trim() ? 'No matching items.' : 'Nothing copied yet.';
     list.append(empty);
     return;
   }
@@ -435,6 +529,12 @@ function renderRecent(history) {
     const ic = document.createElement('span');
     ic.className = 'kind-ic' + (kind === 'image' ? ' thumb' : '');
     ic.innerHTML = KIND_ICONS[kind] || KIND_ICONS.text;
+    // DIR-P3-02(b): lazy thumbnail — swap the glyph for the real image
+    // once (and if) it loads; queued below via IntersectionObserver so
+    // only rows actually scrolled into view ever fetch bytes.
+    if (kind === 'image' && h.hash && !h.sensitive) {
+      ic.dataset.hash = h.hash;
+    }
 
     const p = document.createElement('span');
     if (h.sensitive) {
@@ -468,16 +568,30 @@ function renderRecent(history) {
     fav.className = 'fav' + (h.favorite ? ' on' : '');
     fav.textContent = h.favorite ? '★' : '☆';
     fav.title = h.favorite ? 'Unpin' : 'Pin — keep past history limit';
+    fav.setAttribute('role', 'button');
+    fav.tabIndex = 0;
     fav.setAttribute('aria-label', h.favorite ? 'Unpin' : 'Pin — keep past history limit');
     fav.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleFavorite(h.hash, !h.favorite);
     });
+    // DIR-P3-06: a bare `<span>` with only a click handler is invisible to
+    // keyboard users — give it the same activation Enter/Space give a
+    // real button, without changing its look.
+    fav.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleFavorite(h.hash, !h.favorite);
+      }
+    });
     item.append(fav);
 
     // Text rows carry their full payload in `preview` (only the CSS clips it),
-    // so clicking copies it straight back. Image previews are just a "N KB"
-    // label — the bytes aren't in the snapshot — so those rows aren't copyable.
+    // so clicking copies it straight back. Image rows fetch their bytes
+    // on demand via `fluxsync_fetch_item` (DIR-P3-02(c)) — copyable only
+    // when a hash is present; a fetch failure (bytes not cached) surfaces
+    // as a toast rather than a silent no-op.
     if (kind !== 'image' && h.preview) {
       item.classList.add('copyable');
       item.title = 'Click to copy';
@@ -486,6 +600,14 @@ function renderRecent(history) {
       hint.textContent = 'Copy';
       item.append(hint);
       item.addEventListener('click', () => copyText(h.preview));
+    } else if (kind === 'image' && h.hash) {
+      item.classList.add('copyable');
+      item.title = 'Click to copy';
+      const hint = document.createElement('span');
+      hint.className = 'copy-hint';
+      hint.textContent = 'Copy';
+      item.append(hint);
+      item.addEventListener('click', () => copyImage(h.hash));
     } else {
       item.style.cursor = 'default';
     }
@@ -496,7 +618,70 @@ function renderRecent(history) {
     item.append(t);
 
     list.append(item);
+
+    // Observe only after the icon is in the DOM — IntersectionObserver
+    // never fires for a detached node.
+    if (ic.dataset.hash) getThumbObserver().observe(ic);
   });
+}
+
+// ── DIR-P3-02(b)/(c): on-demand image bytes ─────────────────────────────
+// The daemon only keeps a handful of recent image payloads cached
+// (`IMAGE_CACHE`, capped at 4 server-side), so this cache is naturally tiny
+// — no eviction needed here on top of that.
+const imageBytesCache = new Map(); // hash -> data: URI
+
+async function fetchImageDataUri(hash) {
+  if (imageBytesCache.has(hash)) return imageBytesCache.get(hash);
+  const b64 = await invoke('fluxsync_fetch_item', { hash });
+  const uri = `data:image/png;base64,${b64}`;
+  imageBytesCache.set(hash, uri);
+  return uri;
+}
+
+let thumbObserver = null;
+function getThumbObserver() {
+  if (thumbObserver) return thumbObserver;
+  thumbObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        thumbObserver.unobserve(entry.target);
+        loadThumbnail(entry.target);
+      }
+    },
+    { root: document.getElementById('recent'), threshold: 0.05 }
+  );
+  return thumbObserver;
+}
+
+async function loadThumbnail(iconEl) {
+  const hash = iconEl.dataset.hash;
+  if (!hash) return;
+  try {
+    const uri = await fetchImageDataUri(hash);
+    const img = document.createElement('img');
+    img.className = 'thumb-img';
+    img.alt = '';
+    img.loading = 'lazy';
+    img.src = uri;
+    iconEl.innerHTML = '';
+    iconEl.appendChild(img);
+  } catch (_) {
+    // No bytes cached for this hash (common on desktop today — see the
+    // `fluxsync_fetch_item` doc comment). Leave the placeholder glyph.
+  }
+}
+
+async function copyImage(hash) {
+  try {
+    const uri = await fetchImageDataUri(hash);
+    const blob = await (await fetch(uri)).blob();
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+    showToast('Copied');
+  } catch (_) {
+    showToast('Image unavailable to copy');
+  }
 }
 
 // ── FluxVault favorites ────────────────────────────────────────────────
@@ -576,6 +761,8 @@ function renderFirewall(s) {
   const mToggle = document.createElement('button');
   mToggle.className = 'fw-switch' + (fw.enabled ? ' on' : '');
   mToggle.setAttribute('aria-label', 'Toggle firewall');
+  mToggle.setAttribute('role', 'switch');
+  mToggle.setAttribute('aria-checked', String(!!fw.enabled));
   mToggle.addEventListener('click', () => {
     pushFirewall(Object.assign({}, fw, { enabled: !fw.enabled }));
   });
@@ -693,6 +880,28 @@ function showToast(message) {
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('visible'), 3000);
 }
+
+// DIR-P3-02(a): local, instant substring filter — no daemon round-trip.
+// Esc clears (and blurs, so it doesn't also close a parent shortcut).
+const historySearch = document.getElementById('history-search');
+if (historySearch) {
+  historySearch.addEventListener('input', (e) => {
+    historyFilter = e.target.value;
+    renderRecent(filterHistory(currentHistory));
+  });
+  historySearch.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      historySearch.value = '';
+      historyFilter = '';
+      renderRecent(filterHistory(currentHistory));
+      historySearch.blur();
+    }
+  });
+}
+
+const onboardingSkip = document.getElementById('onboarding-skip');
+if (onboardingSkip) onboardingSkip.addEventListener('click', dismissOnboarding);
 
 const headerSettings = document.getElementById('header-settings');
 if (headerSettings) headerSettings.addEventListener('click', () => invoke('fluxsync_open_settings'));

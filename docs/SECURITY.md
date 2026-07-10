@@ -1,6 +1,86 @@
-# FluxSync — Security & Threat Model (v0.1)
+# FluxSync — Security Policy & Threat Model (v1)
 
 > One sentence: every byte that leaves the device is encrypted with ChaCha20-Poly1305 inside a Noise IK session keyed to a peer the user explicitly paired. There is no fallback to plaintext, ever.
+
+---
+
+## Reporting a vulnerability
+
+**Preferred: GitHub Private Vulnerability Reporting.** Go to this repository's **Security** tab → **Report a vulnerability**. This opens a private advisory visible only to the maintainer, supports attachments, and lets us collaborate on a fix before anything becomes public.
+
+**Fallback:** email **maxleboss261@gmail.com** with `[FluxSync security]` in the subject. There is no PGP key published yet — if you need encrypted email, say so in a first, detail-free message and we'll arrange it, or use the GitHub advisory route instead.
+
+Please do not open a public GitHub issue for a security vulnerability.
+
+Include, if you can: affected version or commit, the component (protocol / daemon / a specific client platform / crypto), reproduction steps or a PoC, and your assessment of impact.
+
+There is no bug-bounty program — this is a solo-maintainer side project with no budget to pay out. You'll be credited in `CHANGELOG.md` if you want; say so if you'd rather stay anonymous.
+
+**Disclosure norm:** please allow 90 days before public disclosure so a fix can ship. If that timeline doesn't fit a specific finding, say so — it's negotiable in good faith, not a hard rule.
+
+---
+
+## Supported versions
+
+Only the latest GitHub release gets security fixes. There are no LTS branches and no backports to older tags.
+
+| Version        | Supported |
+|----------------|-----------|
+| 0.6.2 (latest) | yes       |
+| < 0.6.2        | no — upgrade |
+
+With a small user base and a solo maintainer, "supported" means "the version we'll actually go fix something in," not a formal SLA.
+
+---
+
+## Response expectations
+
+This is a solo-maintainer open-source project — no company, no on-call rotation. Best-effort targets:
+
+- **Acknowledgment**: within 7 days of a report reaching either channel above.
+- **Triage** (confirm or reject, rough severity): within 14 days of acknowledgment.
+- **Fix timeline**: depends on severity and maintainer availability, no fixed SLA. A critical, actively-exploitable issue jumps the queue ahead of everything else.
+
+If you hear nothing after 7 days, follow up — mail delivery and spam filters fail silently sometimes.
+
+---
+
+## Scope
+
+**In scope:**
+- The wire protocol (`fluxsync-proto`, see [`PROTOCOL.md`](./PROTOCOL.md)) — framing, encoding, message handling.
+- The daemon (`fluxsyncd`) — discovery, pairing/TOFU, handshake, transport, IPC, keystore, clipboard capture/injection.
+- The CLI (`fluxctl`).
+- The client apps — macOS/Windows/Linux tray (`apps/macos-tray`), the native Linux ksni tray (`apps/linux-tray`), and Android (`apps/android`).
+- The cryptography (`fluxsync-crypto`) — Noise IK usage, AEAD, identity-key handling, SAS/fingerprint derivation.
+- The supply chain pulled in by the above (see `docs/audits/RUST_DEPENDENCY_AUDIT_*.md` for the last pass).
+
+**Out of scope:**
+- Compromise of the underlying OS keychain/credential store itself (macOS Keychain, Windows Credential Manager, Linux Secret Service). FluxSync trusts the OS to protect what it's handed — see **Known accepted risks** below for exactly what FluxSync does and doesn't add on top of that trust.
+- Physical access to an unlocked, already-authenticated device.
+- Local malware running as the same OS user as FluxSync, for the specific same-UID gaps already disclosed below — these are accepted trust-boundary floors, not bugs, unless you've found a way past a boundary this document claims to hold.
+- Denial of service that requires the attacker to already be a trusted, paired peer — that's a reliability bug, file it as a normal issue instead.
+- Social engineering of the user (e.g. talking someone into accepting a malicious pairing). The pairing UX's job is to make the SAS/QR comparison unambiguous — report it here if you find a way to make that comparison lie, not if a user could theoretically ignore it.
+- The Android `AccessibilityService` doing exactly what it's documented to do — see [`WHY-ACCESSIBILITY.md`](./WHY-ACCESSIBILITY.md). If you find it doing *more* than documented, that's very much in scope.
+
+If you're unsure whether something is in scope, report it anyway — triaging a false positive costs less than missing a real one.
+
+---
+
+## Known accepted risks (as of v0.6.2)
+
+Deliberate trade-offs, not oversights — documented so a report doesn't spend time rediscovering them:
+
+- **Unsigned desktop builds.** macOS builds are not notarized (no Apple Developer ID yet — $99/year, unfunded); Gatekeeper requires right-click → Open on first launch. Windows builds have no EV code-signing certificate, so SmartScreen shows a "Windows protected your PC" warning on first launch. Neither is an integrity failure — the binary is what CI built from this source — but an unsigned-binary warning is exactly what real malware looks like too. Get releases from this repository's GitHub Releases page, not a third-party mirror.
+- **macOS keychain ACL is opt-in, not default.** By default the identity key sits in the macOS Keychain with the OS's normal ACL: any process running as the same user gets a one-time authorization prompt on first read, and if the user clicks "Always Allow," that process has standing access from then on. Setting `FLUXSYNC_STRICT_KEYCHAIN=1` attaches a self-only access-control list, re-asserted on every boot so accumulated "Always Allow" grants get wiped. It isn't the default because the strict ACL pins the exact binary identity — every rebuild of an unsigned/self-built FluxSync is a *different* binary, so strict mode would re-prompt for the keychain password after every update. It becomes the default once builds are Developer ID–signed.
+- **`FLUXSYNC_NO_KEYCHAIN=1` stores the identity key unencrypted on disk.** This is an explicit escape hatch for headless boxes with no OS keychain / no D-Bus session (see [`HEADLESS-LINUX.md`](./HEADLESS-LINUX.md)). Anyone who can read that user's files — backup, forensic recovery, same-user malware — gets the long-term key. Don't set this on a machine you don't fully trust.
+- **Windows Credential Manager and Linux Secret Service have no per-app ACL primitive.** Unlike the macOS strict-mode option above, neither backend lets FluxSync pin trust to its own binary — any process running as the same OS user can read the stored credential with no prompt at all. This is a platform limitation, not something FluxSync chose to skip.
+- **Same-UID local malware is out of the defended threat model everywhere.** This is the same trust floor as `ssh-agent` or `gpg-agent`: any process with debugger privileges on your login session, or one that talks you into a standing permission grant, can extract key material FluxSync is handling. We do not defend below this line — see Scope above.
+- **No post-quantum cryptography.** X25519 and ChaCha20-Poly1305 are not quantum-resistant; a future quantum-capable adversary that recorded today's traffic could decrypt it later ("harvest now, decrypt later"). No mitigation is planned until the underlying `snow` Noise library (or a successor) exposes an audited hybrid suite.
+- **mDNS discovery leaks metadata, not content.** Anyone on the same LAN segment can see that a FluxSync peer exists, its advertised hostname, and its IP. mDNS is reachability only, never authentication — the Noise IK static-key check is the actual trust boundary. If that metadata itself is sensitive on your network, start the daemon with `--disable-mdns` and pair by IP (see [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md)).
+- **No relay / NAT traversal.** FluxSync is LAN-only by design — a privacy property (no server ever sees your traffic), not a gap we're apologizing for. Cross-network sync today means putting both devices on an overlay network yourself (e.g. Tailscale, see the README Quickstart); there is no built-in relay to attack.
+
+The rest of this document is the deeper technical threat model. For the full STRIDE analysis per attack surface, see [`THREAT-MODEL.md`](./THREAT-MODEL.md). **Note on freshness**: that document (and §7 below) were last fully revised against an earlier commit than `HEAD`; recent hardening work (mutual SAS confirmation, an outbox gate, session rekeying, resync-firewall changes — see `CHANGELOG.md`/`git log` for specifics) has landed since and may have closed items the tables below still list as open. Treat status tables as directionally accurate, not a live dashboard — if you find a claim that no longer matches `main`, see "Reporting a status mismatch" at the end of this document.
 
 ---
 
@@ -25,48 +105,49 @@
 - **Goal**: read the user's clipboard.
 - **What they see on the wire**: 12-byte Noise nonce + ChaCha20-Poly1305 ciphertext + 16-byte tag, plus mDNS service advertisements (`_fluxsync._udp.local`, peer name, IP).
 - **Mitigation**: end-to-end encryption is mandatory. There is no plaintext fallback; if a frame arrives with a missing or invalid tag the Session is destroyed and the FSM returns to `Discovering`.
-- **Residual leakage**: traffic-shape metadata (timing, datagram size, peer IP, peer hostname). Out of scope for v0.1; padding and cover traffic are tracked for v0.2.
+- **Residual leakage**: traffic-shape metadata (timing, datagram size, peer IP, peer hostname). Padding and cover traffic are tracked as a future item (see §3).
 
 ### 2.2 Active LAN attacker (MITM, ARP spoof, rogue AP)
 
 - **Goal**: convince A and B that the attacker is the other peer, then forward clipboard items in the clear.
 - **Attack path**: respond to the mDNS query with the attacker's address; complete a Noise handshake using a freshly generated identity.
-- **Mitigation**: Noise IK requires both sides to know the other's static public key **before** the handshake. During `fluxctl pair --qr` the user transports A's static pubkey out-of-band (camera-scanning a QR on B's phone, or pasting the QR's text payload into `fluxctl pair --accept` on a desktop). Both daemons then derive a 6-word fingerprint (BLAKE3 → BIP-39 wordlist subset, ~66 bits of entropy) and refuse to finalize the pairing unless the user types `y` on both sides. After pairing, the only key authorized to handshake is the one that was confirmed.
-- **Why 6 words**: ~66 bits of entropy. Comfortably above the ~50-bit threshold an active LAN attacker would need to brute-force a fingerprint collision in real time, while keeping the verbal compare short enough that a user actually does it. Compared with the 4-word (~44 bit) variant some peers use, the extra two words cost the user ~3 seconds and remove ~22 bits of attacker margin.
+- **Mitigation**: Noise IK requires both sides to know the other's static public key **before** the handshake. During `fluxctl pair --qr` the user transports A's static pubkey out-of-band (camera-scanning a QR on B's phone, or pasting the QR's text payload into `fluxctl pair --accept` on a desktop). Both daemons then derive a 6-word fingerprint (BLAKE3 → BIP-39 wordlist subset, ~66 bits of entropy) and the user compares words on both sides before trusting the pairing. After pairing, the only key authorized to handshake is the one that was confirmed.
+- **Why 6 words**: ~66 bits of entropy, comfortably above the ~50-bit threshold an active LAN attacker would need to brute-force a fingerprint collision in real time, while keeping the verbal compare short enough that a user actually does it.
 
 ### 2.3 Compromised device (lost or stolen phone)
 
 - **Goal**: an attacker with the unlocked phone reads the desktop clipboard.
-- **Mitigation**: from the desktop, run `fluxctl revoke <peer-id>`. This removes the peer's static pubkey from the local keyring. The next handshake from the lost phone is rejected at the Noise layer (the "I" in IK has no matching responder key on our side).
-- **Limitation**: revocation is local. Each device that has paired with the lost phone must run `revoke` independently. No central revocation list in v0.1 (would defeat zero-knowledge).
+- **Mitigation**: from the desktop, run `fluxctl revoke <peer-id>`. This removes the peer's static pubkey from the local keyring. The next handshake from the lost phone is rejected at the Noise layer.
+- **Limitation**: revocation is local. Each device that has paired with the lost phone must run `revoke` independently — there is no central revocation list (would defeat the zero-server design).
 - **Anti-replay**: handshakes use fresh ephemerals; a captured handshake cannot be replayed against a revoked entry because the responder's static key has been deleted.
 
 ### 2.4 Local malware (untrusted process on the same machine)
 
 - **Goal**: extract the long-term identity private key, then impersonate this device on the LAN.
-- **Mitigation**: the private key never appears in a file on disk. It lives in the OS keychain (`keyring` crate, service `fluxsyncd`, account `identity` — see `fluxsyncd::keystore`):
-  - **macOS — default**: classic keychain (`kSecClassGenericPassword`) via `keyring` with the OS default ACL, exactly as before FS-062. The creating binary reads silently; any other process hits the system's keychain authorization prompt on first access, but "Always Allow" grants persist and accumulate on the item — a one-time human click gives that tool standing access.
-  - **macOS — strict ACL, opt-in (FS-062 / DIR-P2-01, `FLUXSYNC_STRICT_KEYCHAIN=1`)**: the item is instead created with an explicit self-only access-control list (`SecAccessCreate` + `SecTrustedApplicationCreateFromPath`, called directly since neither `keyring` nor `security-framework`'s safe wrapper expose that call), and the ACL is re-asserted on every boot via a single atomic `SecItemUpdate` (no window where the item is missing or partially written) — so accumulated "Always Allow" grants are wiped and a pre-existing default-ACL item is tightened in place. **What this stops**: standing same-UID access ever accumulating — including the common exfiltration path of shelling out to `security find-generic-password -s fluxsyncd -w` after a past "Always Allow". **What this does not stop**: a local process with debugger privileges, or one that convinces the user to authorize it again. **Why opt-in and not the default**: the trusted-application entry pins the exact binary identity. fluxsyncd ships unsigned/self-built today, so every rebuild or update is a *different* binary and macOS re-prompts for the keychain password each time — recurring prompt fatigue, which violates the product's "it just works" requirement (and is exactly the failure mode observed in the field). Strict becomes the default once Developer ID signing (DIR-P4-01) lands, because a signature-anchored trusted-application entry survives app updates without re-prompting. **Why not the modern Data Protection Keychain ACL** (`kSecAttrAccessControl` / `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`): it requires the `keychain-access-groups` entitlement, which needs a Developer ID–signed, provisioned binary. Forcing the entitlement on an unsigned build gets the process killed by AMFI before it ever touches the keychain (verified empirically, not a guess). Post-DIR-P4-01, the DPK is the natural upgrade over what's here.
-  - **macOS — switching strict off after using it**: the existing item's ACL stays pinned to the old binary, so the next default-mode boot may prompt once on read. Deny → the daemon exits with the standard actionable keychain error (no prompt loop); Allow → it boots normally. There is no prompt-free way to loosen such an item (modifying the ACL from an untrusted binary is itself an authorized operation), so no automatic loosening is attempted; deleting the `fluxsyncd`/`identity` item in Keychain Access and re-pairing is the manual reset.
-  - **Windows — unchanged, documented residual**: Credential Manager (`CredWriteW`/`CredReadW`, Generic credential), encrypted at rest under the logged-in user's DPAPI master key. **What this stops**: disk/backup-level extraction (the blob is useless without the user's Windows login session). **What this does not stop**: Credential Manager has no per-app ACL layer analogous to macOS Keychain — any process running as the same Windows user can call `CredReadW` for this credential and get it back with no prompt. A second, app-specific DPAPI wrap on top would not meaningfully raise the bar (the entropy would have to live somewhere a same-user process can also reach), so none was added — this is an accepted gap, not an oversight.
-  - **Linux — unchanged, documented residual**: Secret Service (`org.freedesktop.Secret`, via `keyring`'s `secret-service` backend), collection `default`. **What this stops**: disk-level extraction while the session keyring is locked. **What this does not stop**: the Secret Service model grants access per D-Bus session, not per requesting binary; any process with access to the user's session bus can query it, and the desktop keyring daemons FluxSync targets (GNOME Keyring, KWallet) do not offer a way to pin trust to one binary the way macOS does. Headless boxes (e.g. the Arch `systemd --user` bring-up) are expected to run with `FLUXSYNC_NO_KEYCHAIN=1` instead — this change does not touch that escape hatch.
+- **Mitigation**: the private key never appears in a plaintext file on disk by default. It lives in the OS keychain (`keyring` crate, service `fluxsyncd`, account `identity`):
+  - **macOS — default**: classic keychain (`kSecClassGenericPassword`) with the OS default ACL. The creating binary reads silently; any other process hits the system's authorization prompt on first access, but "Always Allow" grants persist and accumulate on the item.
+  - **macOS — strict ACL, opt-in** (`FLUXSYNC_STRICT_KEYCHAIN=1`): the item is created with an explicit self-only access-control list (`SecAccessCreate` + `SecTrustedApplicationCreateFromPath`), re-asserted on every boot via an atomic `SecItemUpdate`. **What this stops**: standing same-UID access accumulating over time. **What this does not stop**: a local process with debugger privileges, or one that convinces the user to authorize it again. **Why opt-in**: the trusted-application entry pins the exact binary; unsigned/self-built binaries change on every rebuild, so strict mode would re-prompt for the keychain password constantly. It becomes the default once Developer ID signing lands.
+  - **Windows — unchanged, documented residual**: Credential Manager (`CredWriteW`/`CredReadW`), encrypted at rest under the logged-in user's DPAPI master key. Stops disk/backup-level extraction. Does not stop another process running as the same Windows user from reading it with no prompt — Credential Manager has no per-app ACL layer analogous to macOS Keychain.
+  - **Linux — unchanged, documented residual**: Secret Service (`org.freedesktop.Secret`) via `keyring`'s `secret-service` backend. Stops disk-level extraction while the session keyring is locked. Does not stop another process on the same D-Bus session from reading it — the Secret Service model grants access per session, not per requesting binary. Headless boxes are expected to run with `FLUXSYNC_NO_KEYCHAIN=1` instead (see [`HEADLESS-LINUX.md`](./HEADLESS-LINUX.md)).
   - **Android**: Keystore, key alias `fluxsync.identity`, hardware-backed when available.
-- **Limitation**: on every platform, a local process running as the same user with debugger privileges, or one that fools the user into a standing "Always allow"/consent grant, can still read the key. macOS in strict mode narrows this (accumulated grants are wiped on every boot); the default mode and Windows/Linux do not, for the platform-specific reasons above. This is the same trust boundary as `ssh-agent` and `gpg-agent` — any tool that hands you cryptographic material on the same UID has this floor. We do not pretend to defend below this line.
-- **Anti-tamper**: the IPC socket's permissions are `0600`; only the user's processes can connect.
+- **Limitation**: on every platform, a local process running as the same user with debugger privileges, or one that fools the user into a standing consent grant, can still read the key. This is the same trust boundary as `ssh-agent`/`gpg-agent` — we do not defend below this line.
+- **Anti-tamper**: the IPC socket's permissions are `0600` (Windows Named Pipe defaults to creator-only); only the user's own processes can connect.
 
-### 2.5 Future relay (out of v0.1 scope, but designed for)
+### 2.5 Future relay (out of current scope, but designed for)
 
 - **Goal**: a relay operator wants to know what users are syncing.
-- **Mitigation when the relay arrives in v0.2**: the relay sees the same opaque ChaCha20 ciphertexts that a passive LAN sniffer would see. It additionally sees `peer_id` source/dest pairs (32-byte hashes that do not commit to the user's identity unless they leak it elsewhere). The relay never holds a key.
-- **No telemetry, no logging of cleartext, no metadata sharing**. This is enforced by code: there is no TLS interceptor, no plaintext code path, no JSON metadata leaving the daemon.
+- **If a relay ships later**: it would see the same opaque ChaCha20 ciphertexts a passive LAN sniffer sees, plus `peer_id` source/dest pairs (32-byte hashes that don't commit to user identity unless leaked elsewhere). The relay would never hold a key.
+- **Today**: there is no relay. No telemetry, no logging of cleartext, no metadata leaving the daemon beyond LAN mDNS and the peer's own IP traffic.
 
 ---
 
-## 3. Out of scope for v0.1
+## 3. Out of scope for the threat model
+
+(Distinct from the vulnerability-reporting **Scope** section above — this is what the design deliberately does not defend against, not what a report should or shouldn't cover.)
 
 - **Root-on-host attacker**: if the OS is owned, every defense is moot. Detect, do not defend.
-- **Side-channels**: timing, power-analysis, EM emissions. We do not have audited constant-time guarantees beyond what `snow` provides.
-- **Quantum-capable adversaries**: X25519 / ChaCha20 are not post-quantum. v2 will rotate to a hybrid suite (X25519 + Kyber768) once `snow` or a successor exposes one.
+- **Side-channels**: timing, power-analysis, EM emissions. There are no audited constant-time guarantees beyond what `snow` provides.
+- **Quantum-capable adversaries**: X25519 / ChaCha20 are not post-quantum (see Known accepted risks above).
 
 ---
 
@@ -74,7 +155,7 @@
 
 | Boundary                           | Trust direction        | Mechanism                  |
 |------------------------------------|------------------------|----------------------------|
-| User ↔ daemon                      | mutual                 | UNIX socket / Named Pipe with `0600` permissions |
+| User ↔ daemon                      | mutual                 | UNIX socket / Named Pipe with `0600`-equivalent permissions |
 | Daemon ↔ peer daemon               | mutual, after pairing  | Noise IK with pre-shared static keys |
 | Daemon ↔ OS keychain               | daemon trusts OS       | `keyring` crate            |
 | Daemon ↔ local clipboard           | daemon trusts OS       | `arboard` crate            |
@@ -82,13 +163,7 @@
 
 ---
 
-## 5. Reporting a vulnerability
-
-Email Dethie at the address in `Cargo.toml`, PGP-encrypted if you have the key (fingerprint published in the README). Please give 90 days before public disclosure. There is no bug-bounty program; this is a side project and we will not pay you, but we will credit you in the changelog if you want.
-
----
-
-## 6. Auditable surface
+## 5. Auditable surface
 
 - All cryptographic calls live under `crates/fluxsync-crypto/src/`. Two files: `identity.rs` (key management) and `session.rs` (Noise + AEAD).
 - All key material crosses the FFI boundary as opaque `[u8]`; the Kotlin side never sees plaintext clipboard either, because the daemon is the one that decrypts and writes to the system clipboard.
@@ -97,45 +172,39 @@ Email Dethie at the address in `Cargo.toml`, PGP-encrypted if you have the key (
 
 ---
 
-## 7. Implementation status (v0.5.x)
+## 6. Implementation status
 
-This document describes the **target** security posture. Some items above are not yet wired in the shipping code. Below is the honest delta between design intent (§1–§6) and what `main` actually does today. Each gap has a tracking ID and a planned milestone.
+This document describes the **target** security posture. Below is the delta between design intent (§1–§5) and what `main` did as of the last full revision of this section. Each gap has a tracking ID and a planned milestone. As flagged above, treat this as a snapshot, not a live dashboard.
 
-### Done
+### Done (as of last revision)
 
-- Noise IK handshake on every session (`fluxsync-crypto::handshake`, daemon `handshake::run_{initiator,responder}`).
-- ChaCha20-Poly1305 AEAD; no plaintext code path; FSM destroys session on tag failure.
-- Pinned static-key auth: responder bails with `trusted peer key mismatch` if the remote `s` does not match the stored pubkey (`handshake.rs:131-135`).
-- 6-word verbal fingerprint derivation (`fluxsync-crypto::fingerprint`, ~60 bits) — **displayed** in `fluxctl pair` output.
-- Peer revocation via `fluxctl revoke <peer-id>` (`fluxctl/main.rs:157`), removes the static pubkey from the local registry.
-- mDNS is discovery-only; daemon ignores broadcasts unless the advertised `peer_id` is already trusted.
-- **FS-058 (v0.6.0)**: per-source-IP handshake rate-limiter (token bucket, capacity 5, refill ~1/6 s, bounded source table 1024). `PendingSet` capped at 64 with inline + background reaper; `TrustedSet` capped at 256 to bound `peers.json` disk growth; chunk-header reassembly map mirrors the chunk-arm cap=5. Together these close the M2/V1/V2 DoS surface flagged in `FluxSync_DIFFERENTIAL_REVIEW_2026-05-23.md` + `FluxSync_VARIANT_ANALYSIS_2026-05-23.md`.
-- **FS-059 (v0.6.0)**: handshake source-IP filter — by default `lan_only_handshakes = true` refuses `HandshakeInit` datagrams from non-local sources (RFC 1918 / loopback / link-local / IPv6 ULA / link-local only).
-- **FS-053 partial (v0.6.0)**: identity `secret_bytes()` / `from_secret_bytes()` now return / accept `Zeroizing<[u8; 32]>`; intermediate file-read buffers in `keystore::load_or_create_identity` and `mobile-ffi` decode path are also wrapped, so secret material on the stack/heap is scrubbed on drop. Keychain migration (replacing `~/.fluxsync/identity.bin`) still pending.
-- **FS-057 (v0.6.0)**: constant-time review of `ReplayWindow` recorded inline in `session.rs`. All branches are driven by the wire nonce (public); tag check is delegated to `snow` → `chacha20poly1305` which uses `subtle::ConstantTimeEq`. No timing channel on key or plaintext.
-- **H1 / M1 (v0.6.0)**: `fingerprint_from_handshake_hash` takes `&[u8; HANDSHAKE_HASH_LEN]` so the length is enforced at the type level; the release-mode silent-empty fallback is gone.
-- **M3 (v0.6.0)**: daemon-level tests for `PairConfirm` accept / reject / unknown-peer / bad-hex (`crates/fluxsyncd/tests/pair_confirm.rs`).
-- **Lock ordering** (FS-058 L2): the responder takes `trusted` first, then `pending`. Nothing in the codebase takes them in the reverse order. Holding `trusted` while touching `pending` is fine; holding `pending` while taking `trusted` would risk a deadlock — do not introduce that direction.
-- **Supply chain** (v0.6.0): `cargo audit` reports 0 vulnerabilities; 2 unmaintained advisories (`bincode 1.3`, `paste 1.0`) come in via `uniffi 0.27` and are tracked for the uniffi 0.28+ bump. `cargo deny check` (advisories + bans + licenses + sources) is green.
-- **FS-062 / DIR-P2-01 (macOS, opt-in)**: strict self-only keychain ACL via raw `SecAccessCreate`/`kSecAttrAccess` (`fluxsyncd::keystore::mac_acl`), enabled with `FLUXSYNC_STRICT_KEYCHAIN=1`. In strict mode, a pre-existing looser-ACL item is tightened in place on the next successful load via a single atomic `SecItemUpdate`, with a readback verification after. **Default OFF**: the trusted-app entry pins the exact binary, so unsigned builds re-prompt after every rebuild — strict becomes the default once Developer ID signing (DIR-P4-01) lands. The default boot path performs exactly the pre-FS-062 `keyring` calls. The legacy-file migration additionally gained an unconditional (prompt-neutral) readback-verify step before wiping `identity.bin`. Windows (Credential Manager) and Linux (Secret Service) have no per-app ACL primitive to attach to; documented as an accepted residual in §2.4 rather than given ceremony that wouldn't raise the real bar. See §2.4 for exactly what is and is not protected per platform and mode.
-- **DIR-P2-05**: a clipboard item marked sensitive (`fluxsync-core::classify` for text, or an explicit `fluxctl push-image --sensitive` / mobile-FFI `sensitive` flag for images, since there is no image-content classifier) still syncs end-to-end but is excluded from history, the on-disk vault, and the resync outbox on both ends — an image captured from the OS clipboard (as opposed to pushed explicitly) is therefore never marked sensitive.
+- Noise IK handshake on every session; ChaCha20-Poly1305 AEAD with no plaintext code path.
+- Pinned static-key auth: responder rejects a remote static key that doesn't match the stored pubkey.
+- 6-word verbal fingerprint derivation, displayed in `fluxctl pair` output.
+- Peer revocation via `fluxctl revoke <peer-id>`.
+- mDNS is discovery-only; the daemon ignores broadcasts unless the advertised `peer_id` is already trusted.
+- Per-source-IP handshake rate-limiting and bounded pending/trusted-set sizes (DoS surface hardening).
+- `lan_only_handshakes` default rejects `HandshakeInit` datagrams from non-local sources.
+- Secret material (`Zeroizing<[u8; 32]>`) scrubbed on drop for the identity key and intermediate decode buffers.
+- Constant-time review of the replay window and AEAD call sites.
+- Long-term identity migrated from a plaintext `identity.bin` to the OS keychain by default (`FLUXSYNC_NO_KEYCHAIN=1` opts back out — see Known accepted risks).
+- macOS strict keychain ACL, opt-in (`FLUXSYNC_STRICT_KEYCHAIN=1`) — see §2.4.
+- `cargo audit` / `cargo deny` clean in CI.
 
-### Pending (security-relevant gaps)
+### Pending / partially landed (security-relevant)
 
-| ID      | Gap                                                                                                                            | Doc claim that overstates reality                          | Target |
-|---------|--------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------|--------|
-| FS-052  | TOFU pairing window (90 s after `CmdOp::PairShow`) auto-accepts the **first** incoming Noise IK and inserts it into the trusted set. **Partial mitigation landed v0.5.x**: every TOFU acceptance is now recorded in a daemon-side `PendingSet` with a 6-word SAS derived from the Noise handshake hash `h` (not the long-term pubkey, FS-056), and surfaced via `fluxctl pair pending`. The user can compare the SAS verbally and run `fluxctl pair confirm <peer-id> --reject` to immediately revoke + tear down the session. **Still pending for v0.6**: a hard gate that blocks `Msg::Item` processing until the user runs `--accept`, so a drive-by attacker that races into the window cannot exfiltrate clipboard data before the user has a chance to compare the SAS. | §2.2 "refuse to finalize unless the user types `y` on both sides" | v0.6 |
-| FS-053  | Long-term X25519 secret is stored in `~/.fluxsync/identity.bin` (mode `0600`), **not** in the OS keychain. No keychain code paths exist yet (`keyring` crate not in `Cargo.toml`). Backup leaks (Time Machine, iCloud, Google Drive), same-user malware, and disk forensics all extract the key trivially. | §1 "stored in OS keychain", §2.4 entire mitigation, §4 boundary table | v0.6 |
-| FS-054  | No Noise rekey policy. A long-lived session reuses the same chaining key until process exit. PFS for past sessions still holds (ephemerals are discarded), but compromising a live session unlocks all of its traffic. | implicit in §1                                              | v0.7 |
-| FS-055  | No signed audit log of pair / revoke / handshake decisions. Cannot detect "device paired without me knowing". | not yet claimed                                            | v0.7 |
-| FS-056  | ✅ **Landed v0.5.x.** The pairing-time SAS exposed by `fluxctl pair pending` is now derived from the Noise handshake hash `h` (`fluxsync_crypto::fingerprint_from_handshake_hash`), not from the long-term pubkey. Each handshake mixes in fresh ephemerals, so a MITM that re-keys against a known pubkey gets different words and the verbal compare detects it. The pubkey-derived fingerprint shown by `fluxctl pair show` is unchanged — it still authenticates the long-term identity carried by the QR. | adjacent to §2.2                                            | done |
+| ID      | Gap                                                                                                                            | Target |
+|---------|--------------------------------------------------------------------------------------------------------------------------------|--------|
+| FS-052  | TOFU pairing window: work has landed hardening the pending-pair gate and mutual SAS confirmation since this table was last revised (see `git log` for `PairConfirm`, `pending gate`, `outbox gate`) — re-verify against current `main` before relying on the exact mechanism described in §2.2. | tracking closed-out in a future doc pass |
+| FS-054  | Noise session rekeying: a time/byte-based rekey policy exists in `fluxsyncd::transport` as of recent commits; the "no rekey" gap this row originally tracked appears addressed — re-verify before citing. | tracking closed-out in a future doc pass |
+| FS-055  | No signed audit log of pair / revoke / handshake decisions. Cannot detect "device paired without me knowing." | open |
+| FS-060  | Windows Named Pipe ACL: confirm it defaults to creator-only and document formally. | open |
+| FS-061  | Padding / cover-traffic policy decision for traffic-shape metadata (§2.1 residual leakage) — not yet decided. | open |
 
 ### Reading guide
 
-If you are auditing FluxSync at `main` today, read §1–§6 as the **2026 roadmap**, and §7 as the **current state**. The drift is tracked; the doc will collapse back into a single source once FS-052 and FS-053 ship.
-
-For the systematic STRIDE breakdown per attack surface (mDNS, pairing, Noise, transport, keystore, IPC), see [`THREAT-MODEL.md`](./THREAT-MODEL.md).
+Read §1–§5 as the intended design. Read §6 as the last known implementation snapshot, already flagged above as potentially behind `HEAD`. For the systematic STRIDE breakdown per attack surface (mDNS, pairing, Noise, transport, keystore, IPC), see [`THREAT-MODEL.md`](./THREAT-MODEL.md) — same freshness caveat applies there.
 
 ### Reporting a status mismatch
 
-If you find another claim in §1–§6 that does not match the code on `main`, please file an issue with the heading `docs: status drift — <section>` and quote the line. We would rather under-promise in the doc than have a reviewer find the next gap on their own.
+If you find a claim in this document that doesn't match the code on `main`, file an issue with the heading `docs: status drift — <section>` and quote the line. We'd rather under-promise here than have someone find the next gap on their own.

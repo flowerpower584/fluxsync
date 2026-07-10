@@ -16,7 +16,7 @@ html, body {
   min-height: 100vh;
 }
 
-/* WebView2 ARM64 ignore `transparent: true` — peindre le fond en dur. */
+/* WebView2 ARM64 ignores `transparent: true` — paint the background solid. */
 body[data-os="windows"] { background: #0C0C0F; }
 body[data-os="windows"][data-theme="light"] { background: #FFFFFF; }
 
@@ -224,7 +224,7 @@ button:focus-visible { outline: 2px solid var(--fs-ok); outline-offset: 2px; }
 }
 .mesh-unpair:hover { color: var(--fs-crit); border-color: rgba(224,99,94,.4); background: var(--fs-crit-soft); }
 
-/* ── Historique ────────────────────────────────────────────────── */
+/* ── History ───────────────────────────────────────────────────── */
 .tray-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .history-section { padding: 0 8px 4px; flex: 0 0 auto; display: flex; flex-direction: column; }
 .firewall-section { flex: 0 0 auto; padding: 0 8px 4px; }
@@ -243,6 +243,23 @@ button:focus-visible { outline: 2px solid var(--fs-ok); outline-offset: 2px; }
   transition: color .15s, border-color .15s, background .15s;
 }
 .history-clear-btn:hover { color: var(--fs-crit); border-color: rgba(224,99,94,.4); background: var(--fs-crit-soft); }
+
+/* DIR-P3-02(a): local substring filter above the history list. */
+.history-search-row { padding: 0 8px 6px; }
+.history-search-input {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--fs-border);
+  background: var(--fs-surface-alt);
+  color: var(--fs-fg);
+  font-family: var(--fs-ui); font-size: 11.5px;
+  outline: none;
+  transition: border-color .15s, background .15s;
+}
+.history-search-input::placeholder { color: var(--fs-subtle); }
+.history-search-input:focus { border-color: var(--fs-border-strong); background: var(--fs-card); }
+
 .history-list { display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
 .history-item {
   display: flex; align-items: center; gap: 10px;
@@ -263,6 +280,12 @@ button:focus-visible { outline: 2px solid var(--fs-ok); outline-offset: 2px; }
   color: var(--fs-muted); flex-shrink: 0;
 }
 .history-item .kind-ic.thumb { background: #34506E; color: #A8C3E2; border-color: transparent; }
+/* DIR-P3-02(b): lazy-loaded image thumbnail, capped small and cropped —
+   replaces the glyph inside the same 26×26 icon slot once fetched. */
+.history-item .kind-ic .thumb-img {
+  width: 100%; height: 100%; max-width: 64px; max-height: 64px;
+  object-fit: cover; border-radius: 6px; display: block;
+}
 .history-item .preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .history-item .preview.masked { color: var(--fs-subtle); letter-spacing: 2.5px; }
 .history-item .lock { color: var(--fs-warn); flex-shrink: 0; display: flex; }
@@ -302,6 +325,26 @@ button:focus-visible { outline: 2px solid var(--fs-ok); outline-offset: 2px; }
   padding: 24px 22px;
   text-align: center;
 }
+/* DIR-P3-12: first-run onboarding, additive content at the top of the
+   existing unpaired empty-state — the empty state itself is unchanged. */
+.onboarding-steps { width: 100%; display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
+.onboarding-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; text-align: left; }
+.onboarding-list li { display: flex; align-items: flex-start; gap: 9px; }
+.onboarding-list .ob-num {
+  flex-shrink: 0; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--fs-ok-soft); color: var(--fs-ok);
+  font-family: var(--fs-mono); font-size: 10px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.onboarding-list .ob-text { font-size: 11.5px; color: var(--fs-muted); line-height: 1.5; padding-top: 1px; }
+.onboarding-skip {
+  align-self: center; background: transparent; border: 0;
+  color: var(--fs-subtle); font-family: var(--fs-ui); font-size: 10.5px; font-weight: 600;
+  cursor: pointer; padding: 2px 6px;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.onboarding-skip:hover { color: var(--fs-fg); }
+
 .pairing-entry .pair-empty-glyph { color: var(--fs-subtle); margin-bottom: 10px; }
 .pairing-entry .pair-empty-glyph .wave { animation: fs-pulse 2.4s ease-in-out infinite; color: var(--fs-ok); }
 .pairing-entry .pair-empty-glyph .wave.w2 { animation-delay: .4s; }

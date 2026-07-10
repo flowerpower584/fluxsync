@@ -138,6 +138,26 @@ async fn fluxsync_clear_history() -> Result<(), String> {
         .map(|_| ())
 }
 
+/// DIR-P3-02(b): fetch a clipboard item's raw bytes (base64) by hex content
+/// hash, for history-list thumbnails and re-copying an image entry. Thin
+/// wrapper over the daemon's `fetch_item` op (`CmdOp::FetchItem` ->
+/// `CmdData::ItemBytes`), backed by `fluxsyncd::driver`'s cross-platform
+/// `IMAGE_CACHE` (populated by the `WriteClipboard` handler on every
+/// target). A sensitive image, an evicted/never-received hash, or one
+/// dropped by a security wipe/history clear all return
+/// `Err("fetch_item: payload not cached")`; the frontend treats that as
+/// "no thumbnail yet" (falls back to the existing icon), not a hard error.
+#[tauri::command]
+async fn fluxsync_fetch_item(hash: String) -> Result<String, String> {
+    ipc::one_shot(json!({"id": 1, "op": "fetch_item", "hash": hash}))
+        .await?
+        .get("data")
+        .and_then(|d| d.get("bytes"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "fetch_item: no bytes in response".to_string())
+}
+
 #[tauri::command]
 fn fluxsync_open_url(url: String) {
     // Defense-in-depth (H-TRAY-01): only ever hand http(s) URLs to the OS
@@ -174,6 +194,22 @@ async fn fluxsync_pair_show() -> Result<Value, String> {
         }
     }
     Ok(data)
+}
+
+/// Hex-encode a `State.peer_id`-shaped JSON value (a 32-element array of
+/// bytes — how serde projects `[u8; 32]`) so it can be compared against a
+/// `HistoryItem.source_peer_id` hex string. Mirrors `app.js`'s `peerIdHex`.
+/// `None` if `v` isn't a 32-element byte array.
+fn peer_id_hex(v: &Value) -> Option<String> {
+    let arr = v.as_array()?;
+    if arr.len() != 32 {
+        return None;
+    }
+    let mut s = String::with_capacity(64);
+    for b in arr {
+        s.push_str(&format!("{:02x}", b.as_u64()? as u8));
+    }
+    Some(s)
 }
 
 fn render_qr_svg(uri: &str) -> Option<String> {
@@ -310,6 +346,7 @@ pub fn run() {
             fluxsync_resolve_pending,
             fluxsync_set_favorite,
             fluxsync_clear_history,
+            fluxsync_fetch_item,
             fluxsync_open_url,
         ])
         .setup(|app| {
@@ -472,14 +509,47 @@ pub fn run() {
                                     eprintln!("[fluxsync-tray] showing notification for remote clipboard change: hash={current_hash} len={}", preview.len());
                                     drop(h_guard);
                                     let kind = first.and_then(|f| f.get("kind")).and_then(|k| k.as_str());
-                                    let peer = if name.is_empty() || name == "pending" || name == "New Peer" {
+                                    // Multipeer #14: `name`/`trusted_peer_name` are the legacy
+                                    // single-peer projection (always the PRIMARY), so on a mesh
+                                    // with a live secondary this used to caption every remote
+                                    // item "Received from <primary>" even when a secondary sent
+                                    // it. `first.source_peer_id` names the item's actual direct
+                                    // sender; resolve it against `State.peers` first and only
+                                    // fall back to the primary-name logic when it's absent (older
+                                    // daemon) or names the primary itself.
+                                    let source_peer_hex = first
+                                        .and_then(|f| f.get("source_peer_id"))
+                                        .and_then(Value::as_str);
+                                    let primary_peer_hex =
+                                        state.get("peer_id").and_then(peer_id_hex);
+                                    let secondary_peer_name = source_peer_hex.filter(|hex| {
+                                        primary_peer_hex.as_deref() != Some(hex)
+                                    }).and_then(|hex| {
                                         state
-                                            .get("trusted_peer_name")
-                                            .and_then(|x| x.as_str())
+                                            .get("peers")
+                                            .and_then(Value::as_array)
+                                            .and_then(|peers| {
+                                                peers.iter().find(|p| {
+                                                    p.get("peer_id")
+                                                        .and_then(peer_id_hex)
+                                                        .as_deref()
+                                                        == Some(hex)
+                                                })
+                                            })
+                                            .and_then(|p| p.get("name"))
+                                            .and_then(Value::as_str)
                                             .filter(|s| !s.is_empty())
-                                    } else {
-                                        Some(name.as_str())
-                                    };
+                                    });
+                                    let peer = secondary_peer_name.or_else(|| {
+                                        if name.is_empty() || name == "pending" || name == "New Peer" {
+                                            state
+                                                .get("trusted_peer_name")
+                                                .and_then(|x| x.as_str())
+                                                .filter(|s| !s.is_empty())
+                                        } else {
+                                            Some(name.as_str())
+                                        }
+                                    });
                                     let body = match (kind, peer) {
                                         (Some(kind), Some(peer)) => {
                                             let noun = match kind {
@@ -726,6 +796,14 @@ fn open_pair_window(app: &tauri::AppHandle) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        // Bug B: this window is hidden, not destroyed, on close, so its DOM
+        // and pair.js module state (e.g. a terminal "paired" screen from a
+        // prior session) survive across re-opens. `WebviewWindow::emit`
+        // (unlike `AppHandle::emit`) targets only this window, so it can't
+        // be mistaken for a broadcast the menu/settings windows also need to
+        // handle. pair.js decides whether to actually reset — it must not
+        // clobber a SAS verification the user is mid-flow on.
+        let _ = w.emit("pair-reopened", ());
     }
 }
 

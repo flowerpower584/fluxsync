@@ -191,18 +191,26 @@ pub fn load_or_create_identity(dir: &Path) -> Result<Identity> {
         let path = dir.join(IDENTITY_FILE);
         if path.exists() {
             let id = read_legacy_identity(&path)?;
+            // DIR-P2-06: one clear warning at startup, not spam — exactly
+            // one of this arm or the sibling below fires per boot.
             tracing::warn!(
                 path = %path.display(),
-                "FLUXSYNC_NO_KEYCHAIN set: loaded identity from plaintext file (keychain bypassed)"
+                "FLUXSYNC_NO_KEYCHAIN=1: identity loaded from an UNENCRYPTED file on disk \
+                 (OS keychain bypassed). Intended for headless/dark-wake boots where the \
+                 keychain is unavailable — do not use on a normal interactive desktop."
             );
             return Ok(id);
         }
         let id = Identity::generate();
         let secret = id.secret_bytes();
         write_secret_atomic(&path, &secret)?;
+        // DIR-P2-06: sibling of the warning above (generate-path instead of
+        // load-path) — still exactly one warning per boot.
         tracing::warn!(
             path = %path.display(),
-            "FLUXSYNC_NO_KEYCHAIN set: generated identity in plaintext file (keychain bypassed)"
+            "FLUXSYNC_NO_KEYCHAIN=1: identity generated and stored in an UNENCRYPTED file on \
+             disk (OS keychain bypassed). Intended for headless/dark-wake boots where the \
+             keychain is unavailable — do not use on a normal interactive desktop."
         );
         return Ok(id);
     }

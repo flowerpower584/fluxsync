@@ -45,9 +45,21 @@ fun PairingDashboardScreen(
     var mode by remember { mutableStateOf(PairMode.SHOW) }
     var showSuccess by remember { mutableStateOf(false) }
 
-    // Auto-advance on success (Mac-inspired)
+    // Whether a peer was ALREADY linked when this screen opened. In that
+    // case the user came here deliberately to add another device
+    // (multipeer), and the auto-success below must stay quiet — with a
+    // live peerName at mount, LaunchedEffect's first run would otherwise
+    // fire the success state immediately and bounce the user back to
+    // Linked before they could show or scan a QR. A NEW device pairing
+    // from here is driven by the SAS flow instead (sasPhase "showing"
+    // routes to the verify screen at the app level).
+    val linkedAtEntry = remember { peerName.isNotEmpty() }
+
+    // Auto-advance on success (Mac-inspired) — first onboarding only:
+    // fires when a peer appears while the screen is open and none existed
+    // at entry.
     LaunchedEffect(peerName) {
-        if (peerName.isNotEmpty()) {
+        if (!linkedAtEntry && peerName.isNotEmpty()) {
             showSuccess = true
             delay(2000)
             onSuccess()

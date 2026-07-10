@@ -1,0 +1,11 @@
+# Release signing credentials — DIR-P4-02. NEVER commit these.
+# Losing the keystore file (or forgetting the passwords in
+# keystore.properties) means the release cert can never be reproduced:
+# every future release must be signed with the SAME key as the last
+# Play/sideload release, or Android refuses the upgrade and every user
+# has to uninstall + reinstall (data loss). Back up keystore/ and
+# keystore.properties off-disk (password manager + offline copy)
+# immediately after generating them. See keystore/README.md.
+keystore/*.keystore
+keystore/*.jks
+/keystore.properties

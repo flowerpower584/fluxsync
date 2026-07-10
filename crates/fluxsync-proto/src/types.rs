@@ -65,11 +65,22 @@ pub enum Msg {
     /// local 90s pairing-window clock. `accept = false` doubles as an
     /// explicit rejection: the receiver revokes the sender from its
     /// trusted set and tears down the session, mirroring a local reject.
+    PairConfirm(PairConfirm),
+    /// `verify-restart` capability: sent by a responder that just accepted
+    /// the sender via a fresh TOFU (it holds a `PendingPair` and is showing
+    /// 6 SAS words) to a peer that reconnected SILENTLY because it already
+    /// trusted us — e.g. we were reset/revoked and it rescanned our QR.
+    /// Without this, only the responder's human sees words and the verbal
+    /// compare is theater. The receiver, if it trusts the sender and has no
+    /// pending/live SAS flow for it, derives the same 6 words from the
+    /// shared Noise handshake hash and re-opens its own verify screen.
+    /// Carries no payload: everything needed (the transcript hash) is
+    /// already held by both ends of the authenticated session.
     ///
     /// Deliberately the LAST variant of `Msg`: new variants are always
     /// appended, never inserted, so discriminant order stays stable for
     /// any positional (non-name-tagged) codec this protocol might carry.
-    PairConfirm(PairConfirm),
+    PairVerifyStarted,
 }
 
 /// Payload for [`Msg::PairConfirm`]. See its doc comment.

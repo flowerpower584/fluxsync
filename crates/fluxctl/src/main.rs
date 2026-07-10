@@ -74,8 +74,25 @@ enum Cmd {
     Revoke { peer_id: String },
     /// Force a reconnection by dropping the current session and starting discovery.
     Reconnect,
-    /// Generate a debug capture bundle (stub).
-    DebugCapture,
+    /// Pin (or unpin) a history item as a favorite, by its hex content hash
+    /// (from `status`/history). Favorites are exempt from the vault's TTL
+    /// and disk cap.
+    Favorite {
+        /// Hex content hash (from `status`/history).
+        hash: String,
+        /// Unpin instead of pinning.
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Drop EVERY trusted peer and reset local state. Global — unlike
+    /// `revoke`, which targets one peer-id, this clears the whole trust
+    /// store. Requires `--yes` to confirm.
+    Unpair {
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Cleanly stop the daemon process.
+    Shutdown,
     /// Pair flow.
     Pair {
         #[command(subcommand)]
@@ -197,6 +214,16 @@ enum PairSub {
     FromUri {
         #[arg(long)]
         uri: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Trust a peer by the 6-digit PIN its `pair show` advertises over
+    /// mDNS. The daemon matches it against the live discovery cache and
+    /// pairs like `pair from-uri`. A verify-words confirm (`pair pending`
+    /// + `pair confirm`) is mandatory afterwards.
+    FromPin {
+        #[arg(long)]
+        pin: String,
         #[arg(long)]
         name: String,
     },
@@ -333,9 +360,31 @@ async fn main() -> Result<()> {
             one_shot(&ipc_path, json!({"id": 1, "op": "reconnect"})).await?,
             Kind::Ack("reconnect requested"),
         ),
-        Cmd::DebugCapture => (
-            one_shot(&ipc_path, json!({"id": 1, "op": "debug_capture"})).await?,
-            Kind::Ack("debug capture written"),
+        Cmd::Favorite { hash, remove } => {
+            let favorite = !remove;
+            (
+                one_shot(
+                    &ipc_path,
+                    json!({"id": 1, "op": "set_favorite", "hash": hash, "favorite": favorite}),
+                )
+                .await?,
+                Kind::Ack(if favorite { "favorited" } else { "unfavorited" }),
+            )
+        }
+        Cmd::Unpair { yes } => {
+            if !yes {
+                return Err(anyhow!(
+                    "this drops EVERY trusted peer; pass --yes to confirm"
+                ));
+            }
+            (
+                one_shot(&ipc_path, json!({"id": 1, "op": "unpair"})).await?,
+                Kind::Ack("unpaired (all trusted peers dropped)"),
+            )
+        }
+        Cmd::Shutdown => (
+            one_shot(&ipc_path, json!({"id": 1, "op": "shutdown"})).await?,
+            Kind::Ack("shutdown requested"),
         ),
         Cmd::On => (
             one_shot(&ipc_path, json!({"id": 1, "op": "toggle", "on": true})).await?,
@@ -427,6 +476,14 @@ async fn main() -> Result<()> {
                 one_shot(
                     &ipc_path,
                     json!({"id": 1, "op": "pair_from_uri", "uri": uri, "name": name}),
+                )
+                .await?,
+                Kind::Ack("pairing accepted"),
+            ),
+            PairSub::FromPin { pin, name } => (
+                one_shot(
+                    &ipc_path,
+                    json!({"id": 1, "op": "pair_from_pin", "pin": pin, "name": name}),
                 )
                 .await?,
                 Kind::Ack("pairing accepted"),
@@ -909,5 +966,94 @@ mod ipc_read_tests {
             .unwrap();
         assert_eq!(n, 10);
         assert_eq!(buf, "no newline");
+    }
+}
+
+/// DIR-P3-09: parse-level coverage for the new/changed subcommands. These
+/// only exercise clap's own parsing (arity, flags, conflicts) — the
+/// dispatch match itself needs a live daemon and is covered by the
+/// integration tests instead.
+#[cfg(test)]
+mod cli_parse_tests {
+    use super::{Args, Cmd, PairSub};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once(&"fluxctl").chain(args))
+            .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"))
+    }
+
+    #[test]
+    fn favorite_defaults_to_pinning() {
+        let a = parse(&["favorite", "abc123"]);
+        match a.cmd {
+            Cmd::Favorite { hash, remove } => {
+                assert_eq!(hash, "abc123");
+                assert!(!remove, "no --remove must default to pinning");
+            }
+            other => panic!("expected Cmd::Favorite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn favorite_remove_flag_parses() {
+        let a = parse(&["favorite", "abc123", "--remove"]);
+        match a.cmd {
+            Cmd::Favorite { remove, .. } => assert!(remove),
+            other => panic!("expected Cmd::Favorite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unpair_without_yes_still_parses() {
+        // The --yes confirmation gate is a runtime check (main's dispatch),
+        // not a clap requirement — `unpair` alone must parse fine so the
+        // gate can produce a clear error message instead of a clap usage
+        // error.
+        let a = parse(&["unpair"]);
+        match a.cmd {
+            Cmd::Unpair { yes } => assert!(!yes),
+            other => panic!("expected Cmd::Unpair, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unpair_yes_flag_parses() {
+        let a = parse(&["unpair", "--yes"]);
+        match a.cmd {
+            Cmd::Unpair { yes } => assert!(yes),
+            other => panic!("expected Cmd::Unpair, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shutdown_parses() {
+        let a = parse(&["shutdown"]);
+        assert!(matches!(a.cmd, Cmd::Shutdown));
+    }
+
+    #[test]
+    fn pair_from_pin_parses_required_flags() {
+        let a = parse(&["pair", "from-pin", "--pin", "123456", "--name", "Phone"]);
+        match a.cmd {
+            Cmd::Pair { sub: PairSub::FromPin { pin, name } } => {
+                assert_eq!(pin, "123456");
+                assert_eq!(name, "Phone");
+            }
+            other => panic!("expected Pair(FromPin), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pair_from_pin_requires_pin_and_name() {
+        assert!(Args::try_parse_from(["fluxctl", "pair", "from-pin", "--name", "Phone"]).is_err());
+        assert!(Args::try_parse_from(["fluxctl", "pair", "from-pin", "--pin", "123456"]).is_err());
+    }
+
+    #[test]
+    fn debug_capture_is_gone() {
+        // DIR-P3-09: the stub was removed entirely, not just hidden —
+        // `fluxctl debug-capture` must now be an unrecognized subcommand.
+        assert!(Args::try_parse_from(["fluxctl", "debug-capture"]).is_err());
     }
 }
