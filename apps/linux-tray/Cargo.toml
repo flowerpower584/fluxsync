@@ -1,6 +1,6 @@
 [package]
 name = "fluxsync-linux-tray"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 description = "Minimal KDE/freedesktop StatusNotifierItem tray for the FluxSync daemon"
 license = "MIT OR Apache-2.0"

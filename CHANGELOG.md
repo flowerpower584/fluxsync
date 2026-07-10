@@ -3,6 +3,76 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [SemVer](https://semver.org/).
 
+## [v0.7.0] — 2026-07-10
+
+**FluxMesh multi-device topology, FluxVault encrypted history, and
+FluxFirewall clipboard policy, plus a security-hardening pass across
+rekey, resync, and pairing.**
+
+### Added
+- **FluxMesh:** star-topology multi-device sync — peer-keyed `Transport`
+  map, per-secondary heartbeat/ghost-timeout, primary failover to a live
+  secondary, relay of chunked items across a third hop, per-secondary
+  unpair, mesh peer list in the clients, and a 3-node mesh integration
+  test. Wire bumped to v2 with `EventId` (origin + event_seq) for
+  fan-out anti-loop.
+- **FluxVault:** AEAD-encrypted on-disk history store, persisted and
+  rehydrated across restarts, and favorites (pin history items past TTL
+  and cap) with UI on macOS and Android.
+- **FluxFirewall:** per-class clipboard policy model gating apply and
+  broadcast in core; `Ask` parks then resolves instead of fail-closed
+  drop; policy persisted across restarts; `fluxctl firewall` command
+  group; policy + pending-decision UI on macOS and Android.
+- Resync-on-reconnect: `ResyncOffer`/`ResyncPull` wire messages, a
+  persisted event-seq outbox, offer/pull of missed items on relink.
+- Automatic session rekey (24h / 1 GiB, make-before-break) and mutual SAS
+  confirmation over the wire (`Msg::PairConfirm`), plus a symmetric
+  re-verify flow (`Msg::PairVerifyStarted`, capped verify-restart).
+- Capability negotiation in `Hello`, multi-address pair URIs (LAN +
+  Tailscale) with security caps, exponential backoff with jitter on
+  reconnect, persisted `last_addr` for mDNS-free relink, `--disable-mdns`
+  flag.
+- Sensitive-image flag threaded from capture through every persistence
+  gate (push, history cache, wipe).
+- Device rename and reliability counters across daemon, CLI, tray and
+  Android.
+- `fluxctl doctor` — one-shot sync diagnostics; new `fluxctl favorite`,
+  `unpair`, `shutdown`, and `pair --from-pin` subcommands.
+- Android: background survival (battery exemption, OEM guidance, service
+  self-check), identity encrypted at rest via the Android Keystore,
+  release-keystore signing.
+- Tray/UX: history search, image thumbnails with re-copy, 3-step device
+  onboarding, a full ARIA pass, a daemon-offline banner, a ksni "Pair
+  device…" tray entry, and ctrl+click to open the tray menu.
+- Docs: `SECURITY.md` v1, `WHY-ACCESSIBILITY.md`, `TROUBLESHOOTING.md`,
+  `FAQ.md`, `HEADLESS-LINUX.md`.
+- Scripted chaos harness plus a weekly CI job.
+
+### Fixed
+- 12 multipeer bugs across relay, firewall gate, rekey and resync:
+  scoped vault wipe via `other_linked_peers`, relay gated on a firewall
+  Block decision, deterministic boot peer, secondary proactive redial
+  off the persisted `last_addr`, and more.
+- Resync no longer replays, clobbers, or leaks offline copies; fixed a
+  Hello/session race on reconnect.
+- Canonical CRLF dedup, unpair pending-item wipe, bounded hex regex.
+- macOS tray: true pairing screen, clean unpair state, menu-bar-only
+  window, and a notification-privacy leak on cold start.
+- Android: SAS-verify race, battery-push retry, 16 KB native-lib page
+  alignment.
+
+### Security
+- Phase 5 round-3 hardening: outbox gate, synchronous vault wipe,
+  peer-scoped pending state, and egress/rekey/resync/SAS fixes.
+- Clients now exit non-zero on daemon rejection; IPC reads are capped.
+- Discovery cache purged on unpair/revoke/wipe.
+- Opt-in strict keychain ACL (`FLUXSYNC_STRICT_KEYCHAIN=1`) plus a
+  startup warning when running without keychain protection.
+- `debug-capture` CLI command and the `SetLaunchAtLogin` IPC op removed.
+
+### CI
+- `release.yml` now publishes `SHA256SUMS` and ships non-draft releases.
+
 ## [v0.6.2] — 2026-06-14
 
 **v6 "premium calm" interface, plus discovery and capture fixes.**
