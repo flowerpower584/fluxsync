@@ -46,10 +46,15 @@ button:focus-visible { outline: 2px solid var(--fs-ok); outline-offset: 2px; }
 .brand { display: flex; align-items: center; gap: 9px; }
 .glyph-container {
   width: 26px; height: 26px; border-radius: 6px;
-  background: var(--fs-ok);
+  background: transparent;
+  border: 1px solid var(--fs-border);
   display: flex; align-items: center; justify-content: center;
-  color: #052E12;
 }
+/* Brand mark paint lives in CSS, not SVG attributes: CSS rules override
+   presentation attributes and var() is only guaranteed in stylesheets. */
+#brand-glyph rect { stroke: var(--fs-crit); stroke-width: 1.3; fill: none; }
+#brand-glyph rect + rect { fill: var(--fs-surface); }
+#brand-glyph circle { fill: var(--fs-ok); }
 .brand-text { display: flex; flex-direction: column; }
 .brand-text .name { font-weight: 700; font-size: 14px; letter-spacing: -.02em; }
 .brand-text .version { color: var(--fs-subtle); font-family: var(--fs-mono); font-size: 9.5px; margin-top: 1px; }
