@@ -46,3 +46,11 @@ PROMPT-BACKEND-CLAUDE-CODE.md
 # Agent tooling — not part of the public repo
 .claude/
 fluxsync-skill/
+
+# Personal project memory + design handoff replica — local only
+CLAUDE.local.md
+fluxsync-ui-replica.html
+# Design iteration scratch — local only
+design-refined.html
+design-boards/
+claude-oss-application.html
