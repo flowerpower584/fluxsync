@@ -33,7 +33,7 @@ Prebuilt apps for every platform are on the [**latest release**](https://github.
 3. Open the APK to install. On first launch, grant the **camera** permission (used to scan the pairing QR) and **local network** access. You'll also be prompted for **Accessibility** permission — it's optional and only used as a fallback clipboard-capture path; see [`docs/WHY-ACCESSIBILITY.md`](docs/WHY-ACCESSIBILITY.md) for exactly what it does and how to disable it.
 
 ### 🍎 macOS — menu-bar app
-Download the DMG for your chip: [`aarch64`](https://github.com/flowerpower584/fluxsync/releases/latest) (Apple Silicon) or [`x64`](https://github.com/flowerpower584/fluxsync/releases/latest) (Intel). It's **unsigned**, so on first launch right-click the app → **Open** (or run `xattr -dr com.apple.quarantine /Applications/FluxSync.app`). Prefer to build it yourself? Needs Rust (`rustup`) + Node.js:
+Download the ZIP for your chip from the [latest release](https://github.com/flowerpower584/fluxsync/releases/latest): `aarch64` (Apple Silicon) or `x64` (Intel). Unzip it and follow **README-FIRST.txt** — the bundled `Install FluxSync.command` clears Gatekeeper's "damaged app" block (builds are unsigned, not notarized), installs to Applications and launches. Prefer to build it yourself? Needs Rust (`rustup`) + Node.js:
 
 ```sh
 git clone https://github.com/flowerpower584/fluxsync.git
