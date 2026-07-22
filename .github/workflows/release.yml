@@ -102,9 +102,9 @@ jobs:
             One Rust daemon, GUI apps for macOS, Windows, Linux and Android, zero servers.
 
             Download the build for your platform from the assets below.
-            **macOS:** grab the `mac-easy-install.zip` for your chip (aarch64 =
-            Apple Silicon, x64 = Intel), unzip, and follow README-FIRST.txt — the
-            bundled installer handles the Gatekeeper "damaged app" block in one step.
+            **macOS:** grab the `.zip` for your chip (aarch64 = Apple Silicon,
+            x64 = Intel), unzip, and follow README-FIRST.txt — the bundled
+            installer handles the Gatekeeper "damaged app" block in one step.
             **Windows:** builds are unsigned — SmartScreen → More info → Run anyway.
 
             See [CHANGELOG.md](https://github.com/flowerpower584/fluxsync/blob/main/CHANGELOG.md) for the full release notes.
@@ -116,9 +116,10 @@ jobs:
           args: --target ${{ matrix.target }}
 
       # macOS builds are not notarized, so the bare .dmg greets users with
-      # Gatekeeper's "damaged app" dialog. Ship a zip with a self-serve
-      # installer next to the .app that clears quarantine and re-signs ad-hoc.
-      - name: Package macOS easy-install zip
+      # Gatekeeper's "damaged app" dialog. Replace it with a zip holding the
+      # .app plus a self-serve installer that clears quarantine and re-signs
+      # ad-hoc; drop the dmg tauri-action uploaded.
+      - name: Package macOS zip (replaces dmg)
         if: runner.os == 'macOS'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -136,10 +137,12 @@ jobs:
           install -m 755 "packaging/macos/Install FluxSync.command" \
             "$stage/Install FluxSync.command"
           cp packaging/macos/README-FIRST.txt "$stage/"
-          zip="FluxSync_${ver}_${arch}_mac-easy-install.zip"
-          ditto -c -k --keepParent "$stage" "$zip"
+          zip="FluxSync_${ver}_${arch}.zip"
+          ditto -c -k --norsrc --keepParent "$stage" "$zip"
           gh release upload "$GITHUB_REF_NAME" "$zip" \
             --repo "$GITHUB_REPOSITORY" --clobber
+          gh release delete-asset "$GITHUB_REF_NAME" "FluxSync_${ver}_${arch}.dmg" \
+            --repo "$GITHUB_REPOSITORY" --yes || true
 
   android:
     name: Android (arm64-v8a)
