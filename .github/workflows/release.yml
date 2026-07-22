@@ -101,9 +101,11 @@ jobs:
             **Universal clipboard — local-first, peer-to-peer, end-to-end encrypted.**
             One Rust daemon, GUI apps for macOS, Windows, Linux and Android, zero servers.
 
-            Download the build for your platform from the assets below. Desktop builds are
-            **unsigned** — first launch needs right-click → Open (macOS) or SmartScreen →
-            More info → Run anyway (Windows).
+            Download the build for your platform from the assets below.
+            **macOS:** grab the `mac-easy-install.zip` for your chip (aarch64 =
+            Apple Silicon, x64 = Intel), unzip, and follow README-FIRST.txt — the
+            bundled installer handles the Gatekeeper "damaged app" block in one step.
+            **Windows:** builds are unsigned — SmartScreen → More info → Run anyway.
 
             See [CHANGELOG.md](https://github.com/flowerpower584/fluxsync/blob/main/CHANGELOG.md) for the full release notes.
           releaseDraft: false
@@ -112,6 +114,32 @@ jobs:
           # updater artifacts that otherwise clutter the release.
           includeUpdaterJson: false
           args: --target ${{ matrix.target }}
+
+      # macOS builds are not notarized, so the bare .dmg greets users with
+      # Gatekeeper's "damaged app" dialog. Ship a zip with a self-serve
+      # installer next to the .app that clears quarantine and re-signs ad-hoc.
+      - name: Package macOS easy-install zip
+        if: runner.os == 'macOS'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) arch=aarch64 ;;
+            *) arch=x64 ;;
+          esac
+          ver="${GITHUB_REF_NAME#v}"
+          app="apps/macos-tray/src-tauri/target/${{ matrix.target }}/release/bundle/macos/FluxSync.app"
+          stage="FluxSync-${ver}-mac-${arch}"
+          mkdir "$stage"
+          ditto "$app" "$stage/FluxSync.app"
+          install -m 755 "packaging/macos/Install FluxSync.command" \
+            "$stage/Install FluxSync.command"
+          cp packaging/macos/README-FIRST.txt "$stage/"
+          zip="FluxSync_${ver}_${arch}_mac-easy-install.zip"
+          ditto -c -k --keepParent "$stage" "$zip"
+          gh release upload "$GITHUB_REF_NAME" "$zip" \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
   android:
     name: Android (arm64-v8a)
