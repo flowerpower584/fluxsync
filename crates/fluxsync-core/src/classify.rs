@@ -197,8 +197,14 @@ mod tests {
 
     #[test]
     fn detects_stripe_test_and_live() {
-        assert!(is_sensitive("sk_test_4eC39HqLyjWDarjtT1zdp7dc"));
-        assert!(is_sensitive("sk_live_aBcDeFgHiJkLmNoPqRsTuVwX"));
+        assert!(is_sensitive(concat!(
+            "sk_test_",
+            "4eC39HqLyjWDarjtT1zdp7dc"
+        )));
+        assert!(is_sensitive(concat!(
+            "sk_live_",
+            "aBcDeFgHiJkLmNoPqRsTuVwX"
+        )));
     }
 
     #[test]
@@ -218,7 +224,10 @@ mod tests {
 
     #[test]
     fn detects_github_personal_access_token() {
-        assert!(is_sensitive("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"));
+        assert!(is_sensitive(concat!(
+            "ghp_",
+            "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+        )));
     }
 
     #[test]

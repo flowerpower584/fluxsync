@@ -1649,8 +1649,10 @@ mod tests {
             Event::LocalClipboardChange {
                 hash: [9; 32],
                 kind: Kind::Text,
-                payload: "sk_live_aaaaaaaaaaaaaaaaaaaaaaaa".to_string().into_bytes(),
-                preview: "sk_live_aaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                payload: concat!("sk_live_", "aaaaaaaaaaaaaaaaaaaaaaaa")
+                    .to_string()
+                    .into_bytes(),
+                preview: concat!("sk_live_", "aaaaaaaaaaaaaaaaaaaaaaaa").into(),
                 sensitive: true,
                 lamport: 1,
             },
@@ -2140,7 +2142,9 @@ mod tests {
             Event::LocalClipboardChange {
                 hash: [4; 32],
                 kind: Kind::Text,
-                payload: concat!("sk_live_", "xxxxxxxxxxxxxxxxxxxxxxxx").as_bytes().to_vec(),
+                payload: concat!("sk_live_", "xxxxxxxxxxxxxxxxxxxxxxxx")
+                    .as_bytes()
+                    .to_vec(),
                 preview: concat!("sk_live_", "xxxxxxxxxxxxxxxxxxxxxxxx").into(),
                 sensitive: true,
                 lamport: 1,

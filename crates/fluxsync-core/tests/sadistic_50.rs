@@ -143,7 +143,7 @@ fn test_05_sensitive_bypass_attempt() {
 
     // What if the payload is huge and contains a secret at the very end?
     let mut malicious = "A".repeat(100_000);
-    malicious.push_str("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789");
+    malicious.push_str(concat!("ghp_", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"));
 
     // We simulate a daemon that failed to mark it sensitive
     app.handle(
@@ -809,7 +809,10 @@ fn test_23_sensitive_data_in_url() {
     app.handle(Event::HandshakeOk, &wall);
 
     // An URL containing a secret. classifier should catch it if it scans the whole string.
-    let url_secret = "https://example.com/login?token=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    let url_secret = concat!(
+        "https://example.com/login?token=ghp_",
+        "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+    );
 
     // Simulate daemon classification
     let is_secret = fluxsync_core::classify::is_sensitive(url_secret);

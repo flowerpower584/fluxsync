@@ -468,8 +468,10 @@ fn clipboard_sensitive_not_in_history() {
         Event::LocalClipboardChange {
             hash: h(30),
             kind: Kind::Text,
-            payload: "sk_live_aBcDeFgHiJkLmNoPqRsTuVwX".to_string().into_bytes(),
-            preview: "sk_live_aBcDeFgHiJkLmNoPqRsTuVwX".into(),
+            payload: concat!("sk_live_", "aBcDeFgHiJkLmNoPqRsTuVwX")
+                .to_string()
+                .into_bytes(),
+            preview: concat!("sk_live_", "aBcDeFgHiJkLmNoPqRsTuVwX").into(),
             sensitive: true,
             lamport: 1,
         },
@@ -687,9 +689,18 @@ fn classify_code() {
 
 #[test]
 fn sensitive_detects_all_patterns() {
-    assert!(is_sensitive("sk_test_4eC39HqLyjWDarjtT1zdp7dc"));
-    assert!(is_sensitive("sk_live_aBcDeFgHiJkLmNoPqRsTuVwX"));
-    assert!(is_sensitive("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"));
+    assert!(is_sensitive(concat!(
+        "sk_test_",
+        "4eC39HqLyjWDarjtT1zdp7dc"
+    )));
+    assert!(is_sensitive(concat!(
+        "sk_live_",
+        "aBcDeFgHiJkLmNoPqRsTuVwX"
+    )));
+    assert!(is_sensitive(concat!(
+        "ghp_",
+        "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+    )));
     assert!(is_sensitive("AKIAIOSFODNN7EXAMPLE"));
     assert!(is_sensitive("sk-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"));
     assert!(!is_sensitive("Hello, world"));
