@@ -37,6 +37,13 @@ ignore = [
     # quick-xml >= 0.41.0.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # RUSTSEC-2026-0374: `basic-toml` is unmaintained (no fix, no successor
+    # release to move to). Not a vulnerability. Only consumer:
+    # askama_derive (proc-macro) <- askama <- uniffi_bindgen <- uniffi, i.e.
+    # the build-time generator of the Kotlin bindings, reading uniffi's own
+    # config files from this repo — it never ships in a binary and never
+    # parses untrusted input. Revisit when uniffi moves off askama 0.14.
+    "RUSTSEC-2026-0374",
 ]
 
 # ─────────────────────────────────────────────────────────────────
