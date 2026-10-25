@@ -1,6 +1,9 @@
 // Image dims (image crate caps), packet idx (u16-bounded), and saturated
 // durations are the cast sources here — all safe at runtime.
 #![allow(clippy::cast_possible_truncation)]
+// Every submodule opens with `use super::*;`: the driver/ split keeps the
+// single namespace the code was written against.
+#![allow(clippy::wildcard_imports)]
 
 //! Daemon driver — composes [`fluxsync_core::App`] with IPC, transport,
 //! mDNS discovery, and the Noise IK handshake.

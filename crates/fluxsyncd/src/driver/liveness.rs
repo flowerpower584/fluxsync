@@ -137,7 +137,7 @@ pub(super) async fn heartbeat_loop(sh: Arc<Shared>) -> Result<()> {
                             // FluxMesh robustness slice 2: rebind to a live
                             // secondary if one exists; only fall to Discovering
                             // when the whole mesh is gone.
-                            if !try_primary_failover(&transport, &event_tx, &peer_meta).await {
+                            if !try_primary_failover(transport, event_tx, peer_meta).await {
                                 if let Some(peer_id) = dead_peer {
                                     let _ = event_tx.try_send(Event::PeerLost { peer_id });
                                 } else {

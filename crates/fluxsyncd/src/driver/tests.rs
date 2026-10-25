@@ -4276,7 +4276,7 @@ async fn resync_offer_flood_keeps_pending_pulls_bounded() {
         .lock()
         .await
         .values()
-        .map(|m| m.len())
+        .map(std::collections::HashMap::len)
         .sum();
     assert!(
         tracked <= super::MAX_PENDING_PULLS_PER_PEER,

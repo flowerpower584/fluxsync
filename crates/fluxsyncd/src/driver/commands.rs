@@ -329,17 +329,6 @@ pub(super) async fn handle_driver_cmd(
         }
         CmdOp::Unpair {} => {
             tracing::info!("Manual unpair requested via IPC");
-            // Tell the live peer to drop us from its trust store, otherwise
-            // it auto-reconnects through the next TOFU window and re-pairs
-            // without a QR scan. Best-effort: if the session is down the
-            // peer keeps a stale entry, which only it can clean up.
-            let revoke = Frame {
-                version: PROTOCOL_VERSION,
-                msg: Msg::Revoke,
-            };
-            if let Ok(bytes) = fluxsync_proto::encode(&revoke) {
-                let _ = transport.send_encrypted(&bytes).await;
-            }
             // VULN-001 variant V1: snapshot+retry+rollback. Without this,
             // a disk failure during unpair would clear live trust while
             // peers.json still trusts every peer; a daemon restart would
@@ -368,18 +357,33 @@ pub(super) async fn handle_driver_cmd(
                     );
                 }
             }
+            // Tell every linked peer — not just the primary — to drop us from
+            // its trust store, otherwise it auto-reconnects through the next
+            // TOFU window and re-pairs without a QR scan; then tear each link
+            // down for good. Best-effort: a peer that is offline right now
+            // keeps a stale entry, which only it can clean up.
+            let unpaired = sh.tear_down_links(Msg::Revoke, true).await;
+            for id in &unpaired {
+                purge_peer_from_inflight(*id, inflight).await;
+            }
             let actions = app.handle(Event::ManualUnpair, &**wall);
             dispatch(actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
-        CmdOp::Toggle { on } => {
-            let ev = if on {
-                Event::ToggleOn
-            } else {
-                Event::ToggleOff
-            };
-            let actions = app.handle(ev, &**wall);
+        CmdOp::Toggle { on: false } => {
+            let actions = app.handle(Event::ToggleOff, &**wall);
             dispatch(actions, app, seq_store, sh).await;
+            // The FSM's `CloseSession` covers the primary only. Mesh
+            // secondaries — and a primary that re-linked in the instant
+            // before the off state was published — would otherwise stay up,
+            // heartbeating and relaying, while the user believes sync is off.
+            sh.tear_down_links(Msg::Bye, false).await;
+            CmdResponse::ok(req_id, None)
+        }
+        CmdOp::Toggle { on: true } => {
+            let actions = app.handle(Event::ToggleOn, &**wall);
+            dispatch(actions, app, seq_store, sh).await;
+            resume_live_primary(app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::SetSelfBattery { level, charging } => {
@@ -1070,3 +1074,30 @@ pub(super) fn peer_entry(state: &State, addr: Option<SocketAddr>) -> Option<Peer
 // ─────────────────────────────────────────────────────────────────
 // Transport receive loop — type-byte dispatch
 // ─────────────────────────────────────────────────────────────────
+
+/// After `ToggleOn`: a primary session that is already up — a handshake that
+/// completed while sync was still switching off — brings no fresh
+/// `PeerSeen`/`HandshakeOk`, so the FSM would sit in `Discovering` beside a
+/// live link (nobody redials a peer that has a session) until the ghost
+/// timeout tore it down. Replay the two events that link would have raised.
+async fn resume_live_primary(app: &mut App, seq_store: &mut Option<SeqStore>, sh: &Arc<Shared>) {
+    if !sh.transport.has_session().await {
+        return;
+    }
+    let Some(peer_id) = sh.transport.cached_peer_id().await else {
+        return;
+    };
+    let Some(name) = sh
+        .trusted
+        .lock()
+        .await
+        .get(&peer_id)
+        .map(|p| p.name.clone())
+    else {
+        return;
+    };
+    for ev in [Event::PeerSeen { peer_id, name }, Event::HandshakeOk] {
+        let actions = app.handle(ev, &*sh.wall_clock);
+        dispatch(actions, app, seq_store, sh).await;
+    }
+}

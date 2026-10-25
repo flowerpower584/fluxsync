@@ -168,6 +168,13 @@ pub(super) async fn transport_recv_loop(sh: Arc<Shared>) -> Result<()> {
                             );
                             continue;
                         }
+                        // Sync switched off: answer no one. Pairing turns
+                        // sync on first (`ensure_online`), so this never
+                        // blocks a pairing the user started.
+                        if !sh.sync_on() {
+                            tracing::debug!(src = %from, "HandshakeInit dropped: sync is off");
+                            continue;
+                        }
                         // FS-058: per-source-IP rate-limit. Drop excess
                         // HandshakeInit datagrams BEFORE spawning the
                         // responder so neither the Noise step nor the
@@ -260,7 +267,7 @@ pub(super) async fn transport_recv_loop(sh: Arc<Shared>) -> Result<()> {
                             if let Some(dir) = &keystore_dir {
                                 let current_p = transport.current_peer_addr().await;
                                 if current_p == Some(from) {
-                                    persist_last_addr(Some(dir), &transport, &trusted, peer_id, from)
+                                    persist_last_addr(Some(dir), transport, trusted, peer_id, from)
                                         .await;
                                     last_persisted_addr = Some(from);
                                 }
@@ -543,12 +550,12 @@ pub(super) async fn dispatch_inbound_frame(frame: Frame, peer_id: [u8; 32], sh: 
                         sh,
                         CompleteItem {
                             source: peer_id,
-                            origin: origin,
-                            event_seq: event_seq,
+                            origin,
+                            event_seq,
                             hash: item.hash,
-                            kind: kind,
-                            sensitive: sensitive,
-                            lamport: lamport,
+                            kind,
+                            sensitive,
+                            lamport,
                             payload: full_payload,
                         },
                     )
@@ -708,12 +715,12 @@ pub(super) async fn dispatch_inbound_frame(frame: Frame, peer_id: [u8; 32], sh: 
                     sh,
                     CompleteItem {
                         source: peer_id,
-                        origin: origin,
-                        event_seq: event_seq,
+                        origin,
+                        event_seq,
                         hash: c.item_id,
-                        kind: kind,
-                        sensitive: sensitive,
-                        lamport: lamport,
+                        kind,
+                        sensitive,
+                        lamport,
                         payload: full_payload,
                     },
                 )

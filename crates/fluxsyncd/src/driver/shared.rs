@@ -467,6 +467,46 @@ pub(super) struct Shared {
 }
 
 impl Shared {
+    /// Whether the user has sync switched on. While it is off the daemon
+    /// neither dials nor answers handshakes: "off" means no link at all, not
+    /// a live session the FSM (sitting in `Idle`) pretends isn't there.
+    pub(super) fn sync_on(&self) -> bool {
+        self.state_watch_tx.borrow().on
+    }
+
+    /// Send `msg` (a `Bye` or a `Revoke`) to every linked peer — primary and
+    /// mesh secondaries alike — then drop its session. `permanent` (a revoke)
+    /// also removes the peer's connection stub, see
+    /// [`Transport::purge_peer`]. Returns the peers that were torn down.
+    pub(super) async fn tear_down_links(&self, msg: Msg, permanent: bool) -> Vec<[u8; 32]> {
+        let ids = self.transport.linked_peer_ids().await;
+        if let Ok(bytes) = fluxsync_proto::encode(&Frame {
+            version: PROTOCOL_VERSION,
+            msg,
+        }) {
+            for id in &ids {
+                let _ = self.transport.send_encrypted_to(*id, &bytes).await;
+            }
+        }
+        for id in &ids {
+            if permanent {
+                self.transport.purge_peer(*id).await;
+            } else {
+                self.transport.drop_session_for(*id).await;
+            }
+        }
+        let mut meta = self.peer_meta.lock().await;
+        let mut changed = false;
+        for id in &ids {
+            changed |= meta.remove(id).is_some();
+        }
+        drop(meta);
+        if changed {
+            let _ = self.event_tx.try_send(Event::MeshPeersChanged);
+        }
+        ids
+    }
+
     /// A context with fresh, empty state around `transport` — for unit
     /// tests, which then override or inspect the fields they care about.
     #[cfg(test)]

@@ -49,6 +49,10 @@ pub(super) async fn discovery_dispatcher(
             biased;
             () = shutdown.cancelled() => return Ok(()),
             _ = interval.tick() => {
+                // Sync switched off: no blind redials.
+                if !sh.sync_on() {
+                    continue;
+                }
                 // PROACTIVE PROBE: If no session, try the last known peer
                 let has_session = transport.has_session().await;
                 if !has_session {
@@ -261,6 +265,11 @@ pub(super) async fn discovery_dispatcher(
                             // UntrustedPeerSeen here let ANY stranger's mDNS
                             // advert remote-wipe the whole trust store.
                             tracing::debug!(peer = %peer_id_hex, "ignoring advertisement from untrusted/unknown peer");
+                            continue;
+                        }
+                        // The discovery cache above stays fed (PairFromPin
+                        // needs it), but with sync off nothing is dialed.
+                        if !sh.sync_on() {
                             continue;
                         }
                         // Skip if a session is already up to THIS peer.

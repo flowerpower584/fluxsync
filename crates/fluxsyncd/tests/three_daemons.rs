@@ -1369,3 +1369,169 @@ async fn firewall_ask_parks_then_resolve_delivers_or_drops() {
         "a daemon panicked during the ask/resolve test"
     );
 }
+
+/// A — B — C line with B as the hub (A primary, C secondary), as in
+/// `revoke_secondary_drops_only_that_peer`. Returns the three IPC paths, a
+/// shared shutdown token and the daemon tasks.
+#[allow(clippy::type_complexity)]
+async fn spawn_hub_line(
+    dir: &std::path::Path,
+) -> (
+    [PathBuf; 3],
+    CancellationToken,
+    Vec<tokio::task::JoinHandle<anyhow::Result<()>>>,
+) {
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let id_c = Identity::generate();
+    let (sess_a_b, sess_b_a) = pair_for_test(&id_a, &id_b).expect("pair a-b");
+    let (sess_b_c, sess_c_b) = pair_for_test(&id_b, &id_c).expect("pair b-c");
+    let (port_a, port_b, port_c) = (
+        pick_free_udp_port().await,
+        pick_free_udp_port().await,
+        pick_free_udp_port().await,
+    );
+    let addr = |p: u16| -> SocketAddr { format!("127.0.0.1:{p}").parse().unwrap() };
+    let ipcs = [dir.join("a.sock"), dir.join("b.sock"), dir.join("c.sock")];
+    let (pid_a, pid_b, pid_c) = (id_a.peer_id(), id_b.peer_id(), id_c.peer_id());
+
+    let mut cfg_a = base_cfg(id_a, port_a, ipcs[0].clone(), "node-a");
+    cfg_a.test_pair = Some(TestPair {
+        session: sess_a_b,
+        peer_addr: addr(port_b),
+        peer_name: "node-b".into(),
+        peer_id: pid_b,
+    });
+    let mut cfg_c = base_cfg(id_c, port_c, ipcs[2].clone(), "node-c");
+    cfg_c.test_pair = Some(TestPair {
+        session: sess_c_b,
+        peer_addr: addr(port_b),
+        peer_name: "node-b".into(),
+        peer_id: pid_b,
+    });
+    let mut cfg_b = base_cfg(id_b, port_b, ipcs[1].clone(), "node-b");
+    cfg_b.test_pair = Some(TestPair {
+        session: sess_b_a,
+        peer_addr: addr(port_a),
+        peer_name: "node-a".into(),
+        peer_id: pid_a,
+    });
+    cfg_b.test_pairs = vec![TestPair {
+        session: sess_b_c,
+        peer_addr: addr(port_c),
+        peer_name: "node-c".into(),
+        peer_id: pid_c,
+    }];
+
+    let shutdown = CancellationToken::new();
+    let handles = [cfg_a, cfg_b, cfg_c]
+        .into_iter()
+        .map(|cfg| tokio::spawn(run(cfg, shutdown.clone())))
+        .collect();
+    let up = wait_until(Duration::from_secs(2), || async {
+        peer_name(&ipcs[1]).await.as_deref() == Some("node-a")
+            && mesh_peers(&ipcs[1]).await.0 == 2
+            && mesh_peers(&ipcs[0]).await.0 == 1
+            && mesh_peers(&ipcs[2]).await.0 == 1
+    })
+    .await;
+    assert!(up, "hub line did not reach its 2-peer steady state");
+    (ipcs, shutdown, handles)
+}
+
+async fn trusted_count(ipc: &PathBuf) -> usize {
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 7,
+            op: CmdOp::TrustList {},
+        },
+    )
+    .await;
+    match resp.data {
+        Some(CmdData::TrustList(v)) => v.len(),
+        // `CmdData` is untagged: an empty list reads back as `Peers([])`.
+        Some(CmdData::Peers(v)) if v.is_empty() => 0,
+        other => panic!("expected TrustList, got {other:?}"),
+    }
+}
+
+/// C4: "Unpair" on the hub must revoke and drop EVERY linked peer. It used to
+/// send `Revoke` to the primary only and drop only the primary session, so
+/// the secondary stayed linked (still listed, still heartbeating) and kept
+/// trusting the hub.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn unpair_revokes_and_drops_every_linked_peer() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ([ipc_a, ipc_b, ipc_c], shutdown, handles) = spawn_hub_line(dir.path()).await;
+
+    let r = ipc_send_recv(
+        &ipc_b,
+        CmdRequest {
+            id: 9,
+            op: CmdOp::Unpair {},
+        },
+    )
+    .await;
+    assert!(r.ok, "unpair failed: {r:?}");
+
+    let all_down = wait_until(Duration::from_secs(3), || async {
+        mesh_peers(&ipc_b).await.0 == 0
+            && mesh_peers(&ipc_a).await.0 == 0
+            && mesh_peers(&ipc_c).await.0 == 0
+    })
+    .await;
+    assert!(
+        all_down,
+        "links survived an unpair: b={:?} a={:?} c={:?}",
+        mesh_peers(&ipc_b).await,
+        mesh_peers(&ipc_a).await,
+        mesh_peers(&ipc_c).await
+    );
+    assert_eq!(trusted_count(&ipc_a).await, 0, "A still trusts the hub");
+    assert_eq!(trusted_count(&ipc_c).await, 0, "C still trusts the hub");
+
+    shutdown.cancel();
+    for h in handles {
+        let _ = timeout(Duration::from_secs(2), h).await;
+    }
+}
+
+/// C4: switching sync off on the hub must drop the secondary link too, not
+/// only the primary — otherwise C stays linked to a device whose sync is off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn toggle_off_drops_secondary_links_too() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ([ipc_a, ipc_b, ipc_c], shutdown, handles) = spawn_hub_line(dir.path()).await;
+
+    let r = ipc_send_recv(
+        &ipc_b,
+        CmdRequest {
+            id: 9,
+            op: CmdOp::Toggle { on: false },
+        },
+    )
+    .await;
+    assert!(r.ok, "toggle off failed: {r:?}");
+
+    let all_down = wait_until(Duration::from_secs(3), || async {
+        mesh_peers(&ipc_b).await.0 == 0
+            && mesh_peers(&ipc_a).await.0 == 0
+            && mesh_peers(&ipc_c).await.0 == 0
+    })
+    .await;
+    assert!(
+        all_down,
+        "links survived sync off: b={:?} a={:?} c={:?}",
+        mesh_peers(&ipc_b).await,
+        mesh_peers(&ipc_a).await,
+        mesh_peers(&ipc_c).await
+    );
+
+    shutdown.cancel();
+    for h in handles {
+        let _ = timeout(Duration::from_secs(2), h).await;
+    }
+}
