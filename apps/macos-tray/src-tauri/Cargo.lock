@@ -1076,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "fluxsync-macos-tray"
-version = "0.7.0"
+version = "0.8.0-beta.1"
 dependencies = [
  "anyhow",
  "blake3",

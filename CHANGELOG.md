@@ -5,6 +5,15 @@ Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.8.0-beta.1] — 2026-10-25
+
+> **Beta.** A big release — a redesigned desktop app and a reworked daemon.
+> Every change passes the automated suite (Linux, macOS, Windows, Android
+> unit tests), but this build has not yet been through real-device testing
+> on every platform. Pairings and history carry over from v0.7.0, and the
+> wire format stays compatible both ways, so a v0.7.0 device can still sync
+> with a v0.8.0-beta.1 one while you upgrade them one by one.
+
 **"Lien" — a from-scratch redesign of the desktop app (macOS, Windows,
 Linux) around what FluxSync is: a direct link between your devices and
 the clipboard items that flow across it. And a rework of the daemon from
@@ -112,6 +121,11 @@ fix.**
   snapshot is built in one place for the watch and for `status`.
 - Keystore I/O runs on the blocking pool, OS clipboard writes on one
   ordered writer thread, retransmits in their own paced task.
+
+### CI
+- `release.yml` publishes a tag with a pre-release suffix (`v0.8.0-beta.1`)
+  as a GitHub pre-release, and sets the release notes from
+  `.github/release-notes/<tag>.md` (or the tag's CHANGELOG section).
 
 ### Performance
 - Popup renders are coalesced per frame, keyed and incremental: a

@@ -1162,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "fluxctl"
-version = "0.7.0"
+version = "0.8.0-beta.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "fluxsync-core"
-version = "0.7.0"
+version = "0.8.0-beta.1"
 dependencies = [
  "blake3",
  "fluxsync-proto",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "fluxsync-crypto"
-version = "0.7.0"
+version = "0.8.0-beta.1"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "fluxsync-mobile-ffi"
-version = "0.7.0"
+version = "0.8.0-beta.1"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -1230,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "fluxsync-proto"
-version = "0.7.0"
+version = "0.8.0-beta.1"
 dependencies = [
  "ciborium",
  "proptest",
@@ -1240,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "fluxsyncd"
-version = "0.7.0"
+version = "0.8.0-beta.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4042,7 +4042,7 @@ dependencies = [
 
 [[package]]
 name = "uniffi-bindgen"
-version = "0.7.0"
+version = "0.8.0-beta.1"
 dependencies = [
  "uniffi",
 ]

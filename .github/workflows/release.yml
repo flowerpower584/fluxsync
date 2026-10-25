@@ -3,8 +3,14 @@ name: release
 # Builds the FluxSync desktop app (Tauri) for macOS, Windows and Linux and
 # attaches the bundles to a GitHub Release. Triggered by pushing a vX.Y.Z tag.
 # The release is published immediately (not a draft) once all 7 artifacts are
-# built; a final job then generates SHA256SUMS.txt over all of them and
-# uploads it to the same release.
+# built; a final job then generates SHA256SUMS.txt over all of them, uploads
+# it to the same release and sets the release notes.
+#
+# A tag with a pre-release suffix (v0.8.0-beta.1, v1.0.0-rc.2 — anything with
+# a "-") is published as a GitHub pre-release: labelled as such on the page,
+# and never offered as /releases/latest. Release notes come from
+# .github/release-notes/<tag>.md when it exists, else from the tag's section
+# of CHANGELOG.md.
 #
 # The daemon (`fluxsyncd`) ships inside the app as a Tauri sidecar. It is
 # gitignored and staged by `apps/macos-tray/src-tauri/build.rs`, which builds
@@ -109,7 +115,7 @@ jobs:
 
             See [CHANGELOG.md](https://github.com/flowerpower584/fluxsync/blob/main/CHANGELOG.md) for the full release notes.
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           # No auto-updater wired up — skip the latest.json / .app.tar.gz
           # updater artifacts that otherwise clutter the release.
           includeUpdaterJson: false
@@ -221,13 +227,16 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: FluxSync-${{ github.ref_name }}-arm64-v8a.apk
 
   checksums:
-    name: Generate SHA256SUMS
+    name: Checksums + release notes
     needs: [desktop, android]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download release assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -250,3 +259,30 @@ jobs:
             release-assets/SHA256SUMS.txt \
             --repo "${{ github.repository }}" \
             --clobber
+
+      # The detailed notes: .github/release-notes/<tag>.md if present, else
+      # this tag's section of CHANGELOG.md (from its "## [<tag>]" heading to
+      # the next "## [" one). Re-asserts the pre-release flag too.
+      - name: Set release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+          notes=".github/release-notes/${TAG}.md"
+          if [ ! -f "$notes" ]; then
+            notes=release-notes.md
+            awk -v tag="$TAG" '
+              index($0, "## [" tag "]") == 1 { on = 1; next }
+              on && /^## \[/ { exit }
+              on { print }
+            ' CHANGELOG.md > "$notes"
+          fi
+          if [ ! -s "$notes" ]; then
+            echo "::warning::No release notes found for $TAG; keeping the default body."
+            exit 0
+          fi
+          flag=--prerelease=false
+          case "$TAG" in *-*) flag=--prerelease ;; esac
+          gh release edit "$TAG" --repo "${{ github.repository }}" \
+            --notes-file "$notes" "$flag"
