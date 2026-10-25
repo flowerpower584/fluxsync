@@ -172,12 +172,6 @@ pub(super) async fn forward_item(
     .await;
 }
 
-/// FluxMesh robustness slice 3: finish a reassembled chunked item. Acks the
-/// source (always, so it stops retransmitting), then — only on first sight of
-/// this `EventId` (mesh anti-loop) — re-chunks the full payload and relays it
-/// across further hops, and delivers it locally. A chunked image now reaches
-/// a third node B→C, not just direct neighbours.
-#[allow(clippy::too_many_arguments)]
 /// Namespace the reassembly map by the immediate source peer so concurrent
 /// transfers of the same `item_id` from different mesh peers cannot share a
 /// `Reassembly` slot vector. Without this, a paired-but-misbehaving peer could

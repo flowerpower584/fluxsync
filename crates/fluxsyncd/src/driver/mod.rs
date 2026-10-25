@@ -420,6 +420,48 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // otherwise). See `PendingOutboxStage`'s doc comment.
     let outbox_stage: PendingOutboxStage = Arc::new(Mutex::new(HashMap::new()));
 
+    // ── Shared context ─────────────────────────────────────────────
+    // One Arc'd bundle of every long-lived handle (see `Shared`), handed to
+    // each task and handler instead of threading them one by one. The local
+    // bindings above alias the very same Arcs.
+    let shared = Arc::new(Shared {
+        identity: identity.clone(),
+        wall_clock: wall_clock.clone(),
+        keystore_dir: keystore_dir.clone(),
+        udp_bind: udp_bind.clone(),
+        udp_port,
+        lan_only_handshakes,
+        shutdown: shutdown.clone(),
+        event_tx: event_tx.clone(),
+        cmd_tx: cmd_tx.clone(),
+        state_watch_tx: state_watch_tx.clone(),
+        logs_bcast_tx: logs_bcast_tx.clone(),
+        log_tail: log_tail.clone(),
+        transport: transport.clone(),
+        metrics: metrics.clone(),
+        trusted: trusted.clone(),
+        pairing_window: pairing_window.clone(),
+        pending_pairs: pending_pairs.clone(),
+        pending_initiator_tx: pending_initiator_tx.clone(),
+        deferred_sas_confirm: deferred_sas_confirm.clone(),
+        pin_advert: pin_advert.clone(),
+        disc_cache: disc_cache.clone(),
+        backoff: backoff.clone(),
+        mdns_ctx: mdns_ctx.clone(),
+        peer_meta: peer_meta.clone(),
+        inflight: inflight.clone(),
+        reassembly: Arc::new(Mutex::new(HashMap::new())),
+        mesh_seen: mesh_seen.clone(),
+        echo_ack_sent: echo_ack_sent.clone(),
+        last_written_hashes: last_written_hashes.clone(),
+        outbox: outbox.clone(),
+        outbox_stage: outbox_stage.clone(),
+        pending_pulls: pending_pulls.clone(),
+        cleared_tombstone: cleared_tombstone.clone(),
+        self_batt_level: std::sync::atomic::AtomicU8::new(255),
+        self_batt_charging: std::sync::atomic::AtomicBool::new(false),
+    });
+
     // ── Test path: install session + jump to Linked ────────────────
     if let Some(tp) = test_pair {
         let TestPair {
@@ -537,68 +579,14 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         .await
         .with_context(|| format!("bind ipc socket {}", ipc_path.display()))?;
     {
-        let cmd_tx = cmd_tx.clone();
-        let state_rx = state_watch_rx.clone();
-        let logs_tx = logs_bcast_tx.clone();
-        let log_tail = log_tail.clone();
-        let shutdown = shutdown.clone();
-        tasks.spawn(async move {
-            ipc_accept_loop(ipc_server, cmd_tx, state_rx, logs_tx, log_tail, shutdown).await
-        });
+        let sh = shared.clone();
+        tasks.spawn(async move { ipc_accept_loop(ipc_server, sh).await });
     }
 
     // Transport receive loop.
     {
-        let transport = transport.clone();
-        let identity = identity.clone();
-        let trusted = trusted.clone();
-        let pending = pending_initiator_tx.clone();
-        let window = pairing_window.clone();
-        let event_tx = event_tx.clone();
-        let shutdown = shutdown.clone();
-        let kd = keystore_dir.clone();
-        let metrics = metrics.clone();
-        let inflight = inflight.clone();
-        let pending_pairs_for_recv = pending_pairs.clone();
-        let mesh_seen_for_recv = mesh_seen.clone();
-        let peer_meta_for_recv = peer_meta.clone();
-        let disc_cache_for_recv = disc_cache.clone();
-        let backoff_for_recv = backoff.clone();
-        let outbox_for_recv = outbox.clone();
-        let pending_pulls_for_recv = pending_pulls.clone();
-        let outbox_stage_for_recv = outbox_stage.clone();
-        let state_rx_for_recv = state_watch_tx.subscribe();
-        let deferred_sas_confirm_for_recv = deferred_sas_confirm.clone();
-        let echo_ack_sent_for_recv = echo_ack_sent.clone();
-        let cleared_tombstone_for_recv = cleared_tombstone.clone();
-        tasks.spawn(async move {
-            transport_recv_loop(
-                transport,
-                identity,
-                trusted,
-                window,
-                pending,
-                event_tx,
-                shutdown,
-                kd,
-                metrics,
-                inflight,
-                pending_pairs_for_recv,
-                mesh_seen_for_recv,
-                peer_meta_for_recv,
-                disc_cache_for_recv,
-                backoff_for_recv,
-                lan_only_handshakes,
-                outbox_for_recv,
-                pending_pulls_for_recv,
-                outbox_stage_for_recv,
-                state_rx_for_recv,
-                deferred_sas_confirm_for_recv,
-                echo_ack_sent_for_recv,
-                cleared_tombstone_for_recv,
-            )
-            .await
-        });
+        let sh = shared.clone();
+        tasks.spawn(async move { transport_recv_loop(sh).await });
     }
 
     // FS-058: background reaper that drops expired PendingSet entries.
@@ -618,37 +606,15 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         });
     }
 
-    // This device's latest battery reading, shared with the heartbeat loop so
-    // it can re-broadcast the current level to the primary peer every tick.
-    // Battery is otherwise only sent on change (macOS poll) or via the Android
-    // broadcast — a steady level would never refresh on the peer after the
-    // handshake. 255 = "not read yet" → the heartbeat skips sending until real.
-    let self_batt_level = Arc::new(std::sync::atomic::AtomicU8::new(255));
-    let self_batt_charging = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    // Heartbeat loop.
+    // Heartbeat loop. It also re-broadcasts this device's latest battery
+    // (`Shared::self_batt_*`, written by the event loop below) every tick:
+    // battery is otherwise only sent on change (macOS poll) or via the
+    // Android broadcast, so a steady level would never refresh on the peer
+    // after the handshake. 255 = "not read yet" → nothing is sent.
     {
-        let transport = transport.clone();
-        let event_tx = event_tx.clone();
-        let shutdown = shutdown.clone();
-        let metrics = metrics.clone();
-        let peer_meta = peer_meta.clone();
-        let self_batt_level = self_batt_level.clone();
-        let self_batt_charging = self_batt_charging.clone();
-        let backoff_for_heartbeat = backoff.clone();
+        let sh = shared.clone();
         tasks.spawn(async move {
-            if let Err(e) = heartbeat_loop(
-                transport,
-                event_tx,
-                shutdown,
-                metrics,
-                backoff_for_heartbeat,
-                peer_meta,
-                self_batt_level,
-                self_batt_charging,
-            )
-            .await
-            {
+            if let Err(e) = heartbeat_loop(sh).await {
                 tracing::warn!(error = %e, "heartbeat loop exited");
             }
             Ok(())
@@ -657,29 +623,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
 
     // DIR-P2-03: automatic session rekey watchdog.
     {
-        let identity = identity.clone();
-        let transport = transport.clone();
-        let trusted = trusted.clone();
-        let pending_initiator_tx = pending_initiator_tx.clone();
-        let event_tx = event_tx.clone();
-        let backoff = backoff.clone();
-        let shutdown = shutdown.clone();
-        let kd = keystore_dir.clone();
-        tasks.spawn(async move {
-            rekey_watchdog(
-                identity,
-                transport,
-                trusted,
-                pending_initiator_tx,
-                event_tx,
-                backoff,
-                rekey_max_age_ms,
-                rekey_max_bytes,
-                kd,
-                shutdown,
-            )
-            .await
-        });
+        let sh = shared.clone();
+        tasks.spawn(async move { rekey_watchdog(sh, rekey_max_age_ms, rekey_max_bytes).await });
     }
 
     // mDNS discovery. The `discovery_dispatcher` task below is ALWAYS
@@ -743,32 +688,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     }
     let persisted_peer_addrs = Arc::new(persisted_peer_addrs);
     {
-        let identity = identity.clone();
-        let trusted = trusted.clone();
-        let transport = transport.clone();
-        let pending = pending_initiator_tx.clone();
-        let event_tx = event_tx.clone();
-        let shutdown = shutdown.clone();
-        let disc_cache = disc_cache.clone();
-        let backoff = backoff.clone();
-        let kd = keystore_dir.clone();
-        let persisted_peer_addrs = persisted_peer_addrs.clone();
-        tasks.spawn(async move {
-            discovery_dispatcher(
-                disc_rx,
-                identity,
-                trusted,
-                transport,
-                pending,
-                event_tx,
-                disc_cache,
-                backoff,
-                persisted_peer_addrs,
-                kd,
-                shutdown,
-            )
-            .await
-        });
+        let sh = shared.clone();
+        tasks.spawn(async move { discovery_dispatcher(disc_rx, sh, persisted_peer_addrs).await });
     }
 
     // Clipboard watcher (read side). Polls the OS clipboard every
@@ -785,14 +706,10 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         tracing::info!(disable_clipboard, "Clipboard watcher disabled by config");
     } else {
         tracing::info!("Spawning clipboard watcher task");
-        let cmd_tx = cmd_tx.clone();
-        let transport = transport.clone();
-        let last_written = last_written_hashes.clone();
-        let shutdown = shutdown.clone();
+        let sh = shared.clone();
         tasks.spawn(async move {
             tracing::info!("Clipboard watcher task started");
-            if let Err(e) = clipboard_watcher_loop(transport, cmd_tx, last_written, shutdown).await
-            {
+            if let Err(e) = clipboard_watcher_loop(sh).await {
                 tracing::error!(error = %e, "clipboard_watcher_loop exited with error");
             }
             Ok(())
@@ -883,8 +800,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                     metrics.lock().await.on_handshake_ok();
                 }
                 if let Event::BatteryChangedSelf { level, charging } = &event {
-                    self_batt_level.store(*level, std::sync::atomic::Ordering::Relaxed);
-                    self_batt_charging.store(*charging, std::sync::atomic::Ordering::Relaxed);
+                    shared.self_batt_level.store(*level, std::sync::atomic::Ordering::Relaxed);
+                    shared.self_batt_charging.store(*charging, std::sync::atomic::Ordering::Relaxed);
                 }
                 // FluxMesh: only `GhostTimeout`/`PeerSeen` (FS-046 swap) ever
                 // consult the secondary-peer set (see `App::other_linked_peers`),
@@ -937,7 +854,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                 if let Event::PeerRevoked { peer_id } = &event {
                     purge_peer_from_inflight(*peer_id, &inflight).await;
                 }
-                dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta, &outbox, &pending_pairs, &mut seq_store).await;
+                dispatch(actions, &mut app, &mut seq_store, &shared).await;
             }
             Some(driver_cmd) = cmd_rx.recv() => {
                 match driver_cmd {
@@ -965,41 +882,10 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             &*wall_clock,
                         );
                         let actions = gate_outbound(actions, &transport, &pending_pairs).await;
-                        dispatch(actions, &mut app, &transport, &trusted, keystore_dir.as_ref(), &state_watch_tx, &logs_bcast_tx, &log_tail, &last_written_hashes, &metrics, &inflight, &peer_meta, &outbox, &pending_pairs, &mut seq_store).await;
+                        dispatch(actions, &mut app, &mut seq_store, &shared).await;
                     }
                     run_cmd @ DriverCmd::Run { .. } => {
-                        handle_driver_cmd(
-                            run_cmd,
-                            &mut app,
-                            &wall_clock,
-                            &identity,
-                            &trusted,
-                            &pairing_window,
-                            &transport,
-                            &pending_initiator_tx,
-                            &event_tx,
-                            &state_watch_tx,
-                            &logs_bcast_tx,
-                            &log_tail,
-                            &last_written_hashes,
-                            keystore_dir.as_ref(),
-                            &udp_bind,
-                            udp_port,
-                            &metrics,
-                            &inflight,
-                            &peer_meta,
-                            &pending_pairs,
-                            &pin_advert,
-                            &disc_cache,
-                            &backoff,
-                            &mdns_ctx,
-                            &shutdown,
-                            &outbox,
-                            &outbox_stage,
-                            &mut seq_store,
-                            &deferred_sas_confirm,
-                            &cleared_tombstone,
-                        ).await;
+                        handle_driver_cmd(run_cmd, &mut app, &mut seq_store, &shared).await;
                     }
                 }
                 // `CmdOp::ClearHistory` (handled inside `handle_driver_cmd`,
@@ -1026,7 +912,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
 }
 
 /// Internal request from an IPC handler to the driver.
-enum DriverCmd {
+pub(super) enum DriverCmd {
     Run {
         op: CmdOp,
         reply: oneshot::Sender<CmdResponse>,

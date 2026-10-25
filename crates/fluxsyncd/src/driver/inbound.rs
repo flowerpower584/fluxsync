@@ -2,35 +2,24 @@
 
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn transport_recv_loop(
-    transport: Arc<Transport>,
-    identity: Identity,
-    trusted: TrustedSet,
-    pairing_window: PairingWindow,
-    pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
-    event_tx: mpsc::Sender<Event>,
-    shutdown: CancellationToken,
-    keystore_dir: Option<PathBuf>,
-    metrics: Arc<Mutex<MetricsTracker>>,
-    inflight: InflightMap,
-    pending_pairs: PendingSet,
-    mesh_seen: MeshSeen,
-    peer_meta: PeerMetaMap,
-    disc_cache: DiscoveryCache,
-    backoff: BackoffMap,
-    lan_only_handshakes: bool,
-    outbox: SharedOutbox,
-    pending_pulls: PendingPulls,
-    outbox_stage: PendingOutboxStage,
-    state_rx: watch::Receiver<State>,
-    deferred_sas_confirm: DeferredSasConfirm,
-    echo_ack_sent: EchoAckSent,
-    cleared_tombstone: ClearedTombstone,
-) -> Result<()> {
+pub(super) async fn transport_recv_loop(sh: Arc<Shared>) -> Result<()> {
+    let Shared {
+        transport,
+        identity,
+        trusted,
+        pairing_window,
+        pending_initiator_tx,
+        event_tx,
+        shutdown,
+        metrics,
+        inflight,
+        pending_pairs,
+        reassembly,
+        ..
+    } = &*sh;
+    let keystore_dir = &sh.keystore_dir;
+    let lan_only_handshakes = sh.lan_only_handshakes;
     let mut buf = vec![0u8; 65535];
-    let reassembly: Arc<Mutex<HashMap<[u8; 32], Reassembly>>> =
-        Arc::new(Mutex::new(HashMap::new()));
     // FS-058: per-source-IP handshake limiter. Local-mutable; recv loop is
     // single-task so no Arc<Mutex<>> needed.
     let mut handshake_limiter = HandshakeRateLimiter::new();
@@ -279,7 +268,7 @@ pub(super) async fn transport_recv_loop(
                         }
 
                         match fluxsync_proto::decode(&plaintext) {
-                            Ok(f) => dispatch_inbound_frame(f, peer_id, &mesh_seen, &event_tx, &transport, &reassembly, &metrics, &inflight, &pending_pairs, &trusted, &disc_cache, &backoff, &peer_meta, keystore_dir.as_ref(), &outbox, &pending_pulls, &outbox_stage, &state_rx, &deferred_sas_confirm, &echo_ack_sent, &cleared_tombstone).await,
+                            Ok(f) => dispatch_inbound_frame(f, peer_id, &sh).await,
                             Err(e) => tracing::warn!(error = %e, "decode encrypted"),
                         }
                     }
@@ -296,26 +285,49 @@ pub(super) async fn transport_recv_loop(
 // Clipboard watcher (read side)
 // ─────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn complete_reassembled_item(
-    transport: &Arc<Transport>,
-    inflight: &InflightMap,
-    mesh_seen: &MeshSeen,
-    event_tx: &mpsc::Sender<Event>,
-    source: [u8; 32],
-    origin: [u8; 32],
-    event_seq: u64,
-    hash: [u8; 32],
-    kind: Kind,
-    sensitive: bool,
-    lamport: u64,
-    payload: Vec<u8>,
-    outbox: &SharedOutbox,
-    outbox_stage: &PendingOutboxStage,
-    pending_pulls: &PendingPulls,
-    state_rx: &watch::Receiver<State>,
-    pending_pairs: &PendingSet,
-) {
+/// A clipboard item whose bytes are complete — a single frame, or every
+/// chunk reassembled — ready to be verified, applied and forwarded.
+pub(super) struct CompleteItem {
+    /// The peer the bytes came from on this hop.
+    pub(super) source: [u8; 32],
+    /// The device that originally copied the item (mesh `EventId.origin`).
+    pub(super) origin: [u8; 32],
+    pub(super) event_seq: u64,
+    pub(super) hash: [u8; 32],
+    pub(super) kind: Kind,
+    pub(super) sensitive: bool,
+    pub(super) lamport: u64,
+    pub(super) payload: Vec<u8>,
+}
+
+/// FluxMesh robustness slice 3: finish a complete item. Acks the source
+/// (always, so it stops retransmitting), then — only on first sight of this
+/// `EventId` (mesh anti-loop) — re-chunks the full payload and relays it
+/// across further hops, and delivers it locally. A chunked image thus reaches
+/// a third node B→C, not just direct neighbours.
+pub(super) async fn complete_reassembled_item(sh: &Shared, item: CompleteItem) {
+    let Shared {
+        transport,
+        inflight,
+        mesh_seen,
+        event_tx,
+        outbox,
+        outbox_stage,
+        pending_pulls,
+        state_watch_tx: state_rx,
+        pending_pairs,
+        ..
+    } = sh;
+    let CompleteItem {
+        source,
+        origin,
+        event_seq,
+        hash,
+        kind,
+        sensitive,
+        lamport,
+        payload,
+    } = item;
     // SE-14 defense in depth: reject a reassembled item whose claimed hash
     // doesn't match its payload BEFORE acking, relaying, or caching it —
     // see `verify_content_hash`.
@@ -415,30 +427,29 @@ pub(super) async fn complete_reassembled_item(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn dispatch_inbound_frame(
-    frame: Frame,
-    peer_id: [u8; 32],
-    mesh_seen: &MeshSeen,
-    event_tx: &mpsc::Sender<Event>,
-    transport: &Arc<Transport>,
-    reassembly: &Arc<Mutex<HashMap<[u8; 32], Reassembly>>>,
-    metrics: &Arc<Mutex<MetricsTracker>>,
-    inflight: &InflightMap,
-    pending_pairs: &PendingSet,
-    trusted: &TrustedSet,
-    disc_cache: &DiscoveryCache,
-    backoff: &BackoffMap,
-    peer_meta: &PeerMetaMap,
-    keystore_dir: Option<&std::path::PathBuf>,
-    outbox: &SharedOutbox,
-    pending_pulls: &PendingPulls,
-    outbox_stage: &PendingOutboxStage,
-    state_rx: &watch::Receiver<State>,
-    deferred_sas_confirm: &DeferredSasConfirm,
-    echo_ack_sent: &EchoAckSent,
-    cleared_tombstone: &ClearedTombstone,
-) {
+pub(super) async fn dispatch_inbound_frame(frame: Frame, peer_id: [u8; 32], sh: &Shared) {
+    let Shared {
+        mesh_seen,
+        event_tx,
+        transport,
+        reassembly,
+        metrics,
+        inflight,
+        pending_pairs,
+        trusted,
+        disc_cache,
+        backoff,
+        peer_meta,
+        outbox,
+        pending_pulls,
+        outbox_stage,
+        state_watch_tx: state_rx,
+        deferred_sas_confirm,
+        echo_ack_sent,
+        cleared_tombstone,
+        ..
+    } = sh;
+    let keystore_dir = sh.keystore_dir.as_ref();
     // FS-052 strict gate (VULN-002 fix): if the active session's peer
     // landed via TOFU and has not been verbally confirmed yet, drop all
     // data-bearing frames (`ClipboardItem`, `Chunk`) until the user runs
@@ -529,23 +540,17 @@ pub(super) async fn dispatch_inbound_frame(
                     drop(map);
 
                     complete_reassembled_item(
-                        transport,
-                        inflight,
-                        mesh_seen,
-                        event_tx,
-                        peer_id,
-                        origin,
-                        event_seq,
-                        item.hash,
-                        kind,
-                        sensitive,
-                        lamport,
-                        full_payload,
-                        outbox,
-                        outbox_stage,
-                        pending_pulls,
-                        state_rx,
-                        pending_pairs,
+                        sh,
+                        CompleteItem {
+                            source: peer_id,
+                            origin: origin,
+                            event_seq: event_seq,
+                            hash: item.hash,
+                            kind: kind,
+                            sensitive: sensitive,
+                            lamport: lamport,
+                            payload: full_payload,
+                        },
                     )
                     .await;
                 }
@@ -700,23 +705,17 @@ pub(super) async fn dispatch_inbound_frame(
                 drop(map);
 
                 complete_reassembled_item(
-                    transport,
-                    inflight,
-                    mesh_seen,
-                    event_tx,
-                    peer_id,
-                    origin,
-                    event_seq,
-                    c.item_id,
-                    kind,
-                    sensitive,
-                    lamport,
-                    full_payload,
-                    outbox,
-                    outbox_stage,
-                    pending_pulls,
-                    state_rx,
-                    pending_pairs,
+                    sh,
+                    CompleteItem {
+                        source: peer_id,
+                        origin: origin,
+                        event_seq: event_seq,
+                        hash: c.item_id,
+                        kind: kind,
+                        sensitive: sensitive,
+                        lamport: lamport,
+                        payload: full_payload,
+                    },
                 )
                 .await;
             }

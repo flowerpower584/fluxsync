@@ -33,17 +33,18 @@ pub(super) async fn try_primary_failover(
     true
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn heartbeat_loop(
-    transport: Arc<Transport>,
-    event_tx: mpsc::Sender<Event>,
-    shutdown: CancellationToken,
-    metrics: Arc<Mutex<MetricsTracker>>,
-    backoff: BackoffMap,
-    peer_meta: PeerMetaMap,
-    self_batt_level: Arc<std::sync::atomic::AtomicU8>,
-    self_batt_charging: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<()> {
+pub(super) async fn heartbeat_loop(sh: Arc<Shared>) -> Result<()> {
+    let Shared {
+        transport,
+        event_tx,
+        shutdown,
+        metrics,
+        backoff,
+        peer_meta,
+        self_batt_level,
+        self_batt_charging,
+        ..
+    } = &*sh;
     // 3s interval + 3-miss threshold ⇒ an ungraceful disconnect (crash,
     // sleep, Wi-Fi drop — no Bye) surfaces in ~9s instead of the old ~30s,
     // matching the "3 missed = offline" contract documented in state.rs.
@@ -259,19 +260,18 @@ pub(super) const REKEY_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 /// hiccup must not penalize its future reconnect pacing. The next tick
 /// simply retries (the age/bytes trigger stays true until a rekey
 /// actually lands).
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn rekey_watchdog(
-    identity: Identity,
-    transport: Arc<Transport>,
-    trusted: TrustedSet,
-    pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
-    event_tx: mpsc::Sender<Event>,
-    backoff: BackoffMap,
-    max_age_ms: u64,
-    max_bytes: u64,
-    keystore_dir: Option<PathBuf>,
-    shutdown: CancellationToken,
-) -> Result<()> {
+pub(super) async fn rekey_watchdog(sh: Arc<Shared>, max_age_ms: u64, max_bytes: u64) -> Result<()> {
+    let Shared {
+        identity,
+        transport,
+        trusted,
+        pending_initiator_tx,
+        event_tx,
+        backoff,
+        shutdown,
+        ..
+    } = &*sh;
+    let keystore_dir = &sh.keystore_dir;
     let mut interval = tokio::time::interval(REKEY_CHECK_INTERVAL);
     loop {
         tokio::select! {

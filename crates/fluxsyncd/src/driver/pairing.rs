@@ -2,24 +2,25 @@
 
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn discovery_dispatcher(
     mut rx: mpsc::Receiver<DiscoveryEvent>,
-    identity: Identity,
-    trusted: TrustedSet,
-    transport: Arc<Transport>,
-    pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
-    event_tx: mpsc::Sender<Event>,
-    disc_cache: DiscoveryCache,
-    backoff: BackoffMap,
+    sh: Arc<Shared>,
     // Item 4 (secondary redial): boot-time `peers.json` `last_addr` per
     // trusted peer id — the fallback candidate address for a SECONDARY
     // that has never held a session on `transport` this boot (so its
     // per-peer `roaming_history_snapshot_for` is still empty).
     persisted_peer_addrs: Arc<HashMap<[u8; 32], SocketAddr>>,
-    keystore_dir: Option<PathBuf>,
-    shutdown: CancellationToken,
 ) -> Result<()> {
+    let Shared {
+        identity,
+        trusted,
+        transport,
+        event_tx,
+        disc_cache,
+        backoff,
+        shutdown,
+        ..
+    } = &*sh;
     // DIR-P1-02: polled at the initial-backoff granularity (see
     // `backoff::INITIAL_BASE`), not the redial cadence itself — actual
     // dial pacing is governed by `PeerBackoff::ready` below. Checking
@@ -98,19 +99,13 @@ pub(super) async fn discovery_dispatcher(
                                 }
                             }
                             for h_addr in candidates {
-                                let id_clone = identity.clone();
                                 let static_pub = peer.static_pub;
                                 let peer_id_clone = id;
                                 let peer_name = peer.name.clone();
-                                let transport_clone = transport.clone();
-                                let pending_tx = pending_initiator_tx.clone();
-                                let event_tx_clone = event_tx.clone();
-                                let backoff_clone = backoff.clone();
-                                let trusted_clone = trusted.clone();
-                                let kd = keystore_dir.clone();
+                                let sh = sh.clone();
 
                                 // [REMEDIATION] Proactive Probe Tie-break: only one side initiates.
-                                if id_clone.public_key() >= static_pub {
+                                if identity.public_key() >= static_pub {
                                     tracing::debug!(peer = %hex::encode(&peer_id_clone[..4]), "proactive probe tie-break: peer initiates");
                                     continue;
                                 }
@@ -122,18 +117,12 @@ pub(super) async fn discovery_dispatcher(
                                         "proactive probe: trying known IP in parallel"
                                     );
                                     start_initiator(
-                                        id_clone,
+                                        &sh,
                                         static_pub,
                                         vec![h_addr],
                                         peer_id_clone,
                                         peer_name,
-                                        transport_clone,
-                                        pending_tx,
-                                        event_tx_clone,
-                                        None,
-                                        backoff_clone,
-                                        trusted_clone,
-                                        kd,
+                                        false,
                                     ).await;
                                 });
                             }
@@ -202,16 +191,10 @@ pub(super) async fn discovery_dispatcher(
                         continue;
                     }
                     for h_addr in candidates {
-                        let id_clone = identity.clone();
                         let static_pub = peer.static_pub;
                         let peer_id_clone = id;
                         let peer_name = peer.name.clone();
-                        let transport_clone = transport.clone();
-                        let pending_tx = pending_initiator_tx.clone();
-                        let event_tx_clone = event_tx.clone();
-                        let backoff_clone = backoff.clone();
-                        let trusted_clone = trusted.clone();
-                        let kd = keystore_dir.clone();
+                        let sh = sh.clone();
 
                         tokio::spawn(async move {
                             tracing::debug!(
@@ -220,18 +203,12 @@ pub(super) async fn discovery_dispatcher(
                                 "proactive probe (secondary): trying known IP in parallel"
                             );
                             start_initiator(
-                                id_clone,
+                                &sh,
                                 static_pub,
                                 vec![h_addr],
                                 peer_id_clone,
                                 peer_name,
-                                transport_clone,
-                                pending_tx,
-                                event_tx_clone,
-                                None,
-                                backoff_clone,
-                                trusted_clone,
-                                kd,
+                                false,
                             ).await;
                         });
                     }
@@ -317,20 +294,7 @@ pub(super) async fn discovery_dispatcher(
                         // real signal, not a blind timer. The attempt still
                         // feeds `backoff` below so a failure here still
                         // paces the *next* blind redial correctly.
-                        start_initiator(
-                            identity.clone(),
-                            static_pub,
-                            addrs,
-                            peer_id,
-                            name,
-                            transport.clone(),
-                            pending_initiator_tx.clone(),
-                            event_tx.clone(),
-                            None,
-                            backoff.clone(),
-                            trusted.clone(),
-                            keystore_dir.clone(),
-                        ).await;
+                        start_initiator(&sh, static_pub, addrs, peer_id, name, false).await;
                     }
                     DiscoveryEvent::Removed { .. } => {
                         // mDNS removal is unreliable — TTL expiry, transient
@@ -360,20 +324,16 @@ pub(super) async fn discovery_dispatcher(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn start_initiator(
-    identity: Identity,
+    sh: &Arc<Shared>,
     static_pub: [u8; 32],
     addrs: Vec<SocketAddr>,
     peer_id: [u8; 32],
     name: String,
-    transport: Arc<Transport>,
-    pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
-    event_tx: mpsc::Sender<Event>,
-    pending: Option<PendingSet>,
-    backoff: BackoffMap,
-    trusted: TrustedSet,
-    keystore_dir: Option<PathBuf>,
+    // `true` engages the SAS gate: a fresh pairing parks the peer in
+    // `pending_pairs` until both sides confirm the 6 words. `false` is a
+    // silent reconnect of an already-confirmed peer.
+    sas_gate: bool,
 ) {
     if addrs.is_empty() {
         return;
@@ -386,7 +346,7 @@ pub(super) async fn start_initiator(
     // (under the lock, before spawning) with a placeholder; the loop
     // installs the real per-attempt channel before each handshake.
     {
-        let mut g = pending_initiator_tx.lock().await;
+        let mut g = sh.pending_initiator_tx.lock().await;
         if g.is_some() {
             tracing::debug!("initiator already pending; skipping");
             return;
@@ -394,7 +354,19 @@ pub(super) async fn start_initiator(
         let (placeholder, _) = mpsc::unbounded_channel::<Vec<u8>>();
         *g = Some(placeholder);
     }
+    let sh = Arc::clone(sh);
+    let pending = sas_gate.then(|| sh.pending_pairs.clone());
     tokio::spawn(async move {
+        let Shared {
+            identity,
+            transport,
+            pending_initiator_tx,
+            event_tx,
+            backoff,
+            trusted,
+            keystore_dir,
+            ..
+        } = &*sh;
         // Try each address hint in order (LAN first, then tailnet). A dead
         // hint fails fast via run_initiator's 5s msg2 timeout, then we
         // refresh the channel + pending slot and try the next. One QR with

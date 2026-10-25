@@ -2,6 +2,168 @@ use super::load_trusted_peers;
 use crate::handshake;
 use crate::keystore::{save_peers, StoredPeer};
 
+// ── Pre-`Shared` call shapes ───────────────────────────────────────────
+// Most tests here predate `Shared` and hand each driver handle over one by
+// one. These adapters fold those arguments into a `Shared` — cloning the very
+// same Arcs and channels, so the test still observes every effect — and call
+// the real function. Every scenario below keeps exercising production code.
+
+/// `Shared` reads state through the watch *sender*; these tests hold a
+/// receiver. The functions under test only ever read it, so a sender seeded
+/// with the receiver's current value is observationally identical.
+fn state_sender_from(
+    rx: &tokio::sync::watch::Receiver<super::State>,
+) -> tokio::sync::watch::Sender<super::State> {
+    tokio::sync::watch::channel(rx.borrow().clone()).0
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch(
+    actions: Vec<super::Action>,
+    app: &mut super::App,
+    transport: &std::sync::Arc<super::Transport>,
+    trusted: &super::TrustedSet,
+    keystore_dir: Option<&std::path::PathBuf>,
+    state_watch_tx: &tokio::sync::watch::Sender<super::State>,
+    logs_bcast_tx: &tokio::sync::broadcast::Sender<super::LogEntry>,
+    log_tail: &std::sync::Arc<super::LogTail>,
+    last_written_hashes: &std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<[u8; 32]>>>,
+    metrics: &std::sync::Arc<tokio::sync::Mutex<super::MetricsTracker>>,
+    inflight: &super::InflightMap,
+    peer_meta: &super::PeerMetaMap,
+    outbox: &super::SharedOutbox,
+    pending_pairs: &super::PendingSet,
+    seq_store: &mut Option<super::SeqStore>,
+) {
+    let mut sh = super::Shared::for_test(transport.clone());
+    sh.trusted = trusted.clone();
+    sh.keystore_dir = keystore_dir.cloned();
+    sh.state_watch_tx = state_watch_tx.clone();
+    sh.logs_bcast_tx = logs_bcast_tx.clone();
+    sh.log_tail = log_tail.clone();
+    sh.last_written_hashes = last_written_hashes.clone();
+    sh.metrics = metrics.clone();
+    sh.inflight = inflight.clone();
+    sh.peer_meta = peer_meta.clone();
+    sh.outbox = outbox.clone();
+    sh.pending_pairs = pending_pairs.clone();
+    super::dispatch(actions, app, seq_store, &sh).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_inbound_frame(
+    frame: super::Frame,
+    peer_id: [u8; 32],
+    mesh_seen: &super::MeshSeen,
+    event_tx: &tokio::sync::mpsc::Sender<super::Event>,
+    transport: &std::sync::Arc<super::Transport>,
+    reassembly: &super::ReassemblyMap,
+    metrics: &std::sync::Arc<tokio::sync::Mutex<super::MetricsTracker>>,
+    inflight: &super::InflightMap,
+    pending_pairs: &super::PendingSet,
+    trusted: &super::TrustedSet,
+    disc_cache: &super::DiscoveryCache,
+    backoff: &super::BackoffMap,
+    peer_meta: &super::PeerMetaMap,
+    keystore_dir: Option<&std::path::PathBuf>,
+    outbox: &super::SharedOutbox,
+    pending_pulls: &super::PendingPulls,
+    outbox_stage: &super::PendingOutboxStage,
+    state_rx: &tokio::sync::watch::Receiver<super::State>,
+    deferred_sas_confirm: &super::DeferredSasConfirm,
+    echo_ack_sent: &super::EchoAckSent,
+    cleared_tombstone: &super::ClearedTombstone,
+) {
+    let mut sh = super::Shared::for_test(transport.clone());
+    sh.mesh_seen = mesh_seen.clone();
+    sh.event_tx = event_tx.clone();
+    sh.reassembly = reassembly.clone();
+    sh.metrics = metrics.clone();
+    sh.inflight = inflight.clone();
+    sh.pending_pairs = pending_pairs.clone();
+    sh.trusted = trusted.clone();
+    sh.disc_cache = disc_cache.clone();
+    sh.backoff = backoff.clone();
+    sh.peer_meta = peer_meta.clone();
+    sh.keystore_dir = keystore_dir.cloned();
+    sh.outbox = outbox.clone();
+    sh.pending_pulls = pending_pulls.clone();
+    sh.outbox_stage = outbox_stage.clone();
+    sh.state_watch_tx = state_sender_from(state_rx);
+    sh.deferred_sas_confirm = deferred_sas_confirm.clone();
+    sh.echo_ack_sent = echo_ack_sent.clone();
+    sh.cleared_tombstone = cleared_tombstone.clone();
+    super::dispatch_inbound_frame(frame, peer_id, &sh).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_reassembled_item(
+    transport: &std::sync::Arc<super::Transport>,
+    inflight: &super::InflightMap,
+    mesh_seen: &super::MeshSeen,
+    event_tx: &tokio::sync::mpsc::Sender<super::Event>,
+    source: [u8; 32],
+    origin: [u8; 32],
+    event_seq: u64,
+    hash: [u8; 32],
+    kind: super::Kind,
+    sensitive: bool,
+    lamport: u64,
+    payload: Vec<u8>,
+    outbox: &super::SharedOutbox,
+    outbox_stage: &super::PendingOutboxStage,
+    pending_pulls: &super::PendingPulls,
+    state_rx: &tokio::sync::watch::Receiver<super::State>,
+    pending_pairs: &super::PendingSet,
+) {
+    let mut sh = super::Shared::for_test(transport.clone());
+    sh.inflight = inflight.clone();
+    sh.mesh_seen = mesh_seen.clone();
+    sh.event_tx = event_tx.clone();
+    sh.outbox = outbox.clone();
+    sh.outbox_stage = outbox_stage.clone();
+    sh.pending_pulls = pending_pulls.clone();
+    sh.state_watch_tx = state_sender_from(state_rx);
+    sh.pending_pairs = pending_pairs.clone();
+    let item = super::CompleteItem {
+        source,
+        origin,
+        event_seq,
+        hash,
+        kind,
+        sensitive,
+        lamport,
+        payload,
+    };
+    super::complete_reassembled_item(&sh, item).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rekey_watchdog(
+    identity: super::Identity,
+    transport: std::sync::Arc<super::Transport>,
+    trusted: super::TrustedSet,
+    pending_initiator_tx: std::sync::Arc<
+        tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
+    >,
+    event_tx: tokio::sync::mpsc::Sender<super::Event>,
+    backoff: super::BackoffMap,
+    max_age_ms: u64,
+    max_bytes: u64,
+    keystore_dir: Option<std::path::PathBuf>,
+    shutdown: super::CancellationToken,
+) -> anyhow::Result<()> {
+    let mut sh = super::Shared::for_test(transport);
+    sh.identity = identity;
+    sh.trusted = trusted;
+    sh.pending_initiator_tx = pending_initiator_tx;
+    sh.event_tx = event_tx;
+    sh.backoff = backoff;
+    sh.keystore_dir = keystore_dir;
+    sh.shutdown = shutdown;
+    super::rekey_watchdog(std::sync::Arc::new(sh), max_age_ms, max_bytes).await
+}
+
 /// FS-039: a peer persisted to `peers.json` must be back in the
 /// trusted set after a restart (i.e. via the boot reload path).
 #[test]
@@ -659,7 +821,7 @@ async fn sync_security_wipe_if_needed_clears_image_cache() {
 #[tokio::test]
 async fn write_clipboard_populates_desktop_image_cache_gated_by_sensitivity_and_wipe() {
     use super::{
-        dispatch, encode_png, image_cache, image_rgba_hash, lookup_cached_image,
+        encode_png, image_cache, image_rgba_hash, lookup_cached_image,
         sync_security_wipe_if_needed, Outbox, PendingOutboxStage,
     };
     use crate::transport::Transport;
@@ -814,7 +976,7 @@ fn reassembly_key_namespaces_by_source_peer() {
 /// arm (`Bye | HandshakeInit | HandshakeResp`) dropped `Bye` silently.
 #[tokio::test]
 async fn fs041_bye_frame_emits_peer_lost() {
-    use super::{dispatch_inbound_frame, Event, Reassembly};
+    use super::{Event, Reassembly};
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
     use fluxsync_proto::{Frame, Msg, PROTOCOL_VERSION};
@@ -881,9 +1043,7 @@ async fn fs041_bye_frame_emits_peer_lost() {
 /// and emit `Event::PeerLost`.
 #[tokio::test]
 async fn revoke_frame_removes_trust_and_emits_peer_lost() {
-    use super::{
-        dispatch_inbound_frame, BackoffMap, DiscoveryCache, Event, Reassembly, ResolvedPeer,
-    };
+    use super::{BackoffMap, DiscoveryCache, Event, Reassembly, ResolvedPeer};
     use crate::backoff::PeerBackoff;
     use crate::handshake::tofu_trusted_peer;
     use crate::metrics::MetricsTracker;
@@ -994,7 +1154,7 @@ async fn revoke_frame_removes_trust_and_emits_peer_lost() {
 /// that IS trusted AND is NOT still pending confirmation.
 #[tokio::test]
 async fn fs052_gate_blocks_clipboard_from_untrusted_non_pending_peer() {
-    use super::{dispatch_inbound_frame, Outbox, Reassembly};
+    use super::{Outbox, Reassembly};
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
     use fluxsync_core::SeenSet;
@@ -1098,7 +1258,7 @@ fn test_pending_pair(expires_at: std::time::Instant) -> crate::handshake::Pendin
 /// engaged) and emit `Event::SasPeerConfirmed`. Trust is untouched.
 #[tokio::test]
 async fn inbound_pair_confirm_accept_refreshes_pending_and_emits_peer_confirmed() {
-    use super::{dispatch_inbound_frame, Event, Reassembly};
+    use super::{Event, Reassembly};
     use crate::handshake::tofu_trusted_peer;
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
@@ -1191,7 +1351,7 @@ async fn inbound_pair_confirm_accept_refreshes_pending_and_emits_peer_confirmed(
 /// legacy-without-sas-confirm sender.
 #[tokio::test]
 async fn inbound_pair_confirm_accept_outside_flow_echo_acks_once_for_trusted_sas_peer() {
-    use super::{dispatch_inbound_frame, Reassembly};
+    use super::Reassembly;
     use crate::handshake::tofu_trusted_peer;
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
@@ -1356,7 +1516,7 @@ async fn inbound_pair_confirm_accept_outside_flow_echo_acks_once_for_trusted_sas
 /// reset an existing flow.
 #[tokio::test]
 async fn inbound_pair_verify_started_reopens_pending_for_trusted_peer_only() {
-    use super::{dispatch_inbound_frame, Event, Reassembly};
+    use super::{Event, Reassembly};
     use crate::handshake::tofu_trusted_peer;
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
@@ -1488,7 +1648,7 @@ async fn inbound_pair_verify_started_reopens_pending_for_trusted_peer_only() {
 /// dropped — plus `Event::SasPeerRejected` so the UI can say why.
 #[tokio::test]
 async fn inbound_pair_confirm_reject_revokes_trust_and_emits_peer_rejected() {
-    use super::{dispatch_inbound_frame, Event, Reassembly};
+    use super::{Event, Reassembly};
     use crate::handshake::tofu_trusted_peer;
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
@@ -1583,7 +1743,7 @@ async fn inbound_pair_confirm_reject_revokes_trust_and_emits_peer_rejected() {
 /// this fix; only the phase-stomping event is suppressed.
 #[tokio::test]
 async fn inbound_pair_confirm_reject_from_non_pairing_peer_does_not_emit_sas_event() {
-    use super::{dispatch_inbound_frame, Reassembly};
+    use super::Reassembly;
     use crate::handshake::tofu_trusted_peer;
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
@@ -1748,7 +1908,7 @@ fn build_resync_offer_empty_outbox_yields_empty_offer() {
 /// insertion (see `crate::outbox`'s module doc).
 #[tokio::test]
 async fn complete_reassembled_item_gates_outbox_on_sensitivity() {
-    use super::{complete_reassembled_item, Outbox};
+    use super::Outbox;
     use crate::transport::Transport;
     use fluxsync_core::SeenSet;
     use fluxsync_proto::Kind;
@@ -1837,7 +1997,7 @@ async fn complete_reassembled_item_gates_outbox_on_sensitivity() {
 /// non-sensitive image still populates the outbox normally.
 #[tokio::test]
 async fn complete_reassembled_item_gates_outbox_on_sensitivity_for_images() {
-    use super::{complete_reassembled_item, Outbox};
+    use super::Outbox;
     use crate::transport::Transport;
     use fluxsync_core::SeenSet;
     use fluxsync_proto::Kind;
@@ -1941,7 +2101,7 @@ async fn complete_reassembled_item_gates_outbox_on_sensitivity_for_images() {
 /// loop and `CmdOp::Revoke` do.
 #[tokio::test]
 async fn revoke_purges_only_that_peers_staged_outbox_entry() {
-    use super::{complete_reassembled_item, purge_dropped_pending_from_outbox_stage, Outbox};
+    use super::{purge_dropped_pending_from_outbox_stage, Outbox};
     use crate::transport::Transport;
     use fluxsync_core::{Action, App, Config, Event, FirewallPolicy, Rule, SeenSet, StubWallClock};
     use fluxsync_proto::Kind;
@@ -2094,7 +2254,7 @@ async fn revoke_purges_only_that_peers_staged_outbox_entry() {
 /// them) — case 3 below proves that invariant survives the fix.
 #[tokio::test]
 async fn complete_reassembled_item_does_not_relay_a_firewall_blocked_item() {
-    use super::{complete_reassembled_item, Outbox};
+    use super::Outbox;
     use crate::transport::Transport;
     use fluxsync_core::{Config, FirewallPolicy, Rule, SeenSet};
     use fluxsync_crypto::{test_util::pair_for_test, Identity};
@@ -2245,7 +2405,7 @@ async fn complete_reassembled_item_does_not_relay_a_firewall_blocked_item() {
 /// first sight, gated on sensitivity the same way.
 #[tokio::test]
 async fn dispatch_inbound_frame_single_frame_item_populates_outbox_when_not_sensitive() {
-    use super::{dispatch_inbound_frame, Outbox, Reassembly};
+    use super::{Outbox, Reassembly};
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
     use fluxsync_core::SeenSet;
@@ -2344,7 +2504,7 @@ async fn dispatch_inbound_frame_single_frame_item_populates_outbox_when_not_sens
 /// unconditionally here too.
 #[tokio::test]
 async fn dispatch_inbound_frame_single_frame_item_does_not_relay_when_firewall_blocks() {
-    use super::{dispatch_inbound_frame, Outbox, Reassembly};
+    use super::{Outbox, Reassembly};
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
     use fluxsync_core::{Config, FirewallPolicy, Rule, SeenSet};
@@ -2458,7 +2618,7 @@ async fn dispatch_inbound_frame_single_frame_item_does_not_relay_when_firewall_b
 /// `Inflight::pending_peers` ack-tracking set.
 #[tokio::test]
 async fn send_item_fan_out_excludes_pending_secondary_peer() {
-    use super::{dispatch, Outbox};
+    use super::Outbox;
     use crate::transport::Transport;
     use fluxsync_core::{Action, App, Config};
     use fluxsync_crypto::{test_util::pair_for_test, Identity};
@@ -2562,7 +2722,7 @@ async fn send_item_fan_out_excludes_pending_secondary_peer() {
 /// the FS-052 confirmation gate entirely.
 #[tokio::test]
 async fn mesh_relay_excludes_pending_secondary_peer() {
-    use super::{dispatch_inbound_frame, Outbox, Reassembly};
+    use super::{Outbox, Reassembly};
     use crate::handshake::tofu_trusted_peer;
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
@@ -2689,7 +2849,7 @@ async fn mesh_relay_excludes_pending_secondary_peer() {
 /// instead merge: keep the pre-existing peer, add the puller.
 #[tokio::test]
 async fn resync_pull_serve_merges_inflight_pending_peers_instead_of_replacing() {
-    use super::{dispatch_inbound_frame, Inflight, Outbox, PeerMeta, Reassembly};
+    use super::{Inflight, Outbox, PeerMeta, Reassembly};
     use crate::metrics::MetricsTracker;
     use crate::outbox::Entry as OutboxEntry;
     use crate::transport::Transport;
@@ -2818,7 +2978,7 @@ async fn resync_pull_serve_merges_inflight_pending_peers_instead_of_replacing() 
 /// time, not just at admission time.
 #[tokio::test]
 async fn resync_pull_serve_skips_entries_blocked_by_live_firewall() {
-    use super::{dispatch_inbound_frame, Outbox, PeerMeta, Reassembly};
+    use super::{Outbox, PeerMeta, Reassembly};
     use crate::metrics::MetricsTracker;
     use crate::outbox::Entry as OutboxEntry;
     use crate::transport::Transport;
@@ -2939,7 +3099,7 @@ async fn resync_pull_serve_skips_entries_blocked_by_live_firewall() {
 /// must be dropped before it ever reaches the outbox.
 #[tokio::test]
 async fn se14_verify_content_hash_gates_clipboard_item_ingestion() {
-    use super::{dispatch_inbound_frame, Outbox, Reassembly};
+    use super::{Outbox, Reassembly};
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
     use fluxsync_core::SeenSet;
@@ -3270,7 +3430,7 @@ async fn forward_frames_merges_inflight_pending_peers_instead_of_replacing() {
 /// existing entry's `pending_peers` instead of merging into it.
 #[tokio::test]
 async fn send_item_merges_inflight_pending_peers_instead_of_replacing() {
-    use super::{dispatch, Inflight, Outbox};
+    use super::{Inflight, Outbox};
     use crate::transport::Transport;
     use fluxsync_core::{Action, App, Config};
     use fluxsync_crypto::{test_util::pair_for_test, Identity};
@@ -3396,7 +3556,7 @@ fn missing_resync_hashes_excludes_hash_with_in_flight_pull() {
 /// deduping offers against in-flight pulls before ever asking twice.
 #[tokio::test]
 async fn resync_offer_from_second_peer_does_not_duplicate_an_in_flight_pull() {
-    use super::{dispatch_inbound_frame, Outbox, PeerMeta, Reassembly};
+    use super::{Outbox, PeerMeta, Reassembly};
     use crate::metrics::MetricsTracker;
     use crate::transport::Transport;
     use fluxsync_core::SeenSet;
@@ -3537,7 +3697,7 @@ async fn resync_offer_from_second_peer_does_not_duplicate_an_in_flight_pull() {
 /// `outbox_stage` must be first-wins too, exactly like `park_pending`.
 #[tokio::test]
 async fn outbox_stage_first_wins_matches_pending_payloads_on_same_hash_collision() {
-    use super::{complete_reassembled_item, Outbox};
+    use super::Outbox;
     use crate::transport::Transport;
     use fluxsync_core::{App, Config, Event, FirewallPolicy, Rule, SeenSet, StubWallClock};
     use fluxsync_proto::Kind;
@@ -3751,7 +3911,7 @@ async fn purge_peer_from_inflight_drops_revoked_peer_and_empties_entries() {
 /// handshake and end up with a bumped `session_generation`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rekey_watchdog_rekeys_a_secondary_session() {
-    use super::{rekey_watchdog, BackoffMap};
+    use super::BackoffMap;
     use crate::handshake::{peer_id_for, TrustedPeer, TrustedSet};
     use crate::transport::{Transport, TYPE_HANDSHAKE_INIT};
     use fluxsync_core::Event;

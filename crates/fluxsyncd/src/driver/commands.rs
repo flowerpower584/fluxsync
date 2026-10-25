@@ -2,39 +2,38 @@
 
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_driver_cmd(
     cmd: DriverCmd,
     app: &mut App,
-    wall: &Arc<dyn WallClock + Send + Sync>,
-    identity: &Identity,
-    trusted: &TrustedSet,
-    pairing_window: &PairingWindow,
-    transport: &Arc<Transport>,
-    pending_initiator_tx: &Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
-    event_tx: &mpsc::Sender<Event>,
-    state_watch_tx: &watch::Sender<State>,
-    logs_bcast_tx: &broadcast::Sender<LogEntry>,
-    log_tail: &Arc<LogTail>,
-    last_written_hashes: &Arc<Mutex<VecDeque<[u8; 32]>>>,
-    keystore_dir: Option<&std::path::PathBuf>,
-    udp_bind: &str,
-    udp_port: u16,
-    metrics: &Arc<Mutex<MetricsTracker>>,
-    inflight: &InflightMap,
-    peer_meta: &PeerMetaMap,
-    pending_pairs: &PendingSet,
-    pin_advert: &PinAdvertisement,
-    disc_cache: &DiscoveryCache,
-    backoff: &BackoffMap,
-    mdns_ctx: &MdnsCtx,
-    shutdown: &CancellationToken,
-    outbox: &SharedOutbox,
-    outbox_stage: &PendingOutboxStage,
     seq_store: &mut Option<SeqStore>,
-    deferred_sas_confirm: &DeferredSasConfirm,
-    cleared_tombstone: &ClearedTombstone,
+    sh: &Arc<Shared>,
 ) {
+    let Shared {
+        wall_clock: wall,
+        identity,
+        trusted,
+        pairing_window,
+        transport,
+        event_tx,
+        log_tail,
+        metrics,
+        inflight,
+        peer_meta,
+        pending_pairs,
+        pin_advert,
+        disc_cache,
+        backoff,
+        mdns_ctx,
+        shutdown,
+        outbox,
+        outbox_stage,
+        deferred_sas_confirm,
+        cleared_tombstone,
+        ..
+    } = &**sh;
+    let keystore_dir = sh.keystore_dir.as_ref();
+    let udp_bind: &str = &sh.udp_bind;
+    let udp_port = sh.udp_port;
     let DriverCmd::Run { op, reply, req_id } = cmd else {
         return;
     };
@@ -65,24 +64,7 @@ pub(super) async fn handle_driver_cmd(
         CmdOp::SetFavorite { hash, favorite } => {
             tracing::info!(%hash, favorite, "IPC: set-favorite");
             let actions = app.handle(Event::SetFavorite { hash, favorite }, &**wall);
-            dispatch(
-                actions,
-                app,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            dispatch(actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::ClearHistory { include_favorites } => {
@@ -110,24 +92,7 @@ pub(super) async fn handle_driver_cmd(
             mark_cleared(cleared_tombstone, &cleared_bytes).await;
             purge_cached_images(&cleared_hex);
             let actions = app.handle(Event::ClearHistory { include_favorites }, &**wall);
-            dispatch(
-                actions,
-                app,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            dispatch(actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::SetFirewall { policy } => {
@@ -141,24 +106,7 @@ pub(super) async fn handle_driver_cmd(
                 }
             }
             // Push the updated policy to every state subscriber.
-            dispatch(
-                vec![Action::EmitState],
-                app,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            dispatch(vec![Action::EmitState], app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::ResolvePending { hash, allow } => {
@@ -193,24 +141,7 @@ pub(super) async fn handle_driver_cmd(
             // same SAS gate as a normal push so an unconfirmed peer can't be fed
             // the held secret.
             let actions = gate_outbound(actions, transport, pending_pairs).await;
-            dispatch(
-                actions,
-                app,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            dispatch(actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::Push { text } => {
@@ -248,24 +179,7 @@ pub(super) async fn handle_driver_cmd(
                 );
                 tracing::debug!(?actions, "LocalClipboardChange results");
                 let actions = gate_outbound(actions, transport, pending_pairs).await;
-                dispatch(
-                    actions,
-                    app,
-                    transport,
-                    trusted,
-                    keystore_dir,
-                    state_watch_tx,
-                    logs_bcast_tx,
-                    log_tail,
-                    last_written_hashes,
-                    metrics,
-                    inflight,
-                    peer_meta,
-                    outbox,
-                    pending_pairs,
-                    seq_store,
-                )
-                .await;
+                dispatch(actions, app, seq_store, sh).await;
                 CmdResponse::ok(req_id, None)
             } else {
                 CmdResponse::ok(req_id, None)
@@ -307,24 +221,7 @@ pub(super) async fn handle_driver_cmd(
                             &**wall,
                         );
                         let actions = gate_outbound(actions, transport, pending_pairs).await;
-                        dispatch(
-                            actions,
-                            app,
-                            transport,
-                            trusted,
-                            keystore_dir,
-                            state_watch_tx,
-                            logs_bcast_tx,
-                            log_tail,
-                            last_written_hashes,
-                            metrics,
-                            inflight,
-                            peer_meta,
-                            outbox,
-                            pending_pairs,
-                            seq_store,
-                        )
-                        .await;
+                        dispatch(actions, app, seq_store, sh).await;
                         CmdResponse::ok(req_id, None)
                     }
                     None => CmdResponse::err(req_id, "push_image: PNG decode failed"),
@@ -381,24 +278,7 @@ pub(super) async fn handle_driver_cmd(
                     },
                     &**wall,
                 );
-                dispatch(
-                    actions,
-                    app,
-                    transport,
-                    trusted,
-                    keystore_dir,
-                    state_watch_tx,
-                    logs_bcast_tx,
-                    log_tail,
-                    last_written_hashes,
-                    metrics,
-                    inflight,
-                    peer_meta,
-                    outbox,
-                    pending_pairs,
-                    seq_store,
-                )
-                .await;
+                dispatch(actions, app, seq_store, sh).await;
                 CmdResponse::ok(req_id, None)
             }
             Err(e) => CmdResponse::err(req_id, e.to_string()),
@@ -416,24 +296,7 @@ pub(super) async fn handle_driver_cmd(
                         tracing::warn!(error = %e, "failed to persist device name");
                     }
                 }
-                dispatch(
-                    vec![Action::EmitState],
-                    app,
-                    transport,
-                    trusted,
-                    keystore_dir,
-                    state_watch_tx,
-                    logs_bcast_tx,
-                    log_tail,
-                    last_written_hashes,
-                    metrics,
-                    inflight,
-                    peer_meta,
-                    outbox,
-                    pending_pairs,
-                    seq_store,
-                )
-                .await;
+                dispatch(vec![Action::EmitState], app, seq_store, sh).await;
                 CmdResponse::ok(req_id, None)
             }
             Err(e) => CmdResponse::err(req_id, e.to_string()),
@@ -450,24 +313,7 @@ pub(super) async fn handle_driver_cmd(
                 },
                 &**wall,
             );
-            dispatch(
-                actions,
-                app,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            dispatch(actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
         // M-TRAY-03: actually terminate. The tray's `restart_stale_daemon`
@@ -523,24 +369,7 @@ pub(super) async fn handle_driver_cmd(
                 }
             }
             let actions = app.handle(Event::ManualUnpair, &**wall);
-            dispatch(
-                actions,
-                app,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            dispatch(actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::Toggle { on } => {
@@ -550,46 +379,12 @@ pub(super) async fn handle_driver_cmd(
                 Event::ToggleOff
             };
             let actions = app.handle(ev, &**wall);
-            dispatch(
-                actions,
-                app,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            dispatch(actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::SetSelfBattery { level, charging } => {
             let actions = app.handle(Event::BatteryChangedSelf { level, charging }, &**wall);
-            dispatch(
-                actions,
-                app,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            dispatch(actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
         CmdOp::Revoke { peer_id } => {
@@ -676,24 +471,7 @@ pub(super) async fn handle_driver_cmd(
             if active == arr && !try_primary_failover(transport, event_tx, peer_meta).await {
                 revoke_actions.extend(app.handle(Event::PeerLost { peer_id: arr }, &**wall));
             }
-            dispatch(
-                revoke_actions,
-                app,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            dispatch(revoke_actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
         // FS-052: list peers that landed in `trusted` under the TOFU
@@ -773,47 +551,13 @@ pub(super) async fn handle_driver_cmd(
                         // case its Hello landed before the pending insert and
                         // the Hello handler's legacy path never fired.
                         let actions = app.handle(Event::SasPeerConfirmed { peer_id: arr }, &**wall);
-                        dispatch(
-                            actions,
-                            app,
-                            transport,
-                            trusted,
-                            keystore_dir,
-                            state_watch_tx,
-                            logs_bcast_tx,
-                            log_tail,
-                            last_written_hashes,
-                            metrics,
-                            inflight,
-                            peer_meta,
-                            outbox,
-                            pending_pairs,
-                            seq_store,
-                        )
-                        .await;
+                        dispatch(actions, app, seq_store, sh).await;
                     }
                 } else {
                     deferred_sas_confirm.lock().await.insert(arr);
                 }
                 let actions = app.handle(Event::SasLocalConfirmed { peer_id: arr }, &**wall);
-                dispatch(
-                    actions,
-                    app,
-                    transport,
-                    trusted,
-                    keystore_dir,
-                    state_watch_tx,
-                    logs_bcast_tx,
-                    log_tail,
-                    last_written_hashes,
-                    metrics,
-                    inflight,
-                    peer_meta,
-                    outbox,
-                    pending_pairs,
-                    seq_store,
-                )
-                .await;
+                dispatch(actions, app, seq_store, sh).await;
             } else {
                 // FS-052 wire mutual confirm: best-effort tell the peer our
                 // human said NO while the session is still alive — the
@@ -890,24 +634,7 @@ pub(super) async fn handle_driver_cmd(
                 if active == arr && !try_primary_failover(transport, event_tx, peer_meta).await {
                     reject_actions.extend(app.handle(Event::PeerLost { peer_id: arr }, &**wall));
                 }
-                dispatch(
-                    reject_actions,
-                    app,
-                    transport,
-                    trusted,
-                    keystore_dir,
-                    state_watch_tx,
-                    logs_bcast_tx,
-                    log_tail,
-                    last_written_hashes,
-                    metrics,
-                    inflight,
-                    peer_meta,
-                    outbox,
-                    pending_pairs,
-                    seq_store,
-                )
-                .await;
+                dispatch(reject_actions, app, seq_store, sh).await;
             }
             CmdResponse::ok(req_id, None)
         }
@@ -978,24 +705,7 @@ pub(super) async fn handle_driver_cmd(
             // the (Handshaking → Linked) transition can fire. Without
             // this, (Idle, HandshakeOk) is a no-op and clipboard sync
             // stays dead even though the Noise tunnel is up.
-            ensure_online(
-                app,
-                wall,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            ensure_online(app, seq_store, sh).await;
             // PR2: surface the PIN + epoch-ms expiry to the UI so the
             // pair window can render the 6-digit code + countdown.
             let pin_expires_at_ms = std::time::SystemTime::now()
@@ -1113,24 +823,7 @@ pub(super) async fn handle_driver_cmd(
             // Scanning a peer's QR is implicit "I want to sync". Bump
             // the FSM into Discovering before we send msg1 so the
             // (Handshaking → Linked) chain can fire when msg2 arrives.
-            ensure_online(
-                app,
-                wall,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            ensure_online(app, seq_store, sh).await;
             // URI carries one or more address hints; if any parsed, kick
             // off the initiator immediately (it tries each in order, LAN
             // before tailnet). If none, the trust has been recorded and
@@ -1139,26 +832,16 @@ pub(super) async fn handle_driver_cmd(
                 tracing::warn!("pair uri carried no usable addr; deferring to discovery");
             } else {
                 start_initiator(
-                    identity.clone(),
+                    sh,
                     static_pub,
                     parsed.addrs,
                     peer_id,
                     name,
-                    transport.clone(),
-                    pending_initiator_tx.clone(),
-                    event_tx.clone(),
-                    // None on an already-trusted, not-pending peer → silent
+                    // `false` on an already-trusted, not-pending peer → silent
                     // reconnect, same as PairAccept/PairFromPin. Otherwise
-                    // Some so the SAS gate engages and the initiator's verify
+                    // `true` so the SAS gate engages and the initiator's verify
                     // screen gets its 6 words.
-                    if already_confirmed {
-                        None
-                    } else {
-                        Some(pending_pairs.clone())
-                    },
-                    backoff.clone(),
-                    trusted.clone(),
-                    keystore_dir.cloned(),
+                    !already_confirmed,
                 )
                 .await;
             }
@@ -1241,24 +924,7 @@ pub(super) async fn handle_driver_cmd(
             }
 
             // Same intent as PairFromUri: caller wants the link live.
-            ensure_online(
-                app,
-                wall,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            ensure_online(app, seq_store, sh).await;
 
             // If addr supplied, kick off the initiator immediately
             // (skips mDNS discovery — useful for tests + for first-pair).
@@ -1266,22 +932,12 @@ pub(super) async fn handle_driver_cmd(
                 match addr_str.parse::<SocketAddr>() {
                     Ok(parsed) => {
                         start_initiator(
-                            identity.clone(),
+                            sh,
                             static_pub,
                             vec![parsed],
                             peer_id,
                             name,
-                            transport.clone(),
-                            pending_initiator_tx.clone(),
-                            event_tx.clone(),
-                            if already_confirmed {
-                                None
-                            } else {
-                                Some(pending_pairs.clone())
-                            },
-                            backoff.clone(),
-                            trusted.clone(),
-                            keystore_dir.cloned(),
+                            !already_confirmed,
                         )
                         .await;
                     }
@@ -1371,41 +1027,14 @@ pub(super) async fn handle_driver_cmd(
                     );
                 }
             }
-            ensure_online(
-                app,
-                wall,
-                transport,
-                trusted,
-                keystore_dir,
-                state_watch_tx,
-                logs_bcast_tx,
-                log_tail,
-                last_written_hashes,
-                metrics,
-                inflight,
-                peer_meta,
-                outbox,
-                pending_pairs,
-                seq_store,
-            )
-            .await;
+            ensure_online(app, seq_store, sh).await;
             start_initiator(
-                identity.clone(),
+                sh,
                 static_pub,
                 vec![target.addr],
                 peer_id,
                 name,
-                transport.clone(),
-                pending_initiator_tx.clone(),
-                event_tx.clone(),
-                if already_confirmed {
-                    None
-                } else {
-                    Some(pending_pairs.clone())
-                },
-                backoff.clone(),
-                trusted.clone(),
-                keystore_dir.cloned(),
+                !already_confirmed,
             )
             .await;
             CmdResponse::ok(

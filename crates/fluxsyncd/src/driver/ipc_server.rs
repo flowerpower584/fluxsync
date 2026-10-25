@@ -2,14 +2,14 @@
 
 use super::*;
 
-pub(super) async fn ipc_accept_loop(
-    server: IpcServer,
-    cmd_tx: mpsc::UnboundedSender<DriverCmd>,
-    state_rx: watch::Receiver<State>,
-    logs_bcast_tx: broadcast::Sender<LogEntry>,
-    log_tail: Arc<LogTail>,
-    shutdown: CancellationToken,
-) -> Result<()> {
+pub(super) async fn ipc_accept_loop(server: IpcServer, sh: Arc<Shared>) -> Result<()> {
+    let Shared {
+        cmd_tx,
+        logs_bcast_tx,
+        log_tail,
+        shutdown,
+        ..
+    } = &*sh;
     let mut clients = JoinSet::new();
     // Bounds the number of concurrently-connected IPC clients so N local
     // processes can't each hold a up-to-64-MiB in-flight line and scale the
@@ -35,7 +35,7 @@ pub(super) async fn ipc_accept_loop(
                     Err(e) => { tracing::warn!(error = %e, "ipc accept"); continue; }
                 };
                 let cmd_tx = cmd_tx.clone();
-                let state_rx = state_rx.clone();
+                let state_rx = sh.state_watch_tx.subscribe();
                 let logs_bcast_rx = logs_bcast_tx.subscribe();
                 let log_tail = log_tail.clone();
                 let client_shutdown = shutdown.clone();

@@ -128,12 +128,14 @@ pub(super) fn encode_png(width: u32, height: u32, rgba: Vec<u8>) -> Option<Vec<u
 /// Android `MainActivity` does the equivalent work in its
 /// `ClipboardManager.OnPrimaryClipChangedListener`.
 #[cfg(not(target_os = "android"))]
-pub(super) async fn clipboard_watcher_loop(
-    transport: Arc<Transport>,
-    cmd_tx: mpsc::UnboundedSender<DriverCmd>,
-    last_written_hashes: Arc<Mutex<VecDeque<[u8; 32]>>>,
-    shutdown: CancellationToken,
-) -> Result<()> {
+pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
+    let Shared {
+        transport,
+        cmd_tx,
+        last_written_hashes,
+        shutdown,
+        ..
+    } = &*sh;
     let mut last_seen_hash: Option<[u8; 32]> = None;
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let mut last_session_est = 0u64;

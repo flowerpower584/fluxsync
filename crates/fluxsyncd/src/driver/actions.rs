@@ -139,24 +139,26 @@ pub(super) async fn purge_peer_from_inflight(peer_id: [u8; 32], inflight: &Infli
     });
 }
 
-#[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation)]
 pub(super) async fn dispatch(
     actions: Vec<Action>,
     app: &mut App,
-    transport: &Arc<Transport>,
-    _trusted: &TrustedSet,
-    _keystore_dir: Option<&std::path::PathBuf>,
-    state_watch_tx: &watch::Sender<State>,
-    logs_bcast_tx: &broadcast::Sender<LogEntry>,
-    log_tail: &Arc<LogTail>,
-    last_written_hashes: &Arc<Mutex<VecDeque<[u8; 32]>>>,
-    metrics: &Arc<Mutex<MetricsTracker>>,
-    inflight: &InflightMap,
-    peer_meta: &PeerMetaMap,
-    outbox: &SharedOutbox,
-    pending_pairs: &PendingSet,
     seq_store: &mut Option<SeqStore>,
+    sh: &Shared,
 ) {
+    let Shared {
+        transport,
+        state_watch_tx,
+        logs_bcast_tx,
+        log_tail,
+        last_written_hashes,
+        metrics,
+        inflight,
+        peer_meta,
+        outbox,
+        pending_pairs,
+        ..
+    } = sh;
     for action in actions {
         tracing::debug!(?action, "dispatching action");
         match action {
@@ -598,46 +600,13 @@ pub(super) async fn dispatch(
 /// `(Idle, HandshakeOk)` is a no-op (see `fsm.rs::transition`) and the
 /// Noise tunnel comes up but the FSM never reaches the `Linked` phase
 /// where clipboard SendItem/WriteClipboard actions are emitted.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn ensure_online(
-    app: &mut App,
-    wall: &Arc<dyn WallClock + Send + Sync>,
-    transport: &Arc<Transport>,
-    trusted: &TrustedSet,
-    keystore_dir: Option<&std::path::PathBuf>,
-    state_watch_tx: &watch::Sender<State>,
-    logs_bcast_tx: &broadcast::Sender<LogEntry>,
-    log_tail: &Arc<LogTail>,
-    last_written_hashes: &Arc<Mutex<VecDeque<[u8; 32]>>>,
-    metrics: &Arc<Mutex<MetricsTracker>>,
-    inflight: &InflightMap,
-    peer_meta: &PeerMetaMap,
-    outbox: &SharedOutbox,
-    pending_pairs: &PendingSet,
-    seq_store: &mut Option<SeqStore>,
-) {
+pub(super) async fn ensure_online(app: &mut App, seq_store: &mut Option<SeqStore>, sh: &Shared) {
+    let wall = &sh.wall_clock;
     if app.snapshot().on {
         return;
     }
     let actions = app.handle(Event::ToggleOn, &**wall);
-    dispatch(
-        actions,
-        app,
-        transport,
-        trusted,
-        keystore_dir,
-        state_watch_tx,
-        logs_bcast_tx,
-        log_tail,
-        last_written_hashes,
-        metrics,
-        inflight,
-        peer_meta,
-        outbox,
-        pending_pairs,
-        seq_store,
-    )
-    .await;
+    dispatch(actions, app, seq_store, sh).await;
 }
 
 // ─────────────────────────────────────────────────────────────────

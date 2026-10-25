@@ -361,3 +361,118 @@ pub(super) const NAK_MISSING_PER_FRAME: usize = 400;
 // ─────────────────────────────────────────────────────────────────
 // mDNS discovery dispatcher
 // ─────────────────────────────────────────────────────────────────
+
+/// Inbound chunked transfers still being reassembled, keyed by
+/// `reassembly_key(source, item_id)`.
+pub(super) type ReassemblyMap = Arc<Mutex<HashMap<[u8; 32], Reassembly>>>;
+
+/// Every long-lived handle the driver's tasks share, built once in `run()`.
+///
+/// Before this existed, each task and handler received these as separate
+/// parameters — up to 28 of them, behind `#[allow(clippy::too_many_arguments)]`
+/// — and adding one shared map meant threading it through every signature
+/// and every test call. Tasks now hold an `Arc<Shared>`; per-call data (the
+/// frame, the actions) stays a parameter, and the two pieces of state the
+/// event loop owns exclusively (`App`, `SeqStore`) are still passed `&mut`
+/// alongside it.
+///
+/// Everything in here is either immutable after boot or internally
+/// synchronized, so `&Shared` is all any task needs.
+pub(super) struct Shared {
+    // ── Identity and boot configuration (immutable) ──────────────
+    pub(super) identity: Identity,
+    pub(super) wall_clock: Arc<dyn WallClock + Send + Sync>,
+    pub(super) keystore_dir: Option<PathBuf>,
+    pub(super) udp_bind: String,
+    pub(super) udp_port: u16,
+    pub(super) lan_only_handshakes: bool,
+    pub(super) shutdown: CancellationToken,
+
+    // ── Channels: into the event loop, out to subscribers ────────
+    pub(super) event_tx: mpsc::Sender<Event>,
+    pub(super) cmd_tx: mpsc::UnboundedSender<DriverCmd>,
+    pub(super) state_watch_tx: watch::Sender<State>,
+    pub(super) logs_bcast_tx: broadcast::Sender<LogEntry>,
+    pub(super) log_tail: Arc<LogTail>,
+
+    // ── Network, trust and pairing ───────────────────────────────
+    pub(super) transport: Arc<Transport>,
+    pub(super) metrics: Arc<Mutex<MetricsTracker>>,
+    pub(super) trusted: TrustedSet,
+    pub(super) pairing_window: PairingWindow,
+    pub(super) pending_pairs: PendingSet,
+    pub(super) pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
+    pub(super) deferred_sas_confirm: DeferredSasConfirm,
+    pub(super) pin_advert: PinAdvertisement,
+    pub(super) disc_cache: DiscoveryCache,
+    pub(super) backoff: BackoffMap,
+    pub(super) mdns_ctx: MdnsCtx,
+    pub(super) peer_meta: PeerMetaMap,
+
+    // ── Item transfer ────────────────────────────────────────────
+    pub(super) inflight: InflightMap,
+    pub(super) reassembly: ReassemblyMap,
+    pub(super) mesh_seen: MeshSeen,
+    pub(super) echo_ack_sent: EchoAckSent,
+    pub(super) last_written_hashes: Arc<Mutex<VecDeque<[u8; 32]>>>,
+
+    // ── Resync and history bookkeeping ───────────────────────────
+    pub(super) outbox: SharedOutbox,
+    pub(super) outbox_stage: PendingOutboxStage,
+    pub(super) pending_pulls: PendingPulls,
+    pub(super) cleared_tombstone: ClearedTombstone,
+
+    // ── This device's battery: written by the event loop, read by
+    //    the heartbeat loop (255 = not read yet) ───────────────────
+    pub(super) self_batt_level: std::sync::atomic::AtomicU8,
+    pub(super) self_batt_charging: std::sync::atomic::AtomicBool,
+}
+
+impl Shared {
+    /// A context with fresh, empty state around `transport` — for unit
+    /// tests, which then override or inspect the fields they care about.
+    #[cfg(test)]
+    pub(super) fn for_test(transport: Arc<Transport>) -> Self {
+        let (event_tx, _) = mpsc::channel(EVENT_CHANNEL_CAP);
+        let (cmd_tx, _) = mpsc::unbounded_channel();
+        let (state_watch_tx, _) = watch::channel(State::initial(&CoreConfig::default()));
+        let (logs_bcast_tx, _) = broadcast::channel(64);
+        Self {
+            identity: Identity::generate(),
+            wall_clock: Arc::new(crate::wall::ChronoWallClock),
+            keystore_dir: None,
+            udp_bind: "127.0.0.1".into(),
+            udp_port: 0,
+            lan_only_handshakes: false,
+            shutdown: CancellationToken::new(),
+            event_tx,
+            cmd_tx,
+            state_watch_tx,
+            logs_bcast_tx,
+            log_tail: Arc::new(LogTail::new()),
+            metrics: transport.metrics.clone(),
+            transport,
+            trusted: Arc::new(Mutex::new(HashMap::new())),
+            pairing_window: Arc::new(Mutex::new(None)),
+            pending_pairs: Arc::new(Mutex::new(HashMap::new())),
+            pending_initiator_tx: Arc::new(Mutex::new(None)),
+            deferred_sas_confirm: Arc::new(Mutex::new(HashSet::new())),
+            pin_advert: Arc::new(Mutex::new(None)),
+            disc_cache: Arc::new(Mutex::new(HashMap::new())),
+            backoff: Arc::new(Mutex::new(HashMap::new())),
+            mdns_ctx: Arc::new(Mutex::new(None)),
+            peer_meta: Arc::new(Mutex::new(BTreeMap::new())),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            reassembly: Arc::new(Mutex::new(HashMap::new())),
+            mesh_seen: Arc::new(Mutex::new(SeenSet::default())),
+            echo_ack_sent: Arc::new(Mutex::new(HashSet::new())),
+            last_written_hashes: Arc::new(Mutex::new(VecDeque::new())),
+            outbox: Arc::new(Mutex::new(Outbox::new())),
+            outbox_stage: Arc::new(Mutex::new(HashMap::new())),
+            pending_pulls: Arc::new(Mutex::new(HashMap::new())),
+            cleared_tombstone: Arc::new(Mutex::new(HashMap::new())),
+            self_batt_level: std::sync::atomic::AtomicU8::new(255),
+            self_batt_charging: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
