@@ -13,6 +13,7 @@ pub mod cmd;
 pub mod config;
 pub mod discovery;
 pub mod driver;
+mod fsutil;
 pub mod handshake;
 pub mod history_store;
 pub mod ipc;

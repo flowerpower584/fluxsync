@@ -4306,3 +4306,71 @@ fn recent_writes_echo_is_time_bounded() {
         "re-copying it later is the user, not an echo"
     );
 }
+
+/// R7: clipboard writes apply in issue order, one at a time; a backlog
+/// collapses to its newest entry (the only one the clipboard would keep).
+#[test]
+fn clipboard_writes_apply_in_order_and_coalesce_to_newest() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    // A backlog queued before the writer gets to it: only the newest lands.
+    for n in 1..=3 {
+        tx.send(n).unwrap();
+    }
+    drop(tx);
+    let mut applied = Vec::new();
+    super::serve_newest(&rx, |n| applied.push(n));
+    assert_eq!(applied, [3]);
+
+    // Writes issued one after another (each picked up before the next is
+    // sent) all apply, in order.
+    let (tx, rx) = std::sync::mpsc::channel::<u32>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut applied = Vec::new();
+        super::serve_newest(&rx, |n| {
+            applied.push(n);
+            done_tx.send(()).unwrap();
+        });
+        applied
+    });
+    for n in 1..=3 {
+        tx.send(n).unwrap();
+        done_rx.recv().unwrap();
+    }
+    drop(tx);
+    assert_eq!(worker.join().unwrap(), [1, 2, 3]);
+}
+
+/// R6: an image wider than the decode limit is refused (from its header),
+/// both when applying it and on the receive path's hash check.
+#[test]
+fn oversized_png_is_refused_before_decoding() {
+    let wide = super::MAX_IMAGE_SIDE + 1;
+    let png = {
+        let img = image::RgbaImage::from_raw(wide, 1, vec![0u8; wide as usize * 4]).unwrap();
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    };
+    assert!(super::decode_png_to_rgba(&png).is_none());
+    assert!(!super::verify_content_hash(
+        fluxsync_proto::Kind::Image,
+        &png,
+        [0; 32]
+    ));
+    // Within the limit still decodes.
+    let ok = {
+        let img = image::RgbaImage::from_raw(64, 64, vec![7u8; 64 * 64 * 4]).unwrap();
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    };
+    assert_eq!(
+        super::decode_png_to_rgba(&ok).map(|(w, h, _)| (w, h)),
+        Some((64, 64))
+    );
+}

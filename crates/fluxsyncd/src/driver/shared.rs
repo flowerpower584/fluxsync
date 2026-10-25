@@ -529,6 +529,10 @@ pub(super) struct Shared {
     //    the heartbeat loop (255 = not read yet) ───────────────────
     pub(super) self_batt_level: std::sync::atomic::AtomicU8,
     pub(super) self_batt_charging: std::sync::atomic::AtomicBool,
+    /// Applies inbound items to the OS clipboard, in order. `None` on
+    /// Android (the app writes the clipboard itself) and when the clipboard
+    /// is disabled by config.
+    pub(super) clipboard_writer: Option<ClipboardWriter>,
     /// Session generation each linked peer was last sent our `Hello` on —
     /// see [`Shared::greet_new_sessions`].
     pub(super) hello_sent: Mutex<HashMap<[u8; 32], u64>>,
@@ -676,6 +680,7 @@ impl Shared {
             self_batt_level: std::sync::atomic::AtomicU8::new(255),
             self_batt_charging: std::sync::atomic::AtomicBool::new(false),
             hello_sent: Mutex::new(HashMap::new()),
+            clipboard_writer: None,
         }
     }
 }

@@ -153,35 +153,9 @@ pub fn clear(dir: &Path) -> Result<()> {
     }
 }
 
-/// Atomic binary write: tmp file (mode 0600 on unix), fsync, rename.
+/// Atomic binary write — see [`crate::fsutil::write_atomic`].
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-
-    let tmp = path.with_extension("enc.tmp");
-    {
-        #[cfg(unix)]
-        let opts = {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut o = fs::OpenOptions::new();
-            o.create(true).write(true).truncate(true).mode(0o600);
-            o
-        };
-        #[cfg(not(unix))]
-        let opts = {
-            let mut o = fs::OpenOptions::new();
-            o.create(true).write(true).truncate(true);
-            o
-        };
-        let mut f = opts
-            .open(&tmp)
-            .with_context(|| format!("create {}", tmp.display()))?;
-        f.write_all(bytes)
-            .with_context(|| format!("write {}", tmp.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync {}", tmp.display()))?;
-    }
-    fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+    crate::fsutil::write_atomic(path, &path.with_extension("enc.tmp"), bytes)
 }
 
 #[cfg(test)]

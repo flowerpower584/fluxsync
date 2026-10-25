@@ -484,26 +484,7 @@ fn secure_wipe_identity_file(path: &Path) {
 /// logic without the real keychain.
 #[cfg(unix)]
 fn write_secret_atomic(path: &Path, bytes: &[u8; 32]) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let tmp = path.with_extension("bin.tmp");
-    {
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .with_context(|| format!("create {}", tmp.display()))?;
-        f.write_all(bytes)
-            .with_context(|| format!("write {}", tmp.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync {}", tmp.display()))?;
-    }
-    fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
+    crate::fsutil::write_atomic(path, &path.with_extension("bin.tmp"), bytes)
 }
 
 /// Load the trusted-peer registry. Returns an empty vector if the file
@@ -527,8 +508,6 @@ pub fn load_peers(dir: &Path) -> Result<Vec<StoredPeer>> {
 /// leave the registry empty or unparseable — same durability guarantee
 /// as `write_secret_atomic`.
 pub fn save_peers(dir: &Path, peers: &[StoredPeer]) -> Result<()> {
-    use std::io::Write;
-
     ensure_dir(dir)?;
     let path = dir.join(PEERS_FILE);
     let pf = PeersFile {
@@ -536,34 +515,11 @@ pub fn save_peers(dir: &Path, peers: &[StoredPeer]) -> Result<()> {
     };
     let s = serde_json::to_string_pretty(&pf)?;
     let tmp = path.with_extension("json.tmp");
-    {
-        // M1: mode 0o600. Trust topology (peer names + pubkeys) must
-        // not be world-readable; other local accounts could enumerate
-        // who this daemon trusts and harvest stable peer-ids for
-        // correlation. Public keys are public, but the *set* is sensitive.
-        #[cfg(unix)]
-        let opts = {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut o = fs::OpenOptions::new();
-            o.create(true).write(true).truncate(true).mode(0o600);
-            o
-        };
-        #[cfg(not(unix))]
-        let opts = {
-            let mut o = fs::OpenOptions::new();
-            o.create(true).write(true).truncate(true);
-            o
-        };
-        let mut f = opts
-            .open(&tmp)
-            .with_context(|| format!("create {}", tmp.display()))?;
-        f.write_all(s.as_bytes())
-            .with_context(|| format!("write {}", tmp.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync {}", tmp.display()))?;
-    }
-    fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    // M1: mode 0o600. Trust topology (peer names + pubkeys) must
+    // not be world-readable; other local accounts could enumerate
+    // who this daemon trusts and harvest stable peer-ids for
+    // correlation. Public keys are public, but the *set* is sensitive.
+    crate::fsutil::write_atomic(&path, &tmp, s.as_bytes())?;
     Ok(())
 }
 
@@ -591,36 +547,11 @@ pub fn load_firewall(dir: &Path) -> FirewallPolicy {
 /// rename, same durability guarantee as `save_peers`. Not a secret (rules,
 /// not keys), but written 0o600 for consistency with the other state files.
 pub fn save_firewall(dir: &Path, policy: &FirewallPolicy) -> Result<()> {
-    use std::io::Write;
-
     ensure_dir(dir)?;
     let path = dir.join(FIREWALL_FILE);
     let s = serde_json::to_string_pretty(policy)?;
     let tmp = path.with_extension("json.tmp");
-    {
-        #[cfg(unix)]
-        let opts = {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut o = fs::OpenOptions::new();
-            o.create(true).write(true).truncate(true).mode(0o600);
-            o
-        };
-        #[cfg(not(unix))]
-        let opts = {
-            let mut o = fs::OpenOptions::new();
-            o.create(true).write(true).truncate(true);
-            o
-        };
-        let mut f = opts
-            .open(&tmp)
-            .with_context(|| format!("create {}", tmp.display()))?;
-        f.write_all(s.as_bytes())
-            .with_context(|| format!("write {}", tmp.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync {}", tmp.display()))?;
-    }
-    fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    crate::fsutil::write_atomic(&path, &tmp, s.as_bytes())?;
     Ok(())
 }
 
@@ -653,38 +584,13 @@ pub fn load_device_name(dir: &Path) -> Option<String> {
 /// `save_peers`/`save_firewall`. Not a secret, but written 0o600 for
 /// consistency with the other state files.
 pub fn save_device_name(dir: &Path, name: &str) -> Result<()> {
-    use std::io::Write;
-
     ensure_dir(dir)?;
     let path = dir.join(DEVICE_NAME_FILE);
     let s = serde_json::to_string_pretty(&DeviceNameFile {
         name: name.to_string(),
     })?;
     let tmp = path.with_extension("json.tmp");
-    {
-        #[cfg(unix)]
-        let opts = {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut o = fs::OpenOptions::new();
-            o.create(true).write(true).truncate(true).mode(0o600);
-            o
-        };
-        #[cfg(not(unix))]
-        let opts = {
-            let mut o = fs::OpenOptions::new();
-            o.create(true).write(true).truncate(true);
-            o
-        };
-        let mut f = opts
-            .open(&tmp)
-            .with_context(|| format!("create {}", tmp.display()))?;
-        f.write_all(s.as_bytes())
-            .with_context(|| format!("write {}", tmp.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync {}", tmp.display()))?;
-    }
-    fs::rename(&tmp, &path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    crate::fsutil::write_atomic(&path, &tmp, s.as_bytes())?;
     Ok(())
 }
 

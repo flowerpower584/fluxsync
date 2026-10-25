@@ -465,6 +465,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         self_batt_level: std::sync::atomic::AtomicU8::new(255),
         self_batt_charging: std::sync::atomic::AtomicBool::new(false),
         hello_sent: Mutex::new(HashMap::new()),
+        clipboard_writer: spawn_clipboard_writer(disable_clipboard),
     });
 
     // ── Test path: install session + jump to Linked ────────────────
@@ -951,3 +952,18 @@ const EVENT_CHANNEL_CAP: usize = 1024;
 /// dropped resolve under flood is harmless — mDNS re-announces, and the
 /// downstream discovery cache is itself capped at 256.
 const DISCOVERY_CHANNEL_CAP: usize = 256;
+
+/// The serial OS-clipboard writer, unless the clipboard is disabled by config
+/// (hermetic tests, headless runs) or this is Android, whose app writes the
+/// clipboard itself.
+fn spawn_clipboard_writer(disable_clipboard: bool) -> Option<ClipboardWriter> {
+    #[cfg(not(target_os = "android"))]
+    if !disable_clipboard {
+        match ClipboardWriter::spawn() {
+            Ok(w) => return Some(w),
+            Err(e) => tracing::error!(error = %e, "could not start the clipboard writer"),
+        }
+    }
+    let _ = disable_clipboard;
+    None
+}

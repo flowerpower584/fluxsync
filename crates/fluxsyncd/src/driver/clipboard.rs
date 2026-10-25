@@ -88,10 +88,29 @@ pub(super) fn purge_cached_images(hashes_hex: &[String]) {
 
 /// Decode PNG bytes to `(width, height, rgba)`. `None` on any decode error.
 pub(super) fn decode_png_to_rgba(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+    reader.limits(png_limits());
+    let img = reader.decode().ok()?;
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     Some((w, h, rgba.into_raw()))
+}
+
+/// Largest image accepted for decoding. Every received image is decoded on
+/// the receive path (hash check) and again to apply it, so a PNG declaring a
+/// huge canvas — a few KB on the wire, gigabytes once inflated — must be
+/// refused from its header, before anything is allocated. 16384 px a side
+/// and 256 MiB of pixels leave room for 8K screenshots.
+pub(super) const MAX_IMAGE_SIDE: u32 = 16_384;
+const MAX_IMAGE_ALLOC: u64 = 256 * 1024 * 1024;
+
+fn png_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
+    limits.max_alloc = Some(MAX_IMAGE_ALLOC);
+    limits
 }
 
 /// Encode RGBA pixels to PNG bytes. `None` on failure (e.g. the buffer
@@ -209,7 +228,12 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
                     if last_seen_hash != Some(hash) {
                         let already = last_written_hashes.lock().await.is_echo(&hash);
                         last_seen_hash = Some(hash);
-                        if !already {
+                        // Peers refuse to decode anything past the limit
+                        // (see `png_limits`), so don't send it.
+                        let too_large = w > MAX_IMAGE_SIDE || h > MAX_IMAGE_SIDE;
+                        if too_large && !already {
+                            tracing::warn!(w, h, "clipboard image too large to sync; skipped");
+                        } else if !already {
                             match encode_png(w, h, rgba) {
                                 Some(png) if png.len() <= MAX_PAYLOAD => {
                                     let preview = format!(
@@ -283,3 +307,81 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
 // ─────────────────────────────────────────────────────────────────
 // Heartbeat & Timeout loop
 // ─────────────────────────────────────────────────────────────────
+
+/// One OS-clipboard write the daemon owes for an applied inbound item.
+pub(super) enum ClipWrite {
+    Text(String),
+    Image {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
+}
+
+/// Serial OS-clipboard writer: one long-lived thread applies writes in the
+/// order the event loop issued them. A `spawn_blocking` per write could run
+/// two of them out of order and leave the OLDER item on the clipboard. When
+/// writes queue up only the newest is applied — the others would be
+/// overwritten at once anyway. The `arboard` handle is kept between writes
+/// (and rebuilt after an error) instead of reopened every time.
+pub(super) struct ClipboardWriter {
+    tx: std::sync::mpsc::Sender<ClipWrite>,
+}
+
+impl ClipboardWriter {
+    #[cfg(not(target_os = "android"))]
+    pub(super) fn spawn() -> std::io::Result<Self> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("fluxsync-clipboard-writer".into())
+            .spawn(move || {
+                let mut cb: Option<arboard::Clipboard> = None;
+                serve_newest(&rx, |job| {
+                    if cb.is_none() {
+                        match arboard::Clipboard::new() {
+                            Ok(c) => cb = Some(c),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "clipboard init failed");
+                                return;
+                            }
+                        }
+                    }
+                    let Some(c) = cb.as_mut() else { return };
+                    let res = match job {
+                        ClipWrite::Text(text) => c.set_text(text),
+                        ClipWrite::Image {
+                            width,
+                            height,
+                            rgba,
+                        } => c.set_image(arboard::ImageData {
+                            width: width as usize,
+                            height: height as usize,
+                            bytes: std::borrow::Cow::Owned(rgba),
+                        }),
+                    };
+                    if let Err(e) = res {
+                        tracing::warn!(error = %e, "clipboard write failed");
+                        cb = None;
+                    }
+                });
+            })?;
+        Ok(Self { tx })
+    }
+
+    pub(super) fn write(&self, job: ClipWrite) {
+        if self.tx.send(job).is_err() {
+            tracing::warn!("clipboard writer thread is gone; write dropped");
+        }
+    }
+}
+
+/// Apply jobs from `rx` in order until every sender is gone, skipping
+/// straight to the newest whenever several are already queued.
+pub(super) fn serve_newest<J>(rx: &std::sync::mpsc::Receiver<J>, mut apply: impl FnMut(J)) {
+    while let Ok(mut job) = rx.recv() {
+        while let Ok(newer) = rx.try_recv() {
+            job = newer;
+        }
+        apply(job);
+    }
+}

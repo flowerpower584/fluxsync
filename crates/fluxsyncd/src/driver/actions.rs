@@ -426,21 +426,13 @@ pub(super) async fn dispatch(
                         } else {
                             cache_image(hex::encode(hash), payload.clone());
                         }
-                        tokio::task::spawn_blocking(move || match arboard::Clipboard::new() {
-                            Ok(mut cb) => {
-                                let img = arboard::ImageData {
-                                    width: w as usize,
-                                    height: h as usize,
-                                    bytes: std::borrow::Cow::Owned(rgba),
-                                };
-                                if let Err(e) = cb.set_image(img) {
-                                    tracing::warn!(error = %e, "clipboard set_image failed");
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "clipboard init failed");
-                            }
-                        });
+                        if let Some(writer) = &sh.clipboard_writer {
+                            writer.write(ClipWrite::Image {
+                                width: w,
+                                height: h,
+                                rgba,
+                            });
+                        }
                     } else {
                         tracing::warn!("WriteClipboard: PNG decode failed");
                     }
@@ -481,21 +473,11 @@ pub(super) async fn dispatch(
                     let text = String::from_utf8_lossy(&payload).to_string();
                     let hash = clipboard_dedup_hash(&text);
                     last_written_hashes.lock().await.record(hash);
-                    #[cfg(not(target_os = "android"))]
-                    tokio::task::spawn_blocking(move || match arboard::Clipboard::new() {
-                        Ok(mut cb) => {
-                            if let Err(e) = cb.set_text(text) {
-                                tracing::warn!(error = %e, "clipboard set_text failed");
-                            }
-                        }
-                        Err(e) => tracing::warn!(error = %e, "clipboard init failed"),
-                    });
-                    #[cfg(target_os = "android")]
-                    {
-                        // Android writes the OS clipboard from
-                        // `MainActivity`; the daemon just records the
-                        // hash for dedup symmetry with desktop.
-                        let _ = text;
+                    // Android writes the OS clipboard from `MainActivity`
+                    // (no writer there); the daemon just records the hash
+                    // for dedup symmetry with desktop.
+                    if let Some(writer) = &sh.clipboard_writer {
+                        writer.write(ClipWrite::Text(text));
                     }
                 }
             }
