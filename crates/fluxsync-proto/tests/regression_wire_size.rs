@@ -50,7 +50,10 @@ fn text_frame(len: usize) -> Frame {
 fn full_chunk_fits_one_datagram() {
     for fill in [0x00, 0x7F, 0xFF] {
         let n = encode(&chunk_frame(fill)).expect("encode").len();
-        assert!(n <= DATAGRAM_BUDGET, "1 KiB chunk (fill {fill:#x}) encoded to {n} B");
+        assert!(
+            n <= DATAGRAM_BUDGET,
+            "1 KiB chunk (fill {fill:#x}) encoded to {n} B"
+        );
     }
 }
 

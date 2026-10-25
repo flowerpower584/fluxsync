@@ -783,7 +783,14 @@ pub(super) async fn dispatch_inbound_frame(frame: Frame, peer_id: [u8; 32], sh: 
             let mut to_send: Vec<Vec<u8>> = Vec::new();
             {
                 let map = inflight.lock().await;
-                if let Some(item) = map.get(&nak.item_id) {
+                // Only a peer this item was sent to — and which still owes
+                // an Ack — may pull frames back out. Any other linked peer
+                // (pending SAS confirmation, or kept from the item by the
+                // firewall) would otherwise get it just by naming the hash.
+                let item = map
+                    .get(&nak.item_id)
+                    .filter(|item| item.pending_peers.contains(&peer_id));
+                if let Some(item) = item {
                     if nak.want_header {
                         if let Some(header) = item.frames.first() {
                             to_send.push(header.clone());
@@ -1128,30 +1135,19 @@ pub(super) async fn dispatch_inbound_frame(frame: Frame, peer_id: [u8; 32], sh: 
                 &cleared_hashes,
                 &pending_pull_hashes,
             );
+            // resync-1 apply-suppression fix (DEFECT 1): remember every hash
+            // we're about to ask this peer for, so when it comes back as an
+            // ordinary ClipboardItem/Chunk we recognise it as catch-up
+            // bookkeeping rather than a fresh copy — see `PendingPulls` and
+            // `take_pending_pull`. Only what fits gets tracked, and only what
+            // is tracked gets pulled (`track_pending_pulls`).
+            let missing = track_pending_pulls(pending_pulls, peer_id, missing).await;
             if !missing.is_empty() {
                 tracing::info!(
                     peer = ?&peer_id[..6],
                     count = missing.len(),
                     "resync-1: sending ResyncPull"
                 );
-                // resync-1 apply-suppression fix (DEFECT 1): remember every
-                // hash we're about to ask this peer for, so when it comes
-                // back as an ordinary ClipboardItem/Chunk we recognise it as
-                // catch-up bookkeeping rather than a fresh copy — see
-                // `PendingPulls` and `take_pending_pull`. Malformed hex (the
-                // codec already bounds the string shape/count, but a corrupt
-                // entry would still fail `decode_hex32`) is skipped rather
-                // than tracked, matching `Msg::ResyncPull`'s own handling.
-                {
-                    let now = Instant::now();
-                    let mut map = pending_pulls.lock().await;
-                    let per_peer = map.entry(peer_id).or_default();
-                    for hex_hash in &missing {
-                        if let Ok(hash) = decode_hex32(hex_hash) {
-                            per_peer.insert(hash, now);
-                        }
-                    }
-                }
                 let frame = Frame {
                     version: PROTOCOL_VERSION,
                     msg: Msg::ResyncPull(ResyncPull { hashes: missing }),

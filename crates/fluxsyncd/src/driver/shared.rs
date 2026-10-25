@@ -239,6 +239,44 @@ pub(super) type PendingOutboxStage = Arc<Mutex<HashMap<[u8; 32], OutboxEntry>>>;
 /// expecting it and would treat a same-hash arrival as a fresh item instead.
 pub(super) const RESYNC_PULL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Most fresh `ResyncPull` hashes tracked per peer — a few offers' worth.
+/// Past it, an offer's extra hashes are simply not pulled this time; a pull
+/// we can't track would let the item land as a fresh copy and overwrite the
+/// OS clipboard with catch-up content.
+pub(super) const MAX_PENDING_PULLS_PER_PEER: usize = 4 * MAX_RESYNC_HASHES;
+
+/// Record the hashes we are about to `ResyncPull` from `peer_id` and return
+/// the ones actually tracked — the only ones the caller may pull. Sweeps the
+/// peer's stale entries first, then admits new ones up to
+/// `MAX_PENDING_PULLS_PER_PEER`, so a stream of offers naming hashes that
+/// never get served can't grow the map without bound. Malformed hex (the
+/// codec bounds shape and count, but a corrupt entry still fails
+/// `decode_hex32`) is dropped, as `Msg::ResyncPull` would skip it anyway.
+pub(super) async fn track_pending_pulls(
+    pending_pulls: &PendingPulls,
+    peer_id: [u8; 32],
+    missing: Vec<String>,
+) -> Vec<String> {
+    let now = Instant::now();
+    let mut map = pending_pulls.lock().await;
+    let per_peer = map.entry(peer_id).or_default();
+    per_peer.retain(|_, asked_at| asked_at.elapsed() < RESYNC_PULL_TIMEOUT);
+    let mut tracked = Vec::new();
+    for hex_hash in missing {
+        if per_peer.len() >= MAX_PENDING_PULLS_PER_PEER {
+            break;
+        }
+        if let Ok(hash) = decode_hex32(&hex_hash) {
+            per_peer.insert(hash, now);
+            tracked.push(hex_hash);
+        }
+    }
+    if per_peer.is_empty() {
+        map.remove(&peer_id);
+    }
+    tracked
+}
+
 /// Consume a pending resync pull for `hash` from `peer_id`, if one is still
 /// outstanding and fresh. Also lazily sweeps every other stale entry for that
 /// peer (`RESYNC_PULL_TIMEOUT` old) so the bounded map never accumulates

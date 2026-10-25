@@ -257,12 +257,13 @@ impl FluxsyncHandle {
         // Wait for the IPC socket to appear (cap at ~1.5s). Done from
         // the SAME runtime that owns the daemon, so we don't spin up a
         // throwaway one.
-        runtime
-            .block_on(wait_for_socket(
-                &ipc_path,
-                std::time::Duration::from_millis(1500),
-            ))
-            .map_err(|e| FluxError::Ipc(format!("not ready: {e}")))?;
+        let thread = await_ready_or_stop(
+            &runtime,
+            &ipc_path,
+            std::time::Duration::from_millis(1500),
+            &shutdown,
+            thread,
+        )?;
 
         // Background subscriber: keeps `last_state` fresh.
         let last_state: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -756,6 +757,27 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBridgeWriter {
     }
 }
 
+/// Block until the daemon's IPC socket answers. On failure, stop the daemon
+/// and join its thread before handing back the error: a slow cold start used
+/// to leave it running with no handle — still holding the UDP port, so every
+/// retry of `start` failed and nothing could ever stop it.
+fn await_ready_or_stop(
+    runtime: &Runtime,
+    ipc_path: &PathBuf,
+    deadline: std::time::Duration,
+    shutdown: &CancellationToken,
+    thread: JoinHandle<()>,
+) -> Result<JoinHandle<()>, FluxError> {
+    match runtime.block_on(wait_for_socket(ipc_path, deadline)) {
+        Ok(()) => Ok(thread),
+        Err(e) => {
+            shutdown.cancel();
+            let _ = thread.join();
+            Err(FluxError::Ipc(format!("not ready: {e}")))
+        }
+    }
+}
+
 async fn wait_for_socket(path: &PathBuf, deadline: std::time::Duration) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     while start.elapsed() < deadline {
@@ -1015,6 +1037,42 @@ mod tests {
             curve,
             vec![1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000, 60_000],
         );
+    }
+
+    /// C8: a daemon that misses the readiness deadline is stopped and joined
+    /// before `start` reports the failure, instead of running on unowned.
+    #[test]
+    fn not_ready_daemon_is_stopped_and_joined() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let exited = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (rt, shutdown, exited) = (rt.clone(), shutdown.clone(), exited.clone());
+            // Stands in for a daemon still booting: runs until cancelled and
+            // never opens its socket.
+            std::thread::spawn(move || {
+                rt.block_on(shutdown.cancelled());
+                exited.store(true, Ordering::SeqCst);
+            })
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let res = super::await_ready_or_stop(
+            &rt,
+            &dir.path().join("never.sock"),
+            std::time::Duration::from_millis(100),
+            &shutdown,
+            thread,
+        );
+        assert!(res.is_err());
+        assert!(exited.load(Ordering::SeqCst), "daemon thread left running");
     }
 
     #[test]

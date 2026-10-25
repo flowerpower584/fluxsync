@@ -374,7 +374,10 @@ pub(super) async fn start_initiator(
         for (i, addr) in addrs.iter().enumerate() {
             let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
             *pending_initiator_tx.lock().await = Some(tx);
-            transport.set_peer_addr(*addr).await;
+            // No address pinning here: `run_initiator` records `addr` via
+            // `set_peer_info` on the slot the session actually lands in.
+            // Writing it up front went to the *primary* slot, re-pointing a
+            // live link at whichever device was being dialed.
             let result = handshake::run_initiator(
                 identity.clone(),
                 static_pub,

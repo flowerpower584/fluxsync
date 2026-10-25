@@ -4098,3 +4098,189 @@ fn item_frames_always_fit_one_datagram() {
         }
     }
 }
+
+/// T2: dialing another device must not re-point the live primary session at
+/// that device's address. `start_initiator` used to stamp every dialed hint
+/// into the primary slot before the handshake even started, so the linked
+/// peer's traffic went to the device being dialed (and stayed there if the
+/// dial failed).
+#[tokio::test]
+async fn start_initiator_for_another_peer_keeps_primary_address() {
+    use crate::transport::Transport;
+    use fluxsync_crypto::{test_util::pair_for_test, Identity};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let (transport, _) = Transport::bind("127.0.0.1", 0).await.expect("bind");
+    let transport = Arc::new(transport);
+    let self_id = Identity::generate();
+    let primary = Identity::generate();
+    let (sess, _) = pair_for_test(&self_id, &primary).expect("pair");
+    let primary_addr: SocketAddr = "127.0.0.1:40001".parse().unwrap();
+    transport.install_session(primary.peer_id(), sess).await;
+    transport
+        .set_peer_info(primary.peer_id(), primary_addr)
+        .await;
+
+    // The dialed device: a bare socket that swallows msg1 and never answers.
+    let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let other = Identity::generate();
+    let sh = Arc::new(super::Shared::for_test(transport.clone()));
+    super::start_initiator(
+        &sh,
+        other.public_key(),
+        vec![silent.local_addr().unwrap()],
+        other.peer_id(),
+        "B".into(),
+        true,
+    )
+    .await;
+    let mut buf = [0u8; 2048];
+    tokio::time::timeout(Duration::from_secs(2), silent.recv_from(&mut buf))
+        .await
+        .expect("msg1 reaches the dialed device")
+        .unwrap();
+
+    assert_eq!(
+        transport.peer_addr_for(primary.peer_id()).await,
+        Some(primary_addr),
+        "the linked peer's address must survive dialing another device"
+    );
+    assert_eq!(transport.current_peer_addr().await, Some(primary_addr));
+    sh.shutdown.cancel();
+}
+
+/// R4: a selective-NAK resend goes only to a peer the item was actually sent
+/// to and still owes an Ack. Any other linked peer — one still pending SAS
+/// confirmation, or one the firewall kept the item from — used to get every
+/// requested frame of the item just by naming its hash.
+#[tokio::test]
+async fn nak_from_a_non_recipient_peer_gets_no_frames() {
+    use crate::transport::Transport;
+    use fluxsync_crypto::{test_util::pair_for_test, Identity};
+    use fluxsync_proto::{Frame, Msg, Nak, PROTOCOL_VERSION};
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let (transport, _) = Transport::bind("127.0.0.1", 0).await.expect("bind");
+    let transport = Arc::new(transport);
+    let self_id = Identity::generate();
+    let recipient = Identity::generate();
+    let outsider = Identity::generate();
+    let recipient_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let outsider_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for (id, sock) in [(&recipient, &recipient_sock), (&outsider, &outsider_sock)] {
+        let (sess, _) = pair_for_test(&self_id, id).expect("pair");
+        transport.install_session(id.peer_id(), sess).await;
+        transport
+            .set_peer_info(id.peer_id(), sock.local_addr().unwrap())
+            .await;
+    }
+
+    let sh = super::Shared::for_test(transport.clone());
+    let item_id = [0x42; 32];
+    sh.inflight.lock().await.insert(
+        item_id,
+        super::Inflight {
+            frames: vec![b"header".to_vec(), b"chunk0".to_vec()],
+            attempts: 0,
+            last_sent: Instant::now(),
+            first_sent: Instant::now(),
+            pending_peers: HashSet::from([recipient.peer_id()]),
+        },
+    );
+    let nak = || Frame {
+        version: PROTOCOL_VERSION,
+        msg: Msg::Nak(Nak {
+            item_id,
+            want_header: true,
+            missing: vec![0],
+        }),
+    };
+
+    let mut buf = [0u8; 2048];
+    super::inbound::dispatch_inbound_frame(nak(), outsider.peer_id(), &sh).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            outsider_sock.recv_from(&mut buf)
+        )
+        .await
+        .is_err(),
+        "a peer the item was never sent to must not be served its frames"
+    );
+
+    super::inbound::dispatch_inbound_frame(nak(), recipient.peer_id(), &sh).await;
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(1), recipient_sock.recv_from(&mut buf))
+            .await
+            .expect("the real recipient still gets its missing frames")
+            .unwrap();
+    }
+}
+
+/// R3: `pending_pulls` must stay bounded under a stream of `ResyncOffer`s
+/// naming distinct, never-served hashes. Entries used to be swept only when
+/// an item later arrived from that peer, so a chatty (or hostile) linked
+/// peer could grow the map by `MAX_RESYNC_HASHES` per offer without limit.
+#[tokio::test]
+async fn resync_offer_flood_keeps_pending_pulls_bounded() {
+    use crate::transport::Transport;
+    use fluxsync_crypto::{test_util::pair_for_test, Identity};
+    use fluxsync_proto::{Frame, Msg, ResyncOffer, MAX_RESYNC_HASHES, PROTOCOL_VERSION};
+    use std::sync::Arc;
+
+    let (transport, _) = Transport::bind("127.0.0.1", 0).await.expect("bind");
+    let transport = Arc::new(transport);
+    let self_id = Identity::generate();
+    let peer = Identity::generate();
+    let peer_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (sess, _) = pair_for_test(&self_id, &peer).expect("pair");
+    transport.install_session(peer.peer_id(), sess).await;
+    transport
+        .set_peer_info(peer.peer_id(), peer_sock.local_addr().unwrap())
+        .await;
+
+    let sh = super::Shared::for_test(transport.clone());
+    sh.trusted.lock().await.insert(
+        peer.peer_id(),
+        crate::handshake::TrustedPeer {
+            static_pub: peer.public_key(),
+            name: "peer".into(),
+        },
+    );
+    let mut pm = super::PeerMeta::new();
+    pm.caps = vec!["resync-1".to_string()];
+    sh.peer_meta.lock().await.insert(peer.peer_id(), pm);
+
+    for round in 0u32..50 {
+        let hashes = (0..MAX_RESYNC_HASHES as u32)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[..4].copy_from_slice(&round.to_be_bytes());
+                h[4..8].copy_from_slice(&i.to_be_bytes());
+                hex::encode(h)
+            })
+            .collect();
+        let frame = Frame {
+            version: PROTOCOL_VERSION,
+            msg: Msg::ResyncOffer(ResyncOffer { hashes }),
+        };
+        super::inbound::dispatch_inbound_frame(frame, peer.peer_id(), &sh).await;
+    }
+
+    let tracked: usize = sh
+        .pending_pulls
+        .lock()
+        .await
+        .values()
+        .map(|m| m.len())
+        .sum();
+    assert!(
+        tracked <= super::MAX_PENDING_PULLS_PER_PEER,
+        "{tracked} pending pulls tracked for one peer"
+    );
+    assert!(tracked > 0, "the first offers must still be pulled");
+}
