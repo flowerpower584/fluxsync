@@ -499,6 +499,9 @@ pub(super) struct Shared {
     //    the heartbeat loop (255 = not read yet) ───────────────────
     pub(super) self_batt_level: std::sync::atomic::AtomicU8,
     pub(super) self_batt_charging: std::sync::atomic::AtomicBool,
+    /// Session generation each linked peer was last sent our `Hello` on —
+    /// see [`Shared::greet_new_sessions`].
+    pub(super) hello_sent: Mutex<HashMap<[u8; 32], u64>>,
 }
 
 impl Shared {
@@ -540,6 +543,49 @@ impl Shared {
             let _ = self.event_tx.try_send(Event::MeshPeersChanged);
         }
         ids
+    }
+
+    /// Send our `Hello` (name, platform, caps) once per session to every
+    /// linked peer that hasn't had it on its current session generation —
+    /// whichever path brought the session up: first link, a mesh secondary
+    /// joining while already Linked, a peer's restart replacing a stale
+    /// session, a rekey. It used to ride only on the FSM's Handshaking →
+    /// Linked transition, so a session that came up while already Linked
+    /// never got one: the peer never learned this device's name or caps (no
+    /// resync with it, and a SAS confirm on its side waiting forever).
+    pub(super) async fn greet_new_sessions(&self, name: &str) {
+        let ids = self.transport.linked_peer_ids().await;
+        let mut sent = self.hello_sent.lock().await;
+        sent.retain(|id, _| ids.contains(id));
+        let mut frame: Option<Vec<u8>> = None;
+        for id in ids {
+            let Some(generation) = self.transport.session_generation_for(id).await else {
+                continue;
+            };
+            if sent.get(&id) == Some(&generation) {
+                continue;
+            }
+            if frame.is_none() {
+                frame = fluxsync_proto::encode(&Frame {
+                    version: PROTOCOL_VERSION,
+                    msg: Msg::Hello(fluxsync_proto::Hello {
+                        name: name.to_string(),
+                        platform: self_platform().to_string(),
+                        caps: SUPPORTED_CAPS.iter().map(|c| (*c).to_string()).collect(),
+                    }),
+                })
+                .ok();
+            }
+            let Some(bytes) = frame.as_deref() else {
+                return;
+            };
+            match self.transport.send_encrypted_to(id, bytes).await {
+                Ok(()) => {
+                    sent.insert(id, generation);
+                }
+                Err(e) => tracing::warn!(peer = ?&id[..6], error = %e, "send hello failed"),
+            }
+        }
     }
 
     /// The `State` clients see: the app's snapshot plus connection metrics,
@@ -599,6 +645,7 @@ impl Shared {
             cleared_tombstone: Arc::new(Mutex::new(HashMap::new())),
             self_batt_level: std::sync::atomic::AtomicU8::new(255),
             self_batt_charging: std::sync::atomic::AtomicBool::new(false),
+            hello_sent: Mutex::new(HashMap::new()),
         }
     }
 }

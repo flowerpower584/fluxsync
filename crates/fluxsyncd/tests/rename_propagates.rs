@@ -1,20 +1,13 @@
 //! DIR-P3-01 integration test: device rename propagation to an
 //! already-linked peer.
 //!
-//! Proves the documented contract: a `CmdOp::SetDeviceName` updates the
-//! renaming daemon's own state immediately, but the peer only learns the
-//! new name via `Msg::Hello` on the *next session establishment* — a
-//! fresh `Handshaking -> Linked` transition (`Action::OpenSession` only
-//! fires from that FSM arm). Notably this is NOT the DIR-P2-03 automatic
-//! rekey: a rekey is deliberately invisible at the FSM level (phase never
-//! leaves `"linked"`, see `rekey.rs`), so `transition(Phase::Linked,
-//! Event::HandshakeOk)` hits the catch-all with no actions and no fresh
-//! `Msg::Hello` is sent — confirmed empirically while writing this test.
-//! The next *genuine* session establishment (here: a daemon restart,
-//! mirroring `vault_persist.rs`'s restart pattern) is what actually
-//! carries the rename, and that is the honest, documented minimum this
-//! feature promises — no new wire message, no forced disruptive
-//! reconnect just to push a cosmetic field.
+//! A `CmdOp::SetDeviceName` updates the renaming daemon's own state
+//! immediately AND reaches every linked peer right away: the daemon re-sends
+//! its `Msg::Hello` on each live session (`Shared::greet_new_sessions`) — no
+//! new wire message, no reconnect. (It used to ride only on the next
+//! `Handshaking -> Linked` transition, so a peer kept showing the old name
+//! until the link was re-established.) The rename also survives a restart:
+//! the next session establishment carries the persisted name.
 
 #![cfg(unix)]
 
@@ -102,7 +95,7 @@ async fn floor_battery_threshold(ipc: &PathBuf) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::similar_names)] // sess_a1/sess_b1/sess_a2/sess_b2 etc. name two daemons across two runs
-async fn rename_reaches_peer_only_on_next_session_establishment() {
+async fn rename_reaches_linked_peer_live_and_survives_restart() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let id_a = Identity::generate();
@@ -190,13 +183,13 @@ async fn rename_reaches_peer_only_on_next_session_establishment() {
     // wire round-trip needed.
     assert_eq!(status(&ipc_a).await.device_name, "Dethie's MacBook");
 
-    // B must NOT see the new name yet: no session establishment has
-    // happened since the rename.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        status(&ipc_b).await.peer_name,
-        "device-a",
-        "B must not see A's new name before the next session establishment"
+    // B learns the new name over the live session — no reconnect.
+    assert!(
+        wait_until(Duration::from_secs(2), || async {
+            status(&ipc_b).await.peer_name == "Dethie's MacBook"
+        })
+        .await,
+        "B must see A's new name without a reconnect"
     );
 
     // ── shut both down, then bring up a fresh v2 pairing: this is the

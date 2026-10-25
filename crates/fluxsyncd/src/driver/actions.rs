@@ -512,25 +512,9 @@ pub(super) async fn dispatch(
                 }
             }
             Action::OpenSession => {
-                // Both sides fire OpenSession on the Handshaking → Linked
-                // transition. Take advantage of that to swap friendly
-                // names: the Noise handshake only carries static pubkeys,
-                // so without this the responder shows the TOFU placeholder
-                // ("New Peer") instead of the peer's real device name.
-                let name = app.config().peer_name_self.clone();
-                let frame = Frame {
-                    version: PROTOCOL_VERSION,
-                    msg: Msg::Hello(fluxsync_proto::Hello {
-                        name,
-                        platform: self_platform().to_string(),
-                        caps: SUPPORTED_CAPS.iter().map(|c| (*c).to_string()).collect(),
-                    }),
-                };
-                if let Ok(bytes) = fluxsync_proto::encode(&frame) {
-                    if let Err(e) = transport.send_encrypted(&bytes).await {
-                        tracing::warn!(error = %e, "send hello failed");
-                    }
-                }
+                // Nothing to do here: our `Hello` goes out once per session
+                // from `Shared::greet_new_sessions`, run after every
+                // `HandshakeOk` — not only on this primary-link transition.
             }
             Action::CloseSession => {
                 // [FIX] Handshake Ghosting: inform peer before dropping session

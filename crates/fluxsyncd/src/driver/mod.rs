@@ -464,6 +464,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         cleared_tombstone: cleared_tombstone.clone(),
         self_batt_level: std::sync::atomic::AtomicU8::new(255),
         self_batt_charging: std::sync::atomic::AtomicBool::new(false),
+        hello_sent: Mutex::new(HashMap::new()),
     });
 
     // ── Test path: install session + jump to Linked ────────────────
@@ -859,6 +860,9 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                     purge_peer_from_inflight(*peer_id, &inflight).await;
                 }
                 dispatch(actions, &mut app, &mut seq_store, &shared).await;
+                if matches!(event, Event::HandshakeOk) {
+                    shared.greet_new_sessions(&app.config().peer_name_self).await;
+                }
             }
             Some(driver_cmd) = cmd_rx.recv() => {
                 match driver_cmd {

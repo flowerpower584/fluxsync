@@ -1680,3 +1680,37 @@ async fn revoking_the_sole_primary_forgets_it_but_keeps_history() {
         let _ = timeout(Duration::from_secs(2), h).await;
     }
 }
+
+/// R2: every new session gets this daemon's `Hello`, not only the one that
+/// drives the FSM's Handshaking → Linked transition. The hub B is already
+/// Linked (to A) when its session with C comes up, so C used to never learn
+/// B's name, platform or capabilities — no resync with B, and a SAS confirm
+/// on C waiting forever on caps it would never see.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn secondary_session_receives_the_hubs_hello() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ([_ipc_a, _ipc_b, ipc_c], shutdown, handles) = spawn_hub_line(dir.path()).await;
+
+    let greeted = wait_until(Duration::from_secs(3), || async {
+        let resp = ipc_send_recv(
+            &ipc_c,
+            CmdRequest {
+                id: 8,
+                op: CmdOp::Status,
+            },
+        )
+        .await;
+        matches!(resp.data, Some(CmdData::State(s))
+            if s.peers.iter().any(|p| p.name == "node-b"
+                && !p.platform.is_empty()
+                && p.caps.iter().any(|c| c == "resync-1")))
+    })
+    .await;
+    assert!(greeted, "C never received the hub's Hello");
+
+    shutdown.cancel();
+    for h in handles {
+        let _ = timeout(Duration::from_secs(2), h).await;
+    }
+}

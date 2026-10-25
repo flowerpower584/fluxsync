@@ -290,6 +290,9 @@ pub(super) async fn handle_driver_cmd(
                     }
                 }
                 dispatch(vec![Action::EmitState], app, seq_store, sh).await;
+                // Tell every linked peer now, not on its next reconnect.
+                sh.hello_sent.lock().await.clear();
+                sh.greet_new_sessions(&resolved).await;
                 CmdResponse::ok(req_id, None)
             }
             Err(e) => CmdResponse::err(req_id, e.to_string()),
@@ -1097,6 +1100,7 @@ async fn resume_live_primary(app: &mut App, seq_store: &mut Option<SeqStore>, sh
         let actions = app.handle(ev, &*sh.wall_clock);
         dispatch(actions, app, seq_store, sh).await;
     }
+    sh.greet_new_sessions(&app.config().peer_name_self).await;
 }
 
 /// After the projected primary is revoked with no live peer to fail over to:
