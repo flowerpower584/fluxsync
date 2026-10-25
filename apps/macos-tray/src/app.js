@@ -1,493 +1,713 @@
 // Menu-bar popup logic — mirrors Android LinkedScreen.
-// Talks to fluxsyncd via Tauri's `invoke()` → Rust commands
-// declared in `src-tauri/src/lib.rs`. Live state arrives via the
-// `state-update` Tauri event the daemon-bridge emits on every push;
-// a 5s safety poll keeps the UI honest if the event stream stalls.
+// Talks to fluxsyncd via Tauri's `invoke()` → Rust commands declared in
+// `src-tauri/src/lib.rs`. Live state arrives via the `state-update` Tauri
+// event the daemon bridge emits on every push; a 5 s safety poll keeps the
+// UI honest if the event stream stalls.
+//
+// Rendering model: the daemon re-publishes the whole State on every
+// heartbeat (~3 s per peer) even when nothing visible changed, and a
+// history row's `preview` carries the item's full text. So:
+//   * updates are coalesced to one render per animation frame;
+//   * every section keeps a cheap signature and skips work when unchanged;
+//   * history rows are keyed (hash + lamport) and patched in place —
+//     never rebuilt — so hover, focus and scroll survive every push;
+//   * only a bounded prefix of each preview ever reaches the DOM (laying
+//     out a 20 KB single-line text node per row was the main cost).
+
+import {
+  IS_MAC, tagHostOS, OS_NAMES, OS_DEVICE_WORD, PLATFORM_LABELS, TOFU_PLACEHOLDER,
+  isRealPeerName, peerIdHex, batteryKnown, setText, setAttr, showToast, confirmDialog,
+} from './ui.js';
 
 const { invoke } = window.__TAURI__.core;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { listen } = window.__TAURI__.event;
-const { exit } = window.__TAURI__.process || {};
 
-let pollHandle = null;
-let unlistenState = null;
+const $ = (id) => document.getElementById(id);
+const el = {
+  tray: $('tray-container'),
+  hero: $('hero'),
+  heroLabel: $('hero-label'),
+  heroSub: $('hero-sub'),
+  toggle: $('toggle'),
+  link: $('dashboard-body'),
+  selfName: $('self-name'),
+  selfMeta: $('self-meta'),
+  peerName: $('peer-name-pill'),
+  peerMeta: $('peer-meta'),
+  peerIcon: $('peer-device-icon'),
+  packet: $('beam-pulse'),
+  pauseBanner: $('pause-banner'),
+  pauseText: $('pause-text'),
+  offline: $('offline-state'),
+  pairing: $('pairing-entry'),
+  onboarding: $('onboarding-steps'),
+  pairTitle: $('pair-empty-title'),
+  pairHint: $('pair-empty-hint'),
+  pairCta: $('pair-cta'),
+  pairCtaSub: $('pair-cta-sub'),
+  tabs: $('tabs'),
+  views: $('tray-scroll'),
+  pendingStrip: $('pending-strip'),
+  pendingStripText: $('pending-strip-text'),
+  pendingBadge: $('pending-badge'),
+  pending: $('pending-section'),
+  recent: $('recent'),
+  recentCount: $('recent-count'),
+  search: $('history-search'),
+  filters: $('history-filters'),
+  clearBtn: $('clear-history-btn'),
+  fwToggle: $('fw-toggle'),
+  fwSub: $('fw-sub'),
+  fwRules: $('fw-rules'),
+  devices: $('device-list'),
+  devicesCount: $('devices-count'),
+  rtt: $('rtt-pill'),
+  version: $('brand-version'),
+  daemonDot: $('daemon-dot'),
+  daemonLabel: $('daemon-label'),
+};
 
-// Tag the body with the host OS so the stylesheet can paint a Windows
-// backdrop (WebView2 ignores `transparent: true` on ARM64). Also rewrite
-// the "Pair this Mac" headline so the popup says the right device word
-// regardless of where it is running.
-(function tagHostOS() {
-  const ua = navigator.userAgent;
-  const os = /Windows/i.test(ua) ? 'windows'
-    : /Macintosh|Mac OS/i.test(ua) ? 'macos'
-    : /Linux/i.test(ua) ? 'linux'
-    : 'unknown';
-  document.body.dataset.os = os;
-  const label = { windows: 'PC', macos: 'Mac', linux: 'Linux' }[os] || 'device';
-  const osName = { windows: 'Windows', macos: 'macOS', linux: 'Linux' }[os] || '—';
-  const selfName = document.getElementById('self-name');
-  const selfMeta = document.getElementById('self-meta');
-  if (selfName) selfName.textContent = 'This ' + label;
-  if (selfMeta) selfMeta.textContent = osName + ' · this device';
-})();
+// ── Host OS ──────────────────────────────────────────────────────
+const HOST_OS = tagHostOS();
+const HOST_WORD = OS_DEVICE_WORD[HOST_OS] || 'device';
+setText(el.selfName, 'This ' + HOST_WORD);
+const MOD_LABEL = IS_MAC ? '⌘' : 'Ctrl';
+setText($('kbd-mod'), MOD_LABEL);
+
+// ── Icons (inline SVG: Plex's Latin-1 cut has no arrows/stars) ───
+const svg = (w, h, vb, body, extra = '') =>
+  `<svg width="${w}" height="${h}" viewBox="${vb}" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" ${extra}>${body}</svg>`;
+const ICON = {
+  phone: svg(12, 17, '0 0 11 16', '<rect x="0.6" y="0.6" width="9.8" height="14.8" rx="2"/><path d="M4.4 13h2.2"/>', 'stroke-width="1.2"'),
+  computer: svg(17, 14, '0 0 16 14', '<rect x="0.6" y="0.6" width="14.8" height="9.8" rx="1.4"/><path d="M5 13h6M8 10.5V13"/>', 'stroke-width="1.2"'),
+  text: svg(13, 13, '0 0 12 12', '<path d="M2 2.5h8M2 6h8M2 9.5h5"/>', 'stroke-width="1.25"'),
+  url: svg(13, 13, '0 0 24 24', '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>', 'stroke-width="2"'),
+  code: svg(14, 14, '0 0 24 24', '<path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/>', 'stroke-width="2"'),
+  image: svg(13, 13, '0 0 24 24', '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/>', 'stroke-width="2"'),
+  inArrow: svg(10, 10, '0 0 10 10', '<path d="M8.5 1.5L2 8M2 3.5V8h4.5"/>', 'stroke-width="1.5"'),
+  outArrow: svg(10, 10, '0 0 10 10', '<path d="M1.5 8.5L8 2M3.5 2H8v4.5"/>', 'stroke-width="1.5"'),
+  star: svg(14, 14, '0 0 24 24', '<path d="M12 2.8l2.8 5.7 6.3.9-4.55 4.43 1.07 6.27L12 17.13 6.38 20.1l1.07-6.27L2.9 9.4l6.3-.9z"/>', 'stroke-width="1.8"'),
+  open: svg(12, 12, '0 0 12 12', '<path d="M5 2H2.5A.5.5 0 0 0 2 2.5v7a.5.5 0 0 0 .5.5h7a.5.5 0 0 0 .5-.5V7M7 2h3v3M10 2L5.5 6.5"/>', 'stroke-width="1.3"'),
+  lock: svg(9, 10, '0 0 9 10', '<rect x="1" y="4" width="7" height="5" rx="1"/><path d="M2.5 4V2.5a2 2 0 014 0V4"/>', 'stroke-width="1.2"'),
+  pinMini: '<svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.8l2.8 5.7 6.3.9-4.55 4.43 1.07 6.27L12 17.13 6.38 20.1l1.07-6.27L2.9 9.4l6.3-.9z"/></svg>',
+  bolt: '<svg width="7" height="10" viewBox="0 0 7 10" fill="currentColor" aria-hidden="true"><path d="M4 0L0 6h2.5L3 10l4-6H4.5L4 0z"/></svg>',
+};
 
 // ── Authoritative sync state (avoids DOM-as-source-of-truth race) ──
 let syncOn = false;
 let isToggling = false;
 let daemonReachable = true;
-
-// DIR-P3-02(a): last full history snapshot from the daemon + the current
-// search-box value, kept separate so filtering is a pure local re-render
-// (no daemon round-trip) and the raw list survives across filter changes.
-let currentHistory = [];
-let historyFilter = '';
-
-function filterHistory(history) {
-  const q = historyFilter.trim().toLowerCase();
-  if (!q) return history;
-  return history.filter((h) => {
-    const kind = (h.kind || 'text').toLowerCase();
-    if (kind.includes(q)) return true;
-    // Sensitive previews are masked in the UI — never search their real
-    // text (it isn't even sent to the tray unmasked).
-    if (h.sensitive) return false;
-    return (h.preview || '').toLowerCase().includes(q);
-  });
-}
+let lastStateAt = 0;
 
 // DIR-P3-12: first-run onboarding is dismissed forever once the user pairs
-// a device, or taps "Skip intro" — persisted so it never resurfaces after
-// a later unpair.
+// a device, or hides it — persisted so it never resurfaces after an unpair.
 const ONBOARDING_KEY = 'fs.onboardingDismissed';
 function onboardingDismissed() {
   try { return localStorage.getItem(ONBOARDING_KEY) === '1'; } catch (_) { return false; }
 }
 function dismissOnboarding() {
   try { localStorage.setItem(ONBOARDING_KEY, '1'); } catch (_) {}
-  const el = document.getElementById('onboarding-steps');
-  if (el) el.style.display = 'none';
+  el.onboarding.hidden = true;
 }
 
-// TOFU placeholder the daemon projects into `peer_name` between handshake
-// completion and the `Msg::Hello` that carries the peer's real device name
-// (see `fluxsyncd::handshake::TOFU_PLACEHOLDER_NAME`). Never a real identity
-// — must not count as "paired" any more than the empty/"pending" cases below.
-const TOFU_PLACEHOLDER = 'New Peer';
-
-// Apply a state snapshot to the DOM. Called both from the safety poll
-// (`refreshState`) and the `state-update` Tauri event listener.
+// ── Coalesced state application ──────────────────────────────────
+// Both the safety poll and the `state-update` listener funnel through
+// here; only the newest snapshot per frame is rendered. A hidden window
+// gets no animation frames, so it does no work until it is shown again.
+let queuedState;
+let frameQueued = false;
 function applyState(s) {
   if (isToggling) return;
+  lastStateAt = Date.now();
+  queuedState = s;
+  if (!frameQueued) {
+    frameQueued = true;
+    requestAnimationFrame(flushState);
+  }
+}
+function flushState() {
+  frameQueued = false;
+  const s = queuedState;
+  queuedState = undefined;
+  if (s !== undefined) render(s);
+}
+
+let currentView = 'loading';
+function setView(view) {
+  if (view === currentView) return;
+  currentView = view;
+  el.tray.dataset.view = view;
+  el.offline.hidden = view !== 'offline';
+  el.pairing.hidden = view !== 'unpaired';
+  el.tabs.hidden = view !== 'paired';
+  el.views.hidden = view !== 'paired';
+  el.link.hidden = view !== 'paired';
+  if (view !== 'paired') el.pauseBanner.hidden = true;
+  el.toggle.disabled = view === 'offline';
+}
+
+function render(s) {
   daemonReachable = true;
   if (s) syncOn = !!s.on;
 
   // Bug C: an unverified SAS pairing must not unlock the main UI. `sas_phase`
   // is the authoritative "a fresh pairing is in flight" signal — NOT
-  // `s.pending`, which is a different field entirely: the FluxFirewall
-  // Ask-queue (`fluxsync_core::state::PendingItem` — hash/kind/direction/
-  // sensitive/preview, rendered by `renderFirewall` below), unrelated to SAS
-  // pairing. Folding it in here would hide the dashboard (and the firewall
-  // approve/reject buttons themselves) whenever a single linked peer has an
-  // ordinary Ask item queued — a self-inflicted lockout, not a fix.
+  // `s.pending`, which is the FluxFirewall Ask-queue (unrelated to SAS).
+  // Folding it in would hide the dashboard (and the approve/reject buttons
+  // themselves) whenever a linked peer has an ordinary Ask item queued.
   const activeSas = !!s && ['showing', 'peer_confirmed', 'local_confirmed'].includes(s.sas_phase);
   // Only gate when the unverified pairing is the ONLY connection: with a
   // second peer already linked (`peers.length >= 2`), the dashboard for the
   // confirmed primary must keep showing while a second device verifies.
   const soleUnverified = activeSas && (!s.peers || s.peers.length <= 1);
-  const isPaired = s && s.peer_name && s.peer_name.trim() !== "" && s.peer_name !== "pending" &&
+  const isPaired = !!s && !!s.peer_name && s.peer_name.trim() !== '' && s.peer_name !== 'pending' &&
     s.peer_name !== TOFU_PLACEHOLDER && !soleUnverified;
-  // Single-window UX: this menu is the only window. Show the dashboard +
-  // history when linked, or an inline "Pair a device" CTA when not — never
-  // auto-spawn the separate pair window (that left two windows at launch).
-  document.getElementById('tray-container').style.display = 'flex';
-  document.getElementById('dashboard-body').style.display = isPaired ? 'flex' : 'none';
-  document.querySelector('.history-section').style.display = isPaired ? 'flex' : 'none';
-  const fwSection = document.getElementById('firewall-section');
-  if (fwSection) fwSection.style.display = isPaired ? 'block' : 'none';
-  document.getElementById('pairing-entry').style.display = isPaired ? 'none' : 'flex';
 
-  // While the only connection is an unverified SAS flow, the empty state
-  // must not read "No device linked" next to the verify window — swap it
-  // for a verification prompt whose CTA lands on the words.
-  const emptyTitle = document.getElementById('pair-empty-title');
-  const emptyHint = document.getElementById('pair-empty-hint');
-  const ctaBtn = document.getElementById('pair-cta');
-  const ctaSub = document.getElementById('pair-cta-sub');
-  if (emptyTitle && emptyHint && ctaBtn && ctaSub) {
-    if (soleUnverified) {
-      emptyTitle.textContent = 'Verification in progress';
-      emptyHint.innerHTML = 'Compare the 6 words shown on both devices,<br>then confirm on each one.';
-      ctaBtn.textContent = 'Show verification words';
-      ctaSub.style.display = 'none';
-    } else {
-      emptyTitle.textContent = 'No device linked';
-      emptyHint.innerHTML = 'Pair a phone or another computer to sync<br>your clipboard, end-to-end encrypted.';
-      ctaBtn.textContent = 'Pair a device';
-      ctaSub.style.display = '';
-    }
-  }
+  // Single-window UX: dashboard + history when linked, or an inline "Pair a
+  // device" CTA when not — never auto-spawn the separate pair window.
+  setView(isPaired ? 'paired' : 'unpaired');
 
-  // DIR-P3-12: onboarding lives at the top of the SAME unpaired empty
-  // state above — never touches the isPaired branching itself. Dismissed
-  // forever the moment a device is paired.
   if (isPaired) {
     dismissOnboarding();
-  } else {
-    const ob = document.getElementById('onboarding-steps');
-    if (ob) ob.style.display = soleUnverified ? 'none'
-      : (onboardingDismissed() ? 'none' : 'flex');
-  }
-
-  if (isPaired) {
     renderHero(s);
     renderPeer(s);
-    renderMesh(s);
     renderSelf(s);
-    currentHistory = s.history || [];
-    renderRecent(filterHistory(currentHistory));
+    renderDevices(s);
+    renderPending(s);
+    setHistory(s);
     renderFirewall(s);
     maybePulse(s);
   } else {
-    setHero('off', 'NO DEVICE PAIRED');
-    currentHistory = [];
-    renderRecent([]);
+    renderUnpaired(soleUnverified);
+    if (soleUnverified) setHero('warn', 'Verifying', 'Compare the 6 words on both devices');
+    else setHero('off', 'Not paired', 'Pair a device to start syncing');
+    if (historyItems.length) setHistory(null);
   }
   renderLink(s, isPaired);
   renderMetrics(s);
   renderFooter(true, s);
 }
 
+function renderUnpaired(soleUnverified) {
+  // While the only connection is an unverified SAS flow, the empty state
+  // must not read "pair a device" next to the verify window — swap it for
+  // a verification prompt whose CTA lands on the words.
+  if (soleUnverified) {
+    setText(el.pairTitle, 'Check the 6 words');
+    setText(el.pairHint, 'A device is pairing. Make sure both screens show the same 6 words, then confirm on each one.');
+    setText(el.pairCta, 'Show verification words');
+    el.pairCtaSub.hidden = true;
+  } else {
+    setText(el.pairTitle, 'One clipboard, all your devices');
+    setText(el.pairHint, 'Copy here, paste there. Straight across your network, end-to-end encrypted — no cloud, no account.');
+    setText(el.pairCta, 'Pair a device');
+    el.pairCtaSub.hidden = false;
+  }
+  el.onboarding.hidden = soleUnverified || onboardingDismissed();
+}
+
 async function refreshState() {
   if (isToggling) return;
   try {
     const resp = await invoke('fluxsync_status');
-    const s = resp && resp.data ? resp.data : null;
-    applyState(s);
+    applyState(resp && resp.data ? resp.data : null);
   } catch (e) {
-    // Daemon unreachable — distinguish from a daemon that is up but
-    // toggled off, so the user knows whether the daemon failed to spawn
-    // or they just need to hit the toggle.
-    daemonReachable = false;
-    syncOn = false;
-    setHero('off', 'DAEMON OFFLINE');
-    renderLink(null, false);
-    renderMetrics(null);
-    renderFooter(false, null);
+    setOffline();
   }
 }
 
-function setHero(state, label) {
-  const hero = document.getElementById('hero');
-  hero.setAttribute('data-state', state);
-  document.getElementById('hero-label').textContent = label;
+// Daemon unreachable — distinguished from a daemon that is up but toggled
+// off, so the user knows whether the service failed or they just need to
+// hit the toggle.
+function setOffline() {
+  daemonReachable = false;
+  syncOn = false;
+  queuedState = undefined;
+  setView('offline');
+  setHero('crit', 'Offline', 'The FluxSync service isn’t answering');
+  renderLink(null, false);
+  renderMetrics(null);
+  renderFooter(false, null);
+}
 
-  const t = document.getElementById('toggle');
-  const toggleOn = state === 'ok' || state === 'warn';
-  t.classList.toggle('on', toggleOn);
-  t.setAttribute('aria-checked', String(toggleOn));
-
-  const glyph = document.getElementById('brand-glyph');
-  const dot = glyph.querySelector('.active-dot');
-  if (dot) dot.style.display = state !== 'off' ? 'block' : 'none';
+// ── Hero ─────────────────────────────────────────────────────────
+function setHero(state, label, sub) {
+  setAttr(el.hero, 'data-state', state);
+  setText(el.heroLabel, label);
+  setText(el.heroSub, sub || ' ');
+  if (!isToggling) {
+    const on = daemonReachable && syncOn;
+    el.toggle.classList.toggle('on', on);
+    setAttr(el.toggle, 'aria-checked', String(on));
+  }
 }
 
 function renderHero(s) {
-  if (!s) {
-    setHero('off', 'INACTIVE');
-    return;
-  }
-  const on = !!s.on;
-  if (!on) return setHero('off', 'INACTIVE');
+  const peer = s.peer_name || 'your device';
+  if (!s.on) return setHero('off', 'Off', `Your clipboard stays on this ${HOST_WORD}`);
 
   // 255 = battery not read yet (desktop / boot) → not "low"; only a real
   // 0-100 reading can trip the low/critical hero states.
-  const known = (s.battery_level ?? 255) <= 100;
-  const below = known && s.battery_level <= (s.battery_threshold ?? 20);
-  const critical = known && s.battery_level <= 5;
-  const charging = !!s.charging;
-
-  if (critical) return setHero('crit', 'CRITICAL');
-  if (below && !charging) return setHero('warn', 'PAUSED · LOW BATTERY');
+  const threshold = s.battery_threshold ?? 20;
+  const known = batteryKnown(s.battery_level);
+  if (known && s.battery_level <= 5) return setHero('crit', 'Battery critical', 'Sync is paused to save power');
+  if (known && s.battery_level <= threshold && !s.charging) {
+    return setHero('warn', 'Paused', `Battery under ${threshold}% — resumes on charge`);
+  }
 
   // Connection truth comes from the FSM phase, never the on-toggle: with
-  // sync enabled but no live peer the hero must NOT claim "SYNCHRONIZING".
+  // sync enabled but no live peer the hero must NOT claim "Linked".
   switch (s.phase) {
-    case 'linked':      return setHero('ok', 'SYNCHRONIZING');
+    case 'linked':       return setHero('ok', 'Linked', `Syncing with ${peer}`);
     case 'paused':
-    case 'halted':      return setHero('warn', 'PAUSED');
-    case 'handshaking': return setHero('warn', 'CONNECTING');
+    case 'halted':       return setHero('warn', 'Paused', `${peer}'s battery is low — resumes on charge`);
+    case 'handshaking':  return setHero('warn', 'Connecting', `Securing the link with ${peer}`);
     case 'discovering':
-    case 'reconnecting':return setHero('warn', 'SEARCHING');
-    default:            return setHero('off', 'STANDBY');
+    case 'reconnecting': return setHero('warn', 'Searching', `Looking for ${peer} on your network`);
+    default:             return setHero('off', 'Standby', `Waiting for ${peer}`);
   }
 }
 
-// Maps the daemon's FSM phase to the peer status pill text. Single source of
-// truth so hero, peer pill and mesh rows never disagree about link state.
-function peerStatusText(phase) {
-  switch (phase) {
-    case 'linked':      return 'LINKED';
-    case 'paused':
-    case 'halted':      return 'PAUSED';
-    case 'handshaking': return 'CONNECTING';
-    case 'discovering': return 'SEARCHING';
-    case 'reconnecting':return 'RECONNECTING';
-    default:            return 'STANDBY';
-  }
+// ── The two ends of the link ─────────────────────────────────────
+// Battery tail for a meta line: "76%" (+ bolt when charging), coloured
+// when low. Desktops report 255 = no battery → nothing.
+function setMeta(target, label, level, charging, threshold) {
+  const key = `${label}|${level}|${charging}|${threshold}`;
+  if (target.dataset.key === key) return;
+  target.dataset.key = key;
+  target.replaceChildren(document.createTextNode(label));
+  if (!batteryKnown(level)) return;
+  const b = document.createElement('span');
+  b.textContent = `${level}%`;
+  if (level <= 5) b.className = 'crit';
+  else if (level <= threshold && !charging) b.className = 'low';
+  target.append(document.createTextNode(' · '), b);
+  if (charging) b.insertAdjacentHTML('beforeend', ICON.bolt);
 }
 
+let lastPeerPlatform = null;
 function renderPeer(s) {
-  const peerBat = s ? (s.peer_battery ?? 0) : 0;
-  const peerCharging = s ? !!s.peer_charging : false;
-  const threshold = s ? (s.battery_threshold ?? 20) : 20;
-  const peerName = s ? (s.peer_name || '—') : '—';
-  const on = !!s.on;
+  const threshold = s.battery_threshold ?? 20;
+  setText(el.peerName, s.peer_name || '—');
+  el.peerName.title = s.peer_name || '';
 
-  const peerSection = document.getElementById('dashboard-body');
-  peerSection.setAttribute('data-active', on ? 'true' : 'false');
-
-  document.getElementById('peer-name-pill').textContent = peerName;
-  renderPeerDevice(s ? s.peer_platform : '');
-  // Status reflects the real link phase, not the on-toggle — so a dropped peer
-  // reads RECONNECTING/SEARCHING, never a stale "LINKED".
-  document.getElementById('peer-status-text').textContent =
-    on ? peerStatusText(s ? s.phase : '') : 'STANDBY';
-
-  const bar = document.getElementById('peer-battery-bar');
-  const text = document.getElementById('peer-battery-text');
-
-  // Show the % whenever the peer is connected (linked OR battery-paused/halted
-  // — the link is still up, the value is still live) AND a real reading has
-  // arrived. 255 = not read yet → "—". Kills both the fake-100%-on-connect and
-  // the wrong "—" while merely paused.
-  const connected = !!s && (s.phase === 'linked' || s.phase === 'paused' || s.phase === 'halted');
-  const battKnown = peerBat <= 100;
-  if (connected && battKnown) {
-    const color = peerBat <= 5 ? 'var(--fs-crit)' :
-                  peerBat <= threshold ? 'var(--fs-warn)' : 'var(--fs-ok)';
-    bar.style.width = `${Math.min(peerBat, 100)}%`;
-    bar.style.background = color;
-    text.textContent = `${peerBat}%${peerCharging ? '⚡' : ''}`;
-    text.style.color = peerBat <= 5 ? 'var(--fs-crit)' : peerBat <= threshold ? 'var(--fs-warn)' : 'var(--fs-muted)';
-  } else {
-    bar.style.width = '0%';
-    text.textContent = '—';
-    text.style.color = 'var(--fs-muted)';
+  const p = (s.peer_platform || '').toLowerCase();
+  if (p !== lastPeerPlatform) {
+    lastPeerPlatform = p;
+    // Phone vs computer icon from the peer's OS family (Hello).
+    el.peerIcon.innerHTML = (p === 'android' || p === 'ios') ? ICON.phone : ICON.computer;
   }
+  const platform = PLATFORM_LABELS[p] || (p || 'Peer');
 
-  document.getElementById('pause-banner').style.display =
-    (connected && battKnown && peerBat <= threshold && !peerCharging) ? 'flex' : 'none';
+  // Show the % whenever the peer is connected (linked OR battery-paused —
+  // the link is still up, the value is still live) AND a real reading has
+  // arrived. 255 = not read yet → hidden, never a fake 100%.
+  const connected = s.phase === 'linked' || s.phase === 'paused' || s.phase === 'halted';
+  setMeta(el.peerMeta, platform, connected ? s.peer_battery : 255, !!s.peer_charging, threshold);
+
+  const peerLow = connected && batteryKnown(s.peer_battery) && s.peer_battery <= threshold && !s.peer_charging;
+  el.pauseBanner.hidden = !peerLow;
+  if (peerLow) setText(el.pauseText, `Paused — ${s.peer_name || 'the other device'} is under ${threshold}% battery. Resumes on charge.`);
 }
 
-// Phone vs computer icon driven by the peer's OS family (s.peer_platform,
-// from Msg::Hello). The HTML ships a phone placeholder; without this every
-// peer — even a Mac/PC — rendered as a phone.
-const PEER_ICON_PHONE =
-  '<svg width="11" height="16" viewBox="0 0 11 16" fill="none">' +
-  '<rect x="0.5" y="0.5" width="10" height="15" rx="1.5" stroke="var(--fs-muted)"/>' +
-  '<circle cx="5.5" cy="13" r="0.7" fill="var(--fs-muted)"/></svg>';
-const PEER_ICON_COMPUTER =
-  '<svg width="16" height="14" viewBox="0 0 16 14" fill="none">' +
-  '<rect x="0.5" y="0.5" width="15" height="10" rx="1" stroke="var(--fs-muted)"/>' +
-  '<path d="M5 13h6M8 10.5V13" stroke="var(--fs-muted)" stroke-linecap="round"/></svg>';
-
-function renderPeerDevice(platform) {
-  const p = (platform || '').toLowerCase();
-  const isMobile = p === 'android' || p === 'ios';
-  const label = { macos: 'macOS', windows: 'Windows', linux: 'Linux',
-                  android: 'Android', ios: 'iOS' }[p] || (p ? p : '—');
-  const iconEl = document.getElementById('peer-device-icon');
-  if (iconEl) iconEl.innerHTML = isMobile ? PEER_ICON_PHONE : PEER_ICON_COMPUTER;
-  const metaEl = document.getElementById('peer-meta');
-  if (metaEl) metaEl.textContent = label;
-}
-
-const PLATFORM_LABELS = { macos: 'macOS', windows: 'Windows', linux: 'Linux', android: 'Android', ios: 'iOS' };
-
-// FluxMesh Phase 3: list secondary peers below the primary card when more
-// than one device is linked (the primary stays in the main peer card).
-// Built with textContent (never innerHTML) so a peer-controlled name can't
-// inject markup. The container is created lazily, so index.html needs no
-// change and the card is unchanged for the single-peer case.
-function renderMesh(s) {
-  const peers = (s && Array.isArray(s.peers)) ? s.peers : [];
-  const body = document.getElementById('dashboard-body');
-  let box = document.getElementById('mesh-peers');
-  if (peers.length <= 1) {
-    if (box) box.style.display = 'none';
-    return;
-  }
-  if (!box) {
-    box = document.createElement('div');
-    box.id = 'mesh-peers';
-    box.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--fs-line,rgba(255,255,255,0.08));';
-    body.appendChild(box);
-  }
-  box.style.display = 'flex';
-  box.replaceChildren();
-
-  const head = document.createElement('div');
-  head.style.cssText = 'font-size:10px;letter-spacing:0.08em;color:var(--fs-muted);text-transform:uppercase;';
-  head.textContent = `Mesh · ${peers.length} devices`;
-  box.appendChild(head);
-
-  for (const p of peers) {
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;';
-
-    const left = document.createElement('span');
-    const name = (p.name && p.name.trim()) ? p.name : '(unknown)';
-    const label = PLATFORM_LABELS[(p.platform || '').toLowerCase()] || (p.platform || '');
-    left.textContent = `${p.primary ? '★ ' : ''}${name}${label ? ' · ' + label : ''}`;
-
-    const right = document.createElement('span');
-    right.style.cssText = 'display:flex;align-items:center;gap:8px;color:var(--fs-muted);';
-
-    const batt = document.createElement('span');
-    // 255 / null / >100 = no real reading yet → "—", never a fake 100%.
-    const mb = p.battery;
-    batt.textContent = (mb != null && mb <= 100) ? `${mb}%${p.charging ? '⚡' : ''}` : '—';
-    right.appendChild(batt);
-
-    // Secondaries get a per-peer unpair button (the primary uses the main
-    // card's Unpair). The daemon `revoke` op drops just this peer, leaving
-    // every other paired device linked.
-    if (!p.primary) {
-      const hex = peerIdHex(p.peer_id);
-      if (hex) {
-        const btn = document.createElement('button');
-        btn.className = 'mesh-unpair';
-        btn.textContent = 'Unpair';
-        btn.addEventListener('click', () => unpairPeer(hex, name));
-        right.appendChild(btn);
-      }
-    }
-
-    row.appendChild(left);
-    row.appendChild(right);
-    box.appendChild(row);
-  }
-}
-
-// peer_id rides the State DTO as a 32-byte array (serde `[u8;32]`); the
-// daemon `revoke` op wants the full hex string. Returns '' if malformed.
-function peerIdHex(id) {
-  if (!Array.isArray(id) || id.length !== 32) return '';
-  return id.map((b) => (b & 0xff).toString(16).padStart(2, '0')).join('');
-}
-
-async function unpairPeer(peerHex, name) {
-  if (!confirm(`Unpair ${name || 'this device'}? It will be disconnected and removed.`)) return;
-  try {
-    await invoke('fluxsync_revoke_peer', { peerId: peerHex });
-    showToast('Device unpaired.');
-    await refreshState();
-  } catch (err) {
-    showToast(`Unpair failed: ${err}`);
-  }
-}
-
-// Inline RTT pill next to the E2E badge. Hidden until daemon reports a
-// non-zero last_rtt_ms (no peer linked → no RTT to show).
-function renderMetrics(s) {
-  const badge = document.querySelector('.e2e-badge');
-  if (!badge) return;
-  let pill = document.getElementById('rtt-pill');
-  const rtt = s && s.metrics && typeof s.metrics.last_rtt_ms === 'number' ? s.metrics.last_rtt_ms : null;
-  if (rtt == null || rtt === 0) {
-    if (pill) pill.style.display = 'none';
-    return;
-  }
-  if (!pill) {
-    pill = document.createElement('span');
-    pill.id = 'rtt-pill';
-    pill.className = 'rtt-pill mono';
-    badge.parentElement.insertBefore(pill, badge);
-  }
-  pill.style.display = 'inline-flex';
-  pill.textContent = `${rtt}MS`;
-}
-
-// Self side of the connection card: the daemon reports this device's own
-// battery via `battery_level` / `charging` (SetSelfBattery on mobile, host
-// watcher on desktop). Colors mirror the peer-side thresholds.
+// Self side: desktops without a battery report 255 — just the OS then.
 function renderSelf(s) {
-  const fill = document.getElementById('self-batt-fill');
-  const pc = document.getElementById('self-batt-pc');
-  const box = document.getElementById('self-batt');
-  if (!fill || !pc || !box) return;
-  const lvl = s.battery_level ?? 0;
-  const threshold = s.battery_threshold ?? 20;
-  fill.style.width = `${Math.min(lvl, 100)}%`;
-  fill.style.background = lvl <= 5 ? 'var(--fs-crit)' : lvl <= threshold ? 'var(--fs-warn)' : 'var(--fs-ok)';
-  pc.textContent = `${lvl}%`;
-  box.classList.toggle('chg', !!s.charging);
+  setMeta(el.selfMeta, OS_NAMES[HOST_OS] || 'This device', s.battery_level, !!s.charging, s.battery_threshold ?? 20);
 }
 
-// Beam between the two devices. `data-link` on the container drives the
-// CSS: on (solid green), paused (amber dashes), searching (gray crawl,
-// radar rings on the peer icon), off (inert). Phase comes straight from
-// the FSM (`s.phase`), pause mirrors the hero/pause-banner policy.
+// RTT next to the gear; hidden until the daemon reports one.
+function renderMetrics(s) {
+  const rtt = s && s.metrics && typeof s.metrics.last_rtt_ms === 'number' ? s.metrics.last_rtt_ms : 0;
+  el.rtt.hidden = !rtt;
+  if (rtt) setText(el.rtt, `${rtt} ms`);
+}
+
+// The wire between the two devices. `data-link` drives the CSS: on (solid
+// green), paused (amber dashes), searching (crawling dashes), off (inert).
 function renderLink(s, isPaired) {
-  const c = document.getElementById('tray-container');
-  if (!c) return;
-  if (!s || !s.on || !isPaired) { c.dataset.link = 'off'; return; }
-  const phase = (s.phase || '').toLowerCase();
-  if (phase === 'discovering' || phase === 'handshaking') { c.dataset.link = 'searching'; return; }
-  const threshold = s.battery_threshold ?? 20;
-  const selfLow = (s.battery_level ?? 0) <= threshold && !s.charging;
-  const peerLow = (s.peer_battery ?? 0) <= threshold && !s.peer_charging;
-  c.dataset.link = (phase === 'paused' || selfLow || peerLow) ? 'paused' : 'on';
+  let link = 'off';
+  if (s && s.on && isPaired) {
+    const phase = (s.phase || '').toLowerCase();
+    if (phase === 'discovering' || phase === 'handshaking' || phase === 'reconnecting') {
+      link = 'searching';
+    } else {
+      const threshold = s.battery_threshold ?? 20;
+      const selfLow = batteryKnown(s.battery_level) && s.battery_level <= threshold && !s.charging;
+      const peerLow = batteryKnown(s.peer_battery) && s.peer_battery <= threshold && !s.peer_charging;
+      link = (phase === 'paused' || phase === 'halted' || selfLow || peerLow) ? 'paused' : (phase === 'linked' ? 'on' : 'off');
+    }
+  }
+  setAttr(el.tray, 'data-link', link);
 }
 
-// Fire a pulse along the beam when a new item lands at the top of the
-// history. Direction follows `HistoryItem.source`: local → tx (out),
-// remote → rx (in). Keyed on the content hash so re-renders don't re-fire.
+// A coral packet crosses the wire when a new item lands at the top of the
+// history: local → out (tx), remote → in (rx).
 let lastTopKey = null;
 function maybePulse(s) {
   const top = s && s.history && s.history[0];
-  const key = top ? (top.hash || String(top.lamport)) : null;
+  const key = top ? itemKey(top) : null;
   if (key && lastTopKey && key !== lastTopKey) {
-    const pulse = document.getElementById('beam-pulse');
-    if (pulse) {
-      pulse.classList.remove('tx', 'rx');
-      void pulse.offsetWidth; // restart the CSS animation
-      pulse.classList.add(top.source === 'remote' ? 'rx' : 'tx');
+    el.packet.classList.remove('tx', 'rx');
+    void el.packet.offsetWidth; // restart the CSS animation
+    el.packet.classList.add(top.source === 'remote' ? 'rx' : 'tx');
+    const entry = rowCache.get(key);
+    if (entry) {
+      entry.el.classList.add('new');
+      entry.el.addEventListener('animationend', () => entry.el.classList.remove('new'), { once: true });
     }
-    const first = document.querySelector('#recent .history-item');
-    if (first) first.classList.add('new');
   }
   lastTopKey = key;
 }
 
 function renderFooter(up, s) {
-  const dot = document.getElementById('daemon-dot');
-  const lb = document.getElementById('daemon-label');
-  if (dot) dot.classList.toggle('down', !up);
-  if (lb) lb.textContent = up ? 'fluxsyncd active' : 'daemon unreachable';
-  if (up && s && s.version) {
-    const v = document.getElementById('brand-version');
-    if (v) v.textContent = `v${s.version}`;
+  el.daemonDot.classList.toggle('down', !up);
+  setText(el.daemonLabel, up ? 'fluxsyncd · running' : 'fluxsyncd · unreachable');
+  if (up && s && s.version) setText(el.version, s.version);
+}
+
+// ── Tabs ─────────────────────────────────────────────────────────
+const TAB_KEY = 'fs.trayTab';
+const TABS = ['clipboard', 'firewall', 'devices'];
+let activeTab = 'clipboard';
+try { const t = localStorage.getItem(TAB_KEY); if (TABS.includes(t)) activeTab = t; } catch (_) {}
+
+function selectTab(view, focus) {
+  if (!TABS.includes(view)) return;
+  activeTab = view;
+  try { localStorage.setItem(TAB_KEY, view); } catch (_) {}
+  for (const t of el.tabs.querySelectorAll('.tab')) {
+    const on = t.dataset.view === view;
+    setAttr(t, 'aria-selected', String(on));
+    t.tabIndex = on ? 0 : -1;
+    if (on && focus) t.focus();
+  }
+  for (const id of TABS) $(`view-${id}`).hidden = id !== view;
+  paintPendingStrip();
+}
+el.tabs.addEventListener('click', (e) => {
+  const t = e.target.closest('.tab');
+  if (t) selectTab(t.dataset.view);
+});
+el.tabs.addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  e.preventDefault();
+  const i = TABS.indexOf(activeTab);
+  selectTab(TABS[(i + (e.key === 'ArrowRight' ? 1 : -1) + TABS.length) % TABS.length], true);
+});
+
+// ── History ──────────────────────────────────────────────────────
+const FILTERS = [
+  ['all', 'All'],
+  ['pinned', 'Pinned'],
+  ['text', 'Text'],
+  ['url', 'Links'],
+  ['code', 'Code'],
+  ['image', 'Images'],
+];
+// Upper bound on preview characters put in the DOM. CSS clips to one line
+// anyway; the full text stays in memory for copy + search.
+const PREVIEW_DOM_CHARS = 220;
+
+let historyItems = [];          // newest-first, as sent by the daemon
+let historySig = null;          // cheap identity of `historyItems` (null = never rendered)
+let renderedSig = null;         // historySig + filters at last DOM sync
+let searchQuery = '';
+let kindFilter = 'all';
+const rowCache = new Map();     // key -> row entry (see createRow)
+const searchIndex = new Map();  // key -> lower-cased searchable text
+let peerNames = new Map();      // peer hex id -> display name
+
+function itemKey(h) {
+  return `${h.hash || ''}:${h.lamport}`;
+}
+function itemKind(h) {
+  const k = (h.kind || 'text').toLowerCase();
+  return ['text', 'url', 'code', 'image'].includes(k) ? k : 'text';
+}
+
+function setHistory(s) {
+  const items = (s && Array.isArray(s.history)) ? s.history : [];
+  if (s) {
+    peerNames = new Map();
+    for (const p of (Array.isArray(s.peers) ? s.peers : [])) {
+      const hex = peerIdHex(p.peer_id);
+      if (hex && p.name) peerNames.set(hex, p.name);
+    }
+    const primaryHex = peerIdHex(s.peer_id);
+    if (primaryHex && s.peer_name && !peerNames.has(primaryHex)) peerNames.set(primaryHex, s.peer_name);
+    peerNames.set('', s.peer_name || 'peer');
+  }
+  // Rows only change on add/remove/pin/peer rename — never on heartbeats.
+  let sig = '';
+  for (const h of items) sig += itemKey(h) + (h.favorite ? '*' : '') + (h.sensitive ? '!' : '') + originLabel(h) + '\n';
+  if (sig === historySig) return;
+  historySig = sig;
+  historyItems = items;
+
+  const live = new Set();
+  for (const h of items) {
+    const key = itemKey(h);
+    live.add(key);
+    if (!searchIndex.has(key)) {
+      // Sensitive previews are masked — never index their text.
+      searchIndex.set(key, h.sensitive ? itemKind(h) : `${itemKind(h)} ${(h.preview || '').toLowerCase()}`);
+    }
+  }
+  for (const [key, entry] of rowCache) {
+    if (!live.has(key)) {
+      entry.el.remove();
+      if (thumbObserver) thumbObserver.unobserve(entry.kind);
+      rowCache.delete(key);
+    }
+  }
+  for (const key of [...searchIndex.keys()]) if (!live.has(key)) searchIndex.delete(key);
+  setText(el.recentCount, String(items.length));
+  renderFilters();
+  renderHistory();
+}
+
+function originLabel(h) {
+  if (h.source !== 'remote') return 'This ' + HOST_WORD;
+  return peerNames.get(h.source_peer_id || '') || peerNames.get('') || 'peer';
+}
+
+function matchesFilter(h) {
+  if (kindFilter === 'pinned' && !h.favorite) return false;
+  if (kindFilter !== 'all' && kindFilter !== 'pinned' && itemKind(h) !== kindFilter) return false;
+  const q = searchQuery.trim().toLowerCase();
+  return !q || (searchIndex.get(itemKey(h)) || '').includes(q);
+}
+function visibleItems() {
+  return historyItems.filter(matchesFilter);
+}
+
+function renderHistory() {
+  const sig = `${historySig}\u0000${searchQuery}\u0000${kindFilter}`;
+  if (sig === renderedSig) return;
+  renderedSig = sig;
+
+  const visible = visibleItems();
+  const total = historyItems.length;
+  el.clearBtn.hidden = total === 0;
+
+  const list = el.recent;
+  let empty = list.querySelector('.list-empty');
+  if (!visible.length) {
+    for (const entry of rowCache.values()) entry.el.remove();
+    if (!empty) {
+      empty = document.createElement('div');
+      empty.className = 'list-empty';
+      list.append(empty);
+    }
+    const t = document.createElement('div');
+    t.className = 't';
+    const s = document.createElement('div');
+    s.className = 's';
+    if (total > 0) {
+      t.textContent = 'No match';
+      s.textContent = 'Try another word or filter.';
+    } else {
+      t.textContent = 'Nothing has crossed yet';
+      s.textContent = 'Copy something on either device — it lands here, on both.';
+    }
+    empty.replaceChildren(t, s);
+    return;
+  }
+  if (empty) empty.remove();
+
+  // Keyed reconcile: reuse rows, patch only what changed, move nodes only
+  // when the order actually differs.
+  let cursor = list.firstElementChild;
+  const shown = new Set();
+  visible.forEach((h, i) => {
+    const key = itemKey(h);
+    shown.add(key);
+    let entry = rowCache.get(key);
+    if (!entry) {
+      entry = createRow(key);
+      rowCache.set(key, entry);
+    }
+    patchRow(entry, h, i);
+    if (entry.el === cursor) cursor = cursor.nextElementSibling;
+    else list.insertBefore(entry.el, cursor);
+  });
+  for (const [key, entry] of rowCache) {
+    if (!shown.has(key) && entry.el.parentNode) entry.el.remove();
   }
 }
 
-const KIND_ICONS = {
-  text: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 2.5h8M2 6h8M2 9.5h5"/></svg>',
-  url: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M4.5 7.5l3-3M3.2 8.8L2 10a2 2 0 102.8 2.8L6 11.5M8.8 3.2L10 2a2 2 0 10-2.8-2.8L6 .5" transform="translate(0 .4)"/></svg>',
-  image: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="4" cy="4.5" r="1.2"/><path d="M0 9.5l3.5-3.5L12 12" stroke-linejoin="round"/></svg>',
-};
-const LOCK_ICON =
-  '<svg width="10" height="11" viewBox="0 0 9 10" fill="none">' +
-  '<rect x="1" y="4" width="7" height="5" stroke="currentColor" stroke-width="1.2"/>' +
-  '<path d="M2.5 4V2.5a2 2 0 014 0V4" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>';
+function make(tag, cls) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  return n;
+}
 
-// Copy a history item's text back to the OS clipboard. The async Clipboard
-// API is tried first; WKWebView sometimes rejects it, so fall back to the
-// legacy execCommand path, which still works on a user gesture.
+function createRow(key) {
+  const row = make('div', 'row');
+  row.setAttribute('role', 'listitem');
+  row.dataset.key = key;
+  const main = make('button', 'row-main');
+  main.type = 'button';
+  const idx = make('span', 'idx');
+  idx.setAttribute('aria-hidden', 'true');
+  const kind = make('span', 'kind');
+  kind.setAttribute('aria-hidden', 'true');
+  const text = make('span', 'row-text');
+  const preview = make('span', 'preview');
+  const origin = make('span', 'origin');
+  text.append(preview, origin);
+  const side = make('span', 'row-side');
+  const pinned = make('span', 'pinned');
+  pinned.innerHTML = ICON.pinMini;
+  const time = make('span', 'time');
+  const copied = make('span', 'copied');
+  copied.textContent = 'Copied';
+  side.append(pinned, time, copied);
+  main.append(idx, kind, text, side);
+
+  const acts = make('div', 'row-acts');
+  const open = make('button', 'act open');
+  open.type = 'button';
+  open.innerHTML = ICON.open;
+  open.title = 'Open link';
+  open.setAttribute('aria-label', 'Open link in browser');
+  open.hidden = true;
+  const pin = make('button', 'act pin');
+  pin.type = 'button';
+  pin.innerHTML = ICON.star;
+  acts.append(open, pin);
+
+  row.append(main, acts);
+  return { el: row, main, idx, kind, preview, origin, time, open, pin, h: null, sig: '', kindName: '' };
+}
+
+function displayText(h) {
+  if (h.sensitive) return '••••••••••••';
+  return (h.preview || '').slice(0, PREVIEW_DOM_CHARS).replace(/\s+/g, ' ').trim() || '(empty)';
+}
+
+function isWebUrl(h) {
+  return itemKind(h) === 'url' && !h.sensitive && /^https?:\/\/\S+$/i.test((h.preview || '').trim());
+}
+
+function patchRow(entry, h, index) {
+  entry.h = h;
+  const kind = itemKind(h);
+  const from = originLabel(h);
+  const remote = h.source === 'remote';
+  const sig = [kind, h.favorite, h.sensitive, h.time, from, remote].join('|');
+  if (entry.sig !== sig) {
+    entry.sig = sig;
+    if (entry.kindName !== kind) {
+      entry.kindName = kind;
+      entry.kind.innerHTML = ICON[kind];
+      // DIR-P3-02(b): lazy thumbnail — only rows actually scrolled into
+      // view ever fetch bytes. Sensitive images never get one.
+      if (kind === 'image' && h.hash && !h.sensitive) {
+        entry.kind.dataset.hash = h.hash;
+        getThumbObserver().observe(entry.kind);
+      }
+    }
+    entry.preview.textContent = displayText(h);
+    entry.preview.className = 'preview' + (h.sensitive ? ' masked' : kind === 'code' ? ' code' : '');
+
+    // Direction first: what came in from which device, what went out.
+    const dir = make('span', 'dir' + (remote ? ' in' : ''));
+    dir.innerHTML = remote ? ICON.inArrow : ICON.outArrow;
+    dir.append(document.createTextNode(from));
+    const parts = [dir];
+    if (h.sensitive) {
+      const sens = make('span', 'sens');
+      sens.innerHTML = ICON.lock;
+      sens.append(document.createTextNode('Sensitive'));
+      parts.push(sens);
+    }
+    entry.origin.replaceChildren(...parts);
+    entry.time.textContent = h.time || '—';
+
+    // Text rows carry their full payload in `preview`, so clicking copies
+    // it straight back. Image rows fetch bytes on demand (DIR-P3-02(c)).
+    const copyable = kind === 'image' ? !!h.hash : !!h.preview;
+    entry.main.disabled = !copyable;
+    entry.main.title = copyable ? 'Copy to clipboard' : '';
+    const what = h.sensitive ? 'Sensitive item' : (kind === 'image' ? (h.preview || 'Image') : displayText(h).slice(0, 80));
+    entry.main.setAttribute('aria-label',
+      `${copyable ? 'Copy: ' : ''}${what}. ${remote ? 'Received from' : 'Copied on'} ${from}, ${h.time || ''}`);
+
+    entry.open.hidden = !isWebUrl(h);
+    entry.el.classList.toggle('pinned', !!h.favorite);
+    // FluxVault: pinned items survive the vault TTL + cap.
+    entry.pin.setAttribute('aria-pressed', String(!!h.favorite));
+    const pinLabel = h.favorite ? 'Unpin' : 'Pin — keep it past the history limit';
+    entry.pin.title = pinLabel;
+    entry.pin.setAttribute('aria-label', pinLabel);
+  }
+  // The index doubles as the ⌘1–9 shortcut.
+  setText(entry.idx, String(index + 1).padStart(2, '0'));
+}
+
+function renderFilters() {
+  const counts = { all: historyItems.length, pinned: 0, text: 0, url: 0, code: 0, image: 0 };
+  for (const h of historyItems) {
+    counts[itemKind(h)]++;
+    if (h.favorite) counts.pinned++;
+  }
+  // A filter whose bucket just emptied falls back to "All".
+  if (kindFilter !== 'all' && !counts[kindFilter]) kindFilter = 'all';
+  if (!el.filters.childElementCount) {
+    for (const [id, label] of FILTERS) {
+      const b = make('button', 'filter');
+      b.type = 'button';
+      b.dataset.filter = id;
+      b.dataset.label = label;
+      b.setAttribute('role', 'radio');
+      b.textContent = label;
+      el.filters.append(b);
+    }
+  }
+  let buckets = 0;
+  for (const b of el.filters.children) {
+    const id = b.dataset.filter;
+    const n = counts[id] || 0;
+    if (id !== 'all' && n > 0) buckets++;
+    b.hidden = id !== 'all' && n === 0;
+    setAttr(b, 'aria-checked', String(id === kindFilter));
+    setAttr(b, 'aria-label', `${b.dataset.label}, ${n} item${n === 1 ? '' : 's'}`);
+    b.tabIndex = id === kindFilter ? 0 : -1;
+  }
+  // One bucket only (e.g. all text, nothing pinned) → filters add nothing.
+  el.filters.hidden = buckets < 2 && kindFilter === 'all';
+}
+
+function selectFilter(id) {
+  kindFilter = id;
+  renderFilters();
+  renderHistory();
+}
+el.filters.addEventListener('click', (e) => {
+  const b = e.target.closest('.filter');
+  if (b) selectFilter(b.dataset.filter);
+});
+el.filters.addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const btns = [...el.filters.children].filter((c) => !c.hidden);
+  const idx = btns.findIndex((c) => c.dataset.filter === kindFilter);
+  const next = btns[(idx + (e.key === 'ArrowRight' ? 1 : -1) + btns.length) % btns.length];
+  if (!next) return;
+  e.preventDefault();
+  selectFilter(next.dataset.filter);
+  next.focus();
+});
+
+// ── Copy ─────────────────────────────────────────────────────────
+// The async Clipboard API first; WKWebView sometimes rejects it, so fall
+// back to the legacy execCommand path (works on a user gesture).
 async function copyText(text) {
-  if (!text) return;
+  if (!text) return false;
   try {
     await navigator.clipboard.writeText(text);
+    return true;
   } catch {
     const ta = document.createElement('textarea');
     ta.value = text;
@@ -495,522 +715,569 @@ async function copyText(text) {
     ta.style.opacity = '0';
     document.body.appendChild(ta);
     ta.select();
-    try { document.execCommand('copy'); } catch {}
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
     ta.remove();
+    return ok;
   }
-  showToast('Copied');
 }
 
-// History rows render every `HistoryItem` field the daemon sends: kind
-// (icon), sensitive (masked preview + lock), source (local/peer badge),
-// time (HH:MM from the daemon's wall clock).
-function renderRecent(history) {
-  const list = document.getElementById('recent');
-  document.getElementById('recent-count').textContent = `${history.length} items`;
-  // The whole list is rebuilt from scratch on every render (existing
-  // pattern — see the rest of this function). Drop any thumbnail targets
-  // still being watched from the previous render so a row that never
-  // scrolled into view before being replaced doesn't linger in the
-  // observer forever.
-  if (thumbObserver) thumbObserver.disconnect();
-  list.innerHTML = '';
-  if (!history.length) {
-    const empty = document.createElement('div');
-    empty.className = 'history-empty';
-    empty.textContent = historyFilter.trim() ? 'No matching items.' : 'Nothing copied yet.';
-    list.append(empty);
+function b64ToBlob(b64, type) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type });
+}
+
+// Decodes locally instead of `fetch(dataUri)`: the app CSP has no
+// `connect-src data:`, so the old fetch-based path always failed and image
+// rows reported "Image unavailable to copy".
+async function copyImage(hash) {
+  try {
+    const b64 = await invoke('fluxsync_fetch_item', { hash });
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': b64ToBlob(b64, 'image/png') })]);
+    return true;
+  } catch (_) {
+    showToast('That image is no longer available to copy', 'err');
+    return false;
+  }
+}
+
+const copiedTimers = new WeakMap();
+async function copyEntry(entry) {
+  const h = entry && entry.h;
+  if (!h || entry.main.disabled) return;
+  const ok = itemKind(h) === 'image' ? await copyImage(h.hash) : await copyText(h.preview);
+  if (!ok) {
+    if (itemKind(h) !== 'image') showToast('Copy failed', 'err');
     return;
   }
-  history.forEach(h => {
-    const item = document.createElement('button');
-    item.className = 'history-item';
-
-    const kind = (h.kind || 'text').toLowerCase();
-    const ic = document.createElement('span');
-    ic.className = 'kind-ic' + (kind === 'image' ? ' thumb' : '');
-    ic.innerHTML = KIND_ICONS[kind] || KIND_ICONS.text;
-    // DIR-P3-02(b): lazy thumbnail — swap the glyph for the real image
-    // once (and if) it loads; queued below via IntersectionObserver so
-    // only rows actually scrolled into view ever fetch bytes.
-    if (kind === 'image' && h.hash && !h.sensitive) {
-      ic.dataset.hash = h.hash;
-    }
-
-    const p = document.createElement('span');
-    if (h.sensitive) {
-      p.className = 'preview masked';
-      p.textContent = '••••••••••••';
-    } else {
-      p.className = 'preview';
-      p.textContent = h.preview || '';
-    }
-
-    item.append(ic, p);
-
-    if (h.sensitive) {
-      const lock = document.createElement('span');
-      lock.className = 'lock';
-      lock.title = 'Marked sensitive — masked';
-      lock.innerHTML = LOCK_ICON;
-      item.append(lock);
-    }
-
-    const src = document.createElement('span');
-    const remote = h.source === 'remote';
-    src.className = 'src ' + (remote ? 'remote' : 'local');
-    src.textContent = remote ? 'peer' : 'local';
-    item.append(src);
-
-    // FluxVault: pin/unpin star. Pinned items survive the vault TTL + cap.
-    // It lives inside the history button, so stop the click from also
-    // triggering the row's copy handler.
-    const fav = document.createElement('span');
-    fav.className = 'fav' + (h.favorite ? ' on' : '');
-    fav.textContent = h.favorite ? '★' : '☆';
-    fav.title = h.favorite ? 'Unpin' : 'Pin — keep past history limit';
-    fav.setAttribute('role', 'button');
-    fav.tabIndex = 0;
-    fav.setAttribute('aria-label', h.favorite ? 'Unpin' : 'Pin — keep past history limit');
-    fav.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleFavorite(h.hash, !h.favorite);
-    });
-    // DIR-P3-06: a bare `<span>` with only a click handler is invisible to
-    // keyboard users — give it the same activation Enter/Space give a
-    // real button, without changing its look.
-    fav.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        e.stopPropagation();
-        toggleFavorite(h.hash, !h.favorite);
-      }
-    });
-    item.append(fav);
-
-    // Text rows carry their full payload in `preview` (only the CSS clips it),
-    // so clicking copies it straight back. Image rows fetch their bytes
-    // on demand via `fluxsync_fetch_item` (DIR-P3-02(c)) — copyable only
-    // when a hash is present; a fetch failure (bytes not cached) surfaces
-    // as a toast rather than a silent no-op.
-    if (kind !== 'image' && h.preview) {
-      item.classList.add('copyable');
-      item.title = 'Click to copy';
-      const hint = document.createElement('span');
-      hint.className = 'copy-hint';
-      hint.textContent = 'Copy';
-      item.append(hint);
-      item.addEventListener('click', () => copyText(h.preview));
-    } else if (kind === 'image' && h.hash) {
-      item.classList.add('copyable');
-      item.title = 'Click to copy';
-      const hint = document.createElement('span');
-      hint.className = 'copy-hint';
-      hint.textContent = 'Copy';
-      item.append(hint);
-      item.addEventListener('click', () => copyImage(h.hash));
-    } else {
-      item.style.cursor = 'default';
-    }
-
-    const t = document.createElement('span');
-    t.className = 'time';
-    t.textContent = h.time || '—';
-    item.append(t);
-
-    list.append(item);
-
-    // Observe only after the icon is in the DOM — IntersectionObserver
-    // never fires for a detached node.
-    if (ic.dataset.hash) getThumbObserver().observe(ic);
-  });
+  entry.el.classList.add('copied');
+  clearTimeout(copiedTimers.get(entry.el));
+  copiedTimers.set(entry.el, setTimeout(() => entry.el.classList.remove('copied'), 1400));
+  showToast('Copied — on your other devices too', 'ok');
 }
 
-// ── DIR-P3-02(b)/(c): on-demand image bytes ─────────────────────────────
-// The daemon only keeps a handful of recent image payloads cached
-// (`IMAGE_CACHE`, capped at 4 server-side), so this cache is naturally tiny
-// — no eviction needed here on top of that.
-const imageBytesCache = new Map(); // hash -> data: URI
-
-async function fetchImageDataUri(hash) {
-  if (imageBytesCache.has(hash)) return imageBytesCache.get(hash);
-  const b64 = await invoke('fluxsync_fetch_item', { hash });
-  const uri = `data:image/png;base64,${b64}`;
-  imageBytesCache.set(hash, uri);
-  return uri;
-}
-
+// ── Thumbnails (DIR-P3-02(b)) ────────────────────────────────────
+// The daemon keeps only a handful of recent image payloads, and a payload
+// can be several MB of PNG. Decode once, downscale to a 52 px square and
+// keep only that tiny thumbnail (LRU-capped), never the full bytes.
+const THUMB_CACHE_MAX = 24;
+const thumbCache = new Map(); // hash -> small data: URI
 let thumbObserver = null;
 function getThumbObserver() {
   if (thumbObserver) return thumbObserver;
-  thumbObserver = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        thumbObserver.unobserve(entry.target);
-        loadThumbnail(entry.target);
-      }
-    },
-    { root: document.getElementById('recent'), threshold: 0.05 }
-  );
+  thumbObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      thumbObserver.unobserve(entry.target);
+      loadThumbnail(entry.target);
+    }
+  }, { root: $('view-clipboard'), rootMargin: '80px 0px', threshold: 0.01 });
   return thumbObserver;
 }
 
-async function loadThumbnail(iconEl) {
-  const hash = iconEl.dataset.hash;
+function makeThumb(dataUri) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const size = 52;
+      const c = document.createElement('canvas');
+      c.width = size;
+      c.height = size;
+      const scale = Math.max(size / img.naturalWidth, size / img.naturalHeight);
+      const w = img.naturalWidth * scale;
+      const hh = img.naturalHeight * scale;
+      c.getContext('2d').drawImage(img, (size - w) / 2, (size - hh) / 2, w, hh);
+      resolve(c.toDataURL('image/png'));
+    };
+    img.onerror = reject;
+    img.src = dataUri;
+  });
+}
+
+async function loadThumbnail(kindEl) {
+  const hash = kindEl.dataset.hash;
   if (!hash) return;
   try {
-    const uri = await fetchImageDataUri(hash);
+    let uri = thumbCache.get(hash);
+    if (uri) {
+      thumbCache.delete(hash); // refresh LRU position
+    } else {
+      const b64 = await invoke('fluxsync_fetch_item', { hash });
+      uri = await makeThumb(`data:image/png;base64,${b64}`);
+    }
+    thumbCache.set(hash, uri);
+    while (thumbCache.size > THUMB_CACHE_MAX) thumbCache.delete(thumbCache.keys().next().value);
+    if (kindEl.dataset.hash !== hash) return;
     const img = document.createElement('img');
     img.className = 'thumb-img';
     img.alt = '';
-    img.loading = 'lazy';
     img.src = uri;
-    iconEl.innerHTML = '';
-    iconEl.appendChild(img);
+    kindEl.replaceChildren(img);
   } catch (_) {
-    // No bytes cached for this hash (common on desktop today — see the
-    // `fluxsync_fetch_item` doc comment). Leave the placeholder glyph.
+    // No bytes cached for this hash (evicted / never received here).
   }
 }
 
-async function copyImage(hash) {
+// ── FluxVault favorites ──────────────────────────────────────────
+async function toggleFavorite(entry) {
+  const h = entry && entry.h;
+  if (!h || !h.hash) return;
+  const favorite = !h.favorite;
+  entry.pin.setAttribute('aria-pressed', String(favorite)); // optimistic
   try {
-    const uri = await fetchImageDataUri(hash);
-    const blob = await (await fetch(uri)).blob();
-    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-    showToast('Copied');
-  } catch (_) {
-    showToast('Image unavailable to copy');
-  }
-}
-
-// ── FluxVault favorites ────────────────────────────────────────────────
-async function toggleFavorite(hash, favorite) {
-  if (!hash) return;
-  try {
-    await invoke('fluxsync_set_favorite', { hash, favorite });
-    await refreshState();
+    await invoke('fluxsync_set_favorite', { hash: h.hash, favorite });
+    showToast(favorite ? 'Pinned — kept past the history limit' : 'Unpinned', 'ok');
   } catch (err) {
-    showToast(`${favorite ? 'Pin' : 'Unpin'} failed: ${err}`);
+    showToast(`${favorite ? 'Pin' : 'Unpin'} failed: ${err}`, 'err');
   }
+  refreshState();
 }
 
-// ── FluxFirewall ───────────────────────────────────────────────────────
-// Per-content-type Allow/Ask/Deny policy + the Ask "pending decisions"
-// queue. Reads `State.firewall` + `State.pending`, drives `set_firewall`
-// and `resolve_pending`. Built fresh into #firewall-body each snapshot.
-const FW_RULES = ['allow', 'ask', 'deny'];
+el.recent.addEventListener('click', (e) => {
+  const row = e.target.closest('.row');
+  if (!row) return;
+  const entry = rowCache.get(row.dataset.key);
+  if (!entry) return;
+  if (e.target.closest('.pin')) toggleFavorite(entry);
+  else if (e.target.closest('.open')) invoke('fluxsync_open_url', { url: (entry.h.preview || '').trim() });
+  else if (e.target.closest('.row-main')) copyEntry(entry);
+});
+
+// ↑/↓ walk the list, `p` pins, `o` opens a link; ↑ on the first row goes
+// back to the search box.
+el.recent.addEventListener('keydown', (e) => {
+  const row = e.target.closest('.row');
+  if (!row) return;
+  const entry = rowCache.get(row.dataset.key);
+  const mains = [...el.recent.querySelectorAll('.row-main')];
+  const idx = mains.indexOf(row.querySelector('.row-main'));
+  let next = null;
+  if (e.key === 'ArrowDown') next = mains[Math.min(idx + 1, mains.length - 1)];
+  else if (e.key === 'ArrowUp') next = idx <= 0 ? el.search : mains[idx - 1];
+  else if (e.key === 'Home') next = mains[0];
+  else if (e.key === 'End') next = mains[mains.length - 1];
+  else if (!e.metaKey && !e.ctrlKey && (e.key === 'p' || e.key === 'P')) {
+    e.preventDefault();
+    toggleFavorite(entry);
+    return;
+  } else if (!e.metaKey && !e.ctrlKey && (e.key === 'o' || e.key === 'O') && entry && isWebUrl(entry.h)) {
+    e.preventDefault();
+    invoke('fluxsync_open_url', { url: entry.h.preview.trim() });
+    return;
+  }
+  if (next) {
+    e.preventDefault();
+    next.focus();
+    next.scrollIntoView({ block: 'nearest' });
+  }
+});
+
+// ── Search (DIR-P3-02(a): local, instant, no daemon round-trip) ──
+el.search.addEventListener('input', () => {
+  searchQuery = el.search.value;
+  renderHistory();
+});
+el.search.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    if (el.search.value) {
+      el.search.value = '';
+      searchQuery = '';
+      renderHistory();
+    } else {
+      el.search.blur();
+    }
+  } else if (e.key === 'ArrowDown') {
+    const first = el.recent.querySelector('.row-main');
+    if (first) { e.preventDefault(); first.focus(); }
+  } else if (e.key === 'Enter') {
+    // Enter copies the best (first) match.
+    const first = visibleItems()[0];
+    if (first) { e.preventDefault(); copyEntry(rowCache.get(itemKey(first))); }
+  }
+});
+
+// ── Pending firewall decisions ───────────────────────────────────
+let pendingSig = '';
+let pendingCount = 0;
+function renderPending(s) {
+  const pending = Array.isArray(s.pending) ? s.pending : [];
+  const sig = pending.map((p) => `${p.hash}|${p.direction}|${p.kind}|${p.sensitive}`).join('\n');
+  if (sig === pendingSig) return;
+  pendingSig = sig;
+  pendingCount = pending.length;
+  el.pending.hidden = pending.length === 0;
+  el.pending.replaceChildren(...pending.map(buildPendingCard));
+  el.pendingBadge.hidden = pending.length === 0;
+  setText(el.pendingBadge, String(pending.length));
+  paintPendingStrip();
+}
+// Time-sensitive: announced on every tab, one click from the decision.
+function paintPendingStrip() {
+  const show = pendingCount > 0 && activeTab !== 'firewall';
+  el.pendingStrip.hidden = !show;
+  if (show) {
+    setText(el.pendingStripText, pendingCount === 1
+      ? '1 item is waiting for your decision'
+      : `${pendingCount} items are waiting for your decision`);
+  }
+}
+el.pendingStrip.addEventListener('click', () => selectTab('firewall'));
+
+const KIND_NOUN = { text: 'text', url: 'link', code: 'code', image: 'image' };
+function buildPendingCard(p) {
+  const card = make('div', 'pend');
+  const head = make('div', 'pend-head');
+  const title = make('span', 'pend-title');
+  const incoming = p.direction !== 'outbound';
+  const noun = KIND_NOUN[(p.kind || 'text').toLowerCase()] || 'item';
+  title.textContent = incoming ? `Incoming ${noun} — let it in?` : `Outgoing ${noun} — send it?`;
+  head.append(title);
+  if (p.sensitive) {
+    const sec = make('span', 'pend-secret');
+    sec.textContent = 'SECRET';
+    head.append(sec);
+  }
+  const prev = make('div', 'pend-preview' + (p.sensitive ? ' masked' : ''));
+  prev.textContent = p.sensitive ? '••••••••••••' : ((p.preview || '').slice(0, 400) || '(no preview)');
+  const acts = make('div', 'pend-acts');
+  const reject = make('button', 'btn danger');
+  reject.textContent = 'Block';
+  const approve = make('button', 'btn flux');
+  approve.textContent = incoming ? 'Let it in' : 'Send it';
+  const resolve = async (allow) => {
+    reject.disabled = true;
+    approve.disabled = true;
+    try {
+      await invoke('fluxsync_resolve_pending', { hash: p.hash, allow });
+    } catch (err) {
+      showToast(`${allow ? 'Approve' : 'Block'} failed: ${err}`, 'err');
+      reject.disabled = false;
+      approve.disabled = false;
+    }
+    refreshState();
+  };
+  reject.addEventListener('click', () => resolve(false));
+  approve.addEventListener('click', () => resolve(true));
+  acts.append(reject, approve);
+  card.append(head, prev, acts);
+  return card;
+}
+
+// ── FluxFirewall: rules matrix ───────────────────────────────────
+// Rows = content kinds, columns = Allow / Ask / Block. Built once and
+// updated in place, so a state push never steals keyboard focus.
+const FW_RULES = [['allow', 'Allow'], ['ask', 'Ask'], ['deny', 'Block']];
 const FW_KINDS = [
-  ['text', 'Text', 'Plain text snippets'],
-  ['url', 'Links', 'URLs on the clipboard'],
+  ['text', 'Text', 'Plain text'],
+  ['url', 'Links', 'URLs'],
   ['code', 'Code', 'Code-shaped content'],
-  ['image', 'Images', 'PNG image payloads'],
+  ['image', 'Images', 'PNG images'],
   ['sensitive', 'Secrets', 'Detected keys & tokens'],
 ];
-
 function defaultFirewall() {
   return { enabled: false, text: 'allow', url: 'allow', code: 'allow', image: 'allow', sensitive: 'ask' };
 }
+let fw = defaultFirewall();
+let fwSig = '';
 
-async function pushFirewall(policy) {
-  try {
-    await invoke('fluxsync_set_firewall', { policy });
-    await refreshState();
-  } catch (err) {
-    showToast(`Firewall update failed: ${err}`);
+(function buildMatrix() {
+  for (const [field, label, hint] of FW_KINDS) {
+    const row = make('div', 'mx-row');
+    row.setAttribute('role', 'radiogroup');
+    row.setAttribute('aria-label', `${label} rule`);
+    const lab = make('span', 'mx-label');
+    const b = document.createElement('b');
+    b.textContent = label;
+    const h = document.createElement('span');
+    h.textContent = hint;
+    lab.append(b, h);
+    row.append(lab);
+    for (const [rule, ruleLabel] of FW_RULES) {
+      const c = make('button', 'cell');
+      c.type = 'button';
+      c.dataset.field = field;
+      c.dataset.rule = rule;
+      c.setAttribute('role', 'radio');
+      c.setAttribute('aria-label', `${label}: ${ruleLabel}`);
+      c.title = ruleLabel;
+      c.append(document.createElement('i'));
+      row.append(c);
+    }
+    el.fwRules.append(row);
   }
-}
+})();
 
-async function resolvePending(hash, allow) {
-  try {
-    await invoke('fluxsync_resolve_pending', { hash, allow });
-    await refreshState();
-  } catch (err) {
-    showToast(`${allow ? 'Approve' : 'Reject'} failed: ${err}`);
+function paintFirewall() {
+  el.fwToggle.classList.toggle('on', !!fw.enabled);
+  setAttr(el.fwToggle, 'aria-checked', String(!!fw.enabled));
+  if (fw.enabled) {
+    const asks = FW_KINDS.filter(([f]) => fw[f] === 'ask').length;
+    const blocks = FW_KINDS.filter(([f]) => fw[f] === 'deny').length;
+    const bits = [];
+    if (blocks) bits.push(`${blocks} blocked`);
+    if (asks) bits.push(`${asks} ask first`);
+    setText(el.fwSub, bits.length ? `On — ${bits.join(' · ')}` : 'On — everything allowed');
+  } else {
+    setText(el.fwSub, 'Off — everything passes');
+  }
+  el.fwRules.classList.toggle('off', !fw.enabled);
+  for (const c of el.fwRules.querySelectorAll('.cell')) {
+    const on = (fw[c.dataset.field] || 'allow') === c.dataset.rule;
+    setAttr(c, 'aria-checked', String(on));
+    c.tabIndex = on ? 0 : -1;
+    c.disabled = !fw.enabled;
   }
 }
 
 function renderFirewall(s) {
-  const body = document.getElementById('firewall-body');
-  if (!body) return;
-  const fw = Object.assign(defaultFirewall(), s.firewall || {});
-  const pending = s.pending || [];
-  body.innerHTML = '';
+  const next = Object.assign(defaultFirewall(), s.firewall || {});
+  const sig = JSON.stringify(next);
+  if (sig === fwSig) return;
+  fwSig = sig;
+  fw = next;
+  paintFirewall();
+}
 
-  // Pending decisions first — they're time-sensitive.
-  if (pending.length) {
-    const head = document.createElement('div');
-    head.className = 'fw-subhead';
-    head.textContent = 'Pending decisions';
-    body.append(head);
-    pending.forEach(p => body.append(buildPendingCard(p)));
+async function pushFirewall(policy) {
+  const prev = fw;
+  fw = policy;
+  fwSig = JSON.stringify(policy);
+  paintFirewall(); // optimistic
+  try {
+    await invoke('fluxsync_set_firewall', { policy });
+  } catch (err) {
+    fw = prev;
+    fwSig = JSON.stringify(prev);
+    paintFirewall();
+    showToast(`Firewall update failed: ${err}`, 'err');
   }
-
-  // Master switch.
-  const master = document.createElement('div');
-  master.className = 'fw-master';
-  const mLabel = document.createElement('div');
-  mLabel.className = 'fw-master-text';
-  const mTitle = document.createElement('span');
-  mTitle.className = 'fw-master-title';
-  mTitle.textContent = 'Clipboard firewall';
-  const mHint = document.createElement('span');
-  mHint.className = 'fw-master-hint';
-  mHint.textContent = fw.enabled ? 'Rules below are enforced' : 'Off — every item passes';
-  mLabel.append(mTitle, mHint);
-  const mToggle = document.createElement('button');
-  mToggle.className = 'fw-switch' + (fw.enabled ? ' on' : '');
-  mToggle.setAttribute('aria-label', 'Toggle firewall');
-  mToggle.setAttribute('role', 'switch');
-  mToggle.setAttribute('aria-checked', String(!!fw.enabled));
-  mToggle.addEventListener('click', () => {
-    pushFirewall(Object.assign({}, fw, { enabled: !fw.enabled }));
-  });
-  master.append(mLabel, mToggle);
-  body.append(master);
-
-  // Per-kind rule rows.
-  const rules = document.createElement('div');
-  rules.className = 'fw-rules' + (fw.enabled ? '' : ' disabled');
-  FW_KINDS.forEach(([field, label, hint]) => {
-    rules.append(buildRuleRow(fw, field, label, hint));
-  });
-  body.append(rules);
+  refreshState();
 }
 
-function buildPendingCard(p) {
-  const card = document.createElement('div');
-  card.className = 'fw-pending';
-  const meta = document.createElement('div');
-  meta.className = 'fw-pending-meta';
-  const tag = document.createElement('span');
-  tag.className = 'fw-pending-tag';
-  const dir = p.direction === 'outbound' ? 'OUTGOING' : 'INCOMING';
-  tag.textContent = dir + ' · ' + String(p.kind || 'text').toUpperCase();
-  meta.append(tag);
-  if (p.sensitive) {
-    const sec = document.createElement('span');
-    sec.className = 'fw-pending-secret';
-    sec.textContent = 'SECRET';
-    meta.append(sec);
+el.fwToggle.addEventListener('click', () => pushFirewall(Object.assign({}, fw, { enabled: !fw.enabled })));
+el.fwRules.addEventListener('click', (e) => {
+  const c = e.target.closest('.cell');
+  if (!c || !fw.enabled) return;
+  const { field, rule } = c.dataset;
+  if ((fw[field] || 'allow') !== rule) pushFirewall(Object.assign({}, fw, { [field]: rule }));
+});
+el.fwRules.addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const c = e.target.closest('.cell');
+  if (!c || !fw.enabled) return;
+  const order = FW_RULES.map(([r]) => r);
+  const i = order.indexOf(c.dataset.rule);
+  const rule = order[(i + (e.key === 'ArrowRight' ? 1 : -1) + order.length) % order.length];
+  e.preventDefault();
+  pushFirewall(Object.assign({}, fw, { [c.dataset.field]: rule }));
+  requestAnimationFrame(() => el.fwRules.querySelector(`.cell[data-field="${c.dataset.field}"][data-rule="${rule}"]`)?.focus());
+});
+
+// ── Devices (FluxMesh) ───────────────────────────────────────────
+// Every linked device, with a per-device unpair. Built with textContent
+// only — peer names are attacker-controlled (Hello data). Rebuilt only
+// when something visible changed.
+let devicesSig = null;
+function renderDevices(s) {
+  const peers = Array.isArray(s.peers) && s.peers.length ? s.peers : [{
+    peer_id: s.peer_id, name: s.peer_name, platform: s.peer_platform,
+    battery: s.peer_battery, charging: s.peer_charging, primary: true,
+  }];
+  const sig = peers.map((p) => [peerIdHex(p.peer_id), p.name, p.platform, p.battery, p.charging, p.primary].join('|')).join('\n');
+  if (sig === devicesSig) return;
+  devicesSig = sig;
+  setText(el.devicesCount, String(peers.length));
+  el.devices.replaceChildren(...peers.map((p) => {
+    const row = make('div', 'dev');
+    const key = (p.platform || '').toLowerCase();
+    const node = make('span', 'node');
+    node.setAttribute('aria-hidden', 'true');
+    node.innerHTML = (key === 'android' || key === 'ios') ? ICON.phone : ICON.computer;
+    const text = make('div', 'dev-text');
+    const name = make('span', 'dev-name');
+    const display = isRealPeerName(p.name) ? p.name.trim() : 'Unnamed device';
+    name.textContent = display;
+    name.title = display;
+    const meta = make('span', 'dev-meta');
+    const live = make('span', 'live');
+    live.textContent = p.primary && peers.length > 1 ? 'PRIMARY' : 'LINKED';
+    const bits = [PLATFORM_LABELS[key] || p.platform || ''];
+    if (batteryKnown(p.battery)) bits.push(`${p.battery}%${p.charging ? ' · charging' : ''}`);
+    meta.append(live, document.createTextNode(bits.filter(Boolean).join(' · ')));
+    text.append(name, meta);
+    const btn = make('button', 'btn danger sm');
+    btn.textContent = 'Unpair';
+    // The daemon `revoke` op drops just this peer; with no id (older
+    // daemon) fall back to `unpair`, which resets the primary link.
+    const hex = peerIdHex(p.peer_id);
+    btn.addEventListener('click', () => unpairPeer(hex, display));
+    row.append(node, text, btn);
+    return row;
+  }));
+}
+
+async function unpairPeer(peerHex, name) {
+  const ok = await confirmDialog({
+    title: `Unpair ${name || 'this device'}?`,
+    message: 'It’s disconnected and forgotten. You’ll have to pair it again to share a clipboard with it.',
+    confirmLabel: 'Unpair',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    if (peerHex) await invoke('fluxsync_revoke_peer', { peerId: peerHex });
+    else await invoke('fluxsync_unpair');
+    showToast(`${name || 'Device'} unpaired`, 'ok');
+    refreshState();
+  } catch (err) {
+    showToast(`Unpair failed: ${err}`, 'err');
   }
-  const prev = document.createElement('div');
-  prev.className = 'fw-pending-preview';
-  prev.textContent = p.sensitive ? '••••••••••••' : (p.preview || '(no preview)');
-  const actions = document.createElement('div');
-  actions.className = 'fw-pending-actions';
-  const reject = document.createElement('button');
-  reject.className = 'fw-btn reject';
-  reject.textContent = 'Reject';
-  reject.addEventListener('click', () => resolvePending(p.hash, false));
-  const approve = document.createElement('button');
-  approve.className = 'fw-btn approve';
-  approve.textContent = 'Approve';
-  approve.addEventListener('click', () => resolvePending(p.hash, true));
-  actions.append(reject, approve);
-  card.append(meta, prev, actions);
-  return card;
 }
 
-function buildRuleRow(fw, field, label, hint) {
-  const row = document.createElement('div');
-  row.className = 'fw-rule';
-  const text = document.createElement('div');
-  text.className = 'fw-rule-text';
-  const t = document.createElement('span');
-  t.className = 'fw-rule-label';
-  t.textContent = label;
-  const h = document.createElement('span');
-  h.className = 'fw-rule-hint';
-  h.textContent = hint;
-  text.append(t, h);
-  const seg = document.createElement('div');
-  seg.className = 'fw-seg';
-  const current = fw[field] || 'allow';
-  FW_RULES.forEach(rule => {
-    const b = document.createElement('button');
-    b.className = 'fw-seg-btn ' + rule + (current === rule ? ' active' : '');
-    b.textContent = rule.toUpperCase();
-    b.addEventListener('click', () => {
-      if (!fw.enabled || current === rule) return;
-      pushFirewall(Object.assign({}, fw, { [field]: rule }));
-    });
-    seg.append(b);
+$('pair-another').addEventListener('click', () => invoke('fluxsync_open_pair'));
+$('reset-all').addEventListener('click', async () => {
+  const ok = await confirmDialog({
+    title: 'Reset all pairings?',
+    message: 'Every paired device is unpaired and forgotten. Use this if pairing gets stuck — you can pair again right after.',
+    confirmLabel: 'Reset everything',
+    danger: true,
   });
-  row.append(text, seg);
-  return row;
-}
+  if (!ok) return;
+  try {
+    await invoke('fluxsync_unpair');
+    showToast('All pairings reset', 'ok');
+    refreshState();
+  } catch (err) {
+    showToast(`Reset failed: ${err}`, 'err');
+  }
+});
 
-// ── Wire up controls ─────────────────────────────────────────────
-document.getElementById('toggle').addEventListener('click', async () => {
-  if (isToggling) return;
+// ── Controls ─────────────────────────────────────────────────────
+el.toggle.addEventListener('click', async () => {
+  if (isToggling || !daemonReachable) return;
   const willBeOn = !syncOn;
   isToggling = true;
   syncOn = willBeOn;
-  const t = document.getElementById('toggle');
-  t.classList.toggle('on', willBeOn);
+  el.toggle.classList.toggle('on', willBeOn);
+  el.toggle.setAttribute('aria-checked', String(willBeOn));
   try {
     await invoke('fluxsync_toggle', { on: willBeOn });
   } catch (err) {
     // Backend rejected — revert visual state and tell the user why.
     syncOn = !willBeOn;
-    t.classList.toggle('on', !willBeOn);
-    showToast(daemonReachable ? `Toggle failed: ${err}` : 'Daemon unreachable. Toggle reverted.');
+    el.toggle.classList.toggle('on', !willBeOn);
+    el.toggle.setAttribute('aria-checked', String(!willBeOn));
+    showToast(daemonReachable ? `Toggle failed: ${err}` : 'Service unreachable — toggle reverted', 'err');
   } finally {
     isToggling = false;
   }
   refreshState();
 });
 
-// Toast singleton — slide-in bottom, auto-dismiss. Re-uses one DOM node
-// so rapid failures collapse into one visible message.
-let toastTimer = null;
-function showToast(message) {
-  let el = document.getElementById('fs-toast');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'fs-toast';
-    el.className = 'fs-toast';
-    el.setAttribute('role', 'status');
-    el.setAttribute('aria-live', 'polite');
-    document.body.appendChild(el);
-  }
-  el.textContent = message;
-  el.classList.add('visible');
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('visible'), 3000);
-}
-
-// DIR-P3-02(a): local, instant substring filter — no daemon round-trip.
-// Esc clears (and blurs, so it doesn't also close a parent shortcut).
-const historySearch = document.getElementById('history-search');
-if (historySearch) {
-  historySearch.addEventListener('input', (e) => {
-    historyFilter = e.target.value;
-    renderRecent(filterHistory(currentHistory));
-  });
-  historySearch.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      e.stopPropagation();
-      historySearch.value = '';
-      historyFilter = '';
-      renderRecent(filterHistory(currentHistory));
-      historySearch.blur();
-    }
-  });
-}
-
-const onboardingSkip = document.getElementById('onboarding-skip');
-if (onboardingSkip) onboardingSkip.addEventListener('click', dismissOnboarding);
-
-const headerSettings = document.getElementById('header-settings');
-if (headerSettings) headerSettings.addEventListener('click', () => invoke('fluxsync_open_settings'));
-
-// Pair CTA (unpaired state) — opens the dedicated pair window, which hides
-// this menu so only one window is ever on screen.
-document.getElementById('pair-cta').addEventListener('click', () => {
-  invoke('fluxsync_open_pair');
+$('retry-btn').addEventListener('click', async () => {
+  setText(el.daemonLabel, 'fluxsyncd · retrying…');
+  await refreshState();
+  if (!daemonReachable) showToast('Still unreachable — the service may be restarting', 'err');
 });
 
-// entry-show-qr removed — pair window owns the entry now.
+$('onboarding-skip').addEventListener('click', dismissOnboarding);
+$('header-settings').addEventListener('click', () => invoke('fluxsync_open_settings'));
+el.pairCta.addEventListener('click', () => { invoke('fluxsync_open_pair'); });
 
-document.getElementById('unpair-btn').addEventListener('click', async () => {
-  if (!confirm('This will disconnect and unpair your device. Continue?')) return;
-  try {
-    await invoke('fluxsync_unpair');
-    showToast('Device unpaired.');
-    refreshState();
-    // Stay on this window — refreshState swaps in the inline pair CTA.
-  } catch (err) {
-    showToast(`Unpair failed: ${err}`);
-  }
-});
-
-document.getElementById('clear-history-btn').addEventListener('click', async (e) => {
-  e.stopPropagation();
-  if (!confirm('Clear clipboard history? Favorites are kept.')) return;
+el.clearBtn.addEventListener('click', async () => {
+  const ok = await confirmDialog({
+    title: 'Clear clipboard history?',
+    message: 'Pinned items are kept. Only this device is cleared — your other devices keep their own history.',
+    confirmLabel: 'Clear',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     await invoke('fluxsync_clear_history');
-    showToast('History cleared.');
+    showToast('History cleared', 'ok');
     refreshState();
   } catch (err) {
-    showToast(`Clear history failed: ${err}`);
+    showToast(`Clear failed: ${err}`, 'err');
   }
 });
 
-async function openPair() {
-  try {
-    await invoke('fluxsync_open_pair');
-  } catch (_) { /* surface in popup next refresh */ }
-  // Don't hide the popup — let the user see both windows
-}
-
-// (No threshold slider in the tray popup — it lives on the Settings
-// window. The previous listener referenced an element that never
-// existed in `index.html` and silently threw at boot.)
-
-// ── Lifecycle ────────────────────────────────────────────────────
-async function onShow() {
-  await refreshState();
-  // Live updates via Tauri event from `subscribe_state` in
-  // `src-tauri/src/lib.rs`. Polling becomes a 5s safety net only —
-  // catches the (rare) case where the event stream wedges.
-  if (!unlistenState) {
-    unlistenState = await listen('state-update', (event) => {
-      applyState(event.payload);
-    });
+// ── Keyboard ─────────────────────────────────────────────────────
+//   ⌘/Ctrl ,     Settings            /  or ⌘/Ctrl F   Search
+//   ⌘/Ctrl 1–9   Copy item 01–09     Esc              Clear search / hide
+document.addEventListener('keydown', (e) => {
+  if (document.querySelector('.fs-scrim')) return; // a dialog owns the keyboard
+  const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+  const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+  if (mod && e.key === ',') {
+    e.preventDefault();
+    invoke('fluxsync_open_settings');
+    return;
   }
-  if (pollHandle) clearInterval(pollHandle);
-  pollHandle = setInterval(refreshState, 5000);
-}
-function onHide() {
-  if (pollHandle) clearInterval(pollHandle);
-  pollHandle = null;
-  if (unlistenState) { unlistenState(); unlistenState = null; }
-}
+  if (currentView === 'paired' && ((mod && e.key.toLowerCase() === 'f') || (!typing && !mod && e.key === '/'))) {
+    e.preventDefault();
+    selectTab('clipboard');
+    el.search.focus();
+    el.search.select();
+    return;
+  }
+  if (currentView === 'paired' && mod && /^[1-9]$/.test(e.key)) {
+    const h = visibleItems()[Number(e.key) - 1];
+    if (h) {
+      e.preventDefault();
+      copyEntry(rowCache.get(itemKey(h)));
+    }
+    return;
+  }
+  if (e.key === 'Escape' && !typing) {
+    getCurrentWindow().close(); // the Rust CloseRequested handler hides it
+  }
+});
 
-// ── Universal Draggable Window (Long Click) ──────────────────────
+// ── Window drag (long-press on any non-interactive area) ─────────
 let dragTimer = null;
 let dragActive = false;
-
 document.addEventListener('mousedown', (e) => {
-  // Only trigger if we're NOT clicking an interactive element
-  const isInteractive = e.target.closest('button, input, a, .toggle, .footer-btn, .history-item');
-  if (isInteractive) return;
-
-  console.log("[FluxSync-UI] Mousedown on safe area, starting drag timer...");
+  if (e.button !== 0) return;
+  if (e.target.closest('button, input, a, .row, .fs-scrim')) return;
   dragActive = false;
   dragTimer = setTimeout(async () => {
-    console.log("[FluxSync-UI] Drag threshold reached, starting Tauri drag...");
     dragActive = true;
-    try {
-      await window.__TAURI__.window.getCurrentWindow().startDragging();
-    } catch (err) {
-      console.error("[FluxSync-UI] Drag failed:", err);
-    }
-  }, 150); // Very fast: 150ms
+    try { await getCurrentWindow().startDragging(); } catch (_) {}
+  }, 150);
 });
-
 document.addEventListener('mouseup', () => {
-  if (dragTimer) {
-    clearTimeout(dragTimer);
-    dragTimer = null;
-  }
+  if (dragTimer) { clearTimeout(dragTimer); dragTimer = null; }
 });
-
 document.addEventListener('contextmenu', (e) => {
-  if (dragActive) {
-    e.preventDefault();
-    dragActive = false;
-  }
+  if (dragActive) { e.preventDefault(); dragActive = false; }
 });
 
-const win = getCurrentWindow();
-win.onFocusChanged(({ payload }) => {
-  // Refresh on focus. Do NOT auto-hide on blur: this is a normal dock
-  // window now (closing it quits the app), and the old `win.hide()` here
-  // also blanked the WebView on the next show.
+// ── Lifecycle ────────────────────────────────────────────────────
+let pollHandle = null;
+let unlistenState = null;
+async function onShow() {
+  await refreshState();
+  // Live updates via the `state-update` Tauri event (see `subscribe_state`
+  // in src-tauri/src/lib.rs). The poll is only a safety net and skips
+  // itself while the event stream is healthy.
+  if (!unlistenState) {
+    unlistenState = await listen('state-update', (event) => applyState(event.payload));
+  }
+  if (!pollHandle) {
+    pollHandle = setInterval(() => {
+      if (Date.now() - lastStateAt > 4500) refreshState();
+    }, 5000);
+  }
+}
+
+selectTab(activeTab);
+getCurrentWindow().onFocusChanged(({ payload }) => {
+  // Refresh on focus. Do NOT auto-hide on blur: closing hides the window
+  // (see lib.rs), and a blur-hide also blanked the WebView on next show.
   if (payload) onShow();
 });
-// First load when the window is created visible (during `tauri dev`).
+// First load (the menu window is created visible).
 onShow();

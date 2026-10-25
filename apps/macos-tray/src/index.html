@@ -1,207 +1,208 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=360, initial-scale=1" />
   <title>FluxSync</title>
+  <script src="theme.js"></script>
   <link rel="stylesheet" href="shared.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
-<body data-theme="dark">
-  <div class="tray-container" id="tray-container" data-link="off">
+<body>
+  <div class="tray" id="tray-container" data-link="off" data-view="loading">
 
-    <!-- Header -->
-    <header class="tray-header" data-tauri-drag-region>
-      <div class="brand">
-        <div class="glyph-container">
-          <svg class="glyph" id="brand-glyph" width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <rect x="2.5" y="3" width="8" height="9" />
-            <rect x="5.5" y="6" width="8" height="9" />
-            <circle cx="13.5" cy="3" r="1.5" />
-          </svg>
-        </div>
-        <div class="brand-text">
-          <span class="name">FluxSync</span>
-          <span class="version" id="brand-version">v0.6.2</span>
-        </div>
+    <!-- Top bar -->
+    <header class="top" data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region>
+        <svg class="mark" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+          <rect class="copy" x="2.2" y="3.2" width="9" height="10" rx="1.4" />
+          <rect class="copy front" x="5.8" y="6.2" width="9" height="10" rx="1.4" />
+          <circle class="dot" cx="15.2" cy="3" r="1.9" />
+        </svg>
+        <span class="wordmark" data-tauri-drag-region>FluxSync</span>
+        <span class="ver mono" id="brand-version" data-tauri-drag-region></span>
       </div>
-      <div class="header-right">
-        <div class="e2e-badge">
-          <svg width="9" height="10" viewBox="0 0 9 10" fill="none">
-            <rect x="1" y="4" width="7" height="5" stroke="currentColor" stroke-width="1.2" />
-            <path d="M2.5 4V2.5a2 2 0 014 0V4" stroke="currentColor" stroke-width="1.2" fill="none" />
-          </svg>
-          <span>E2E</span>
-        </div>
-        <button id="header-settings" class="header-gear" title="Settings" aria-label="Settings">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <div class="top-right">
+        <span class="rtt mono" id="rtt-pill" title="Round-trip time to the peer" hidden></span>
+        <button id="header-settings" class="icon-btn" title="Settings" aria-label="Settings">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
             <circle cx="12" cy="12" r="3" />
-            <path d="M12 2v2.5M12 19.5V22M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77M2 12h2.5M19.5 12H22M4.93 19.07l1.77-1.77M17.3 6.7l1.77-1.77" />
           </svg>
         </button>
       </div>
     </header>
 
-    <!-- Master Control -->
-    <section class="master-control" id="hero">
-      <div class="status-info">
-        <div class="title">Clipboard sync</div>
-        <div class="status-label">
-          <span class="status-dot"></span>
-          <span id="hero-label">INACTIVE</span>
+    <!-- The link: state headline + this device ⇄ peer -->
+    <section class="hero" id="hero" data-state="off">
+      <div class="hero-head">
+        <div class="state-block">
+          <h1 class="state"><span class="state-dot" aria-hidden="true"></span><span id="hero-label">Starting</span></h1>
+          <p class="state-sub" id="hero-sub">&nbsp;</p>
         </div>
+        <button class="toggle" id="toggle" role="switch" aria-checked="false" aria-label="Clipboard sync">
+          <span class="knob"></span>
+        </button>
       </div>
-      <button class="toggle" id="toggle" aria-label="Toggle sync" role="switch" aria-checked="false">
-        <span class="knob"></span>
-      </button>
-    </section>
 
-    <!-- Connection card : self ⇄ beam ⇄ peer -->
-    <section class="peer-section" id="dashboard-body" style="display:none">
-      <div class="conn">
-        <div class="conn-row">
-          <div class="side">
-            <div class="device-icon">
-              <svg width="19" height="16" viewBox="0 0 16 14" fill="none" stroke="currentColor" stroke-width="1.1">
-                <rect x="0.5" y="0.5" width="15" height="10" rx="1.5" />
-                <path d="M5 13h6M8 10.5V13" stroke-linecap="round" />
-              </svg>
-            </div>
-            <span class="name" id="self-name">This device</span>
-            <span class="meta" id="self-meta">—</span>
-            <span class="batt" id="self-batt">
-              <span class="bar"><i id="self-batt-fill" style="width:0%"></i></span>
-              <svg class="bolt" width="7" height="10" viewBox="0 0 7 10" fill="currentColor"><path d="M4 0L0 6h2.5L3 10l4-6H4.5L4 0z"/></svg>
-              <span class="pc" id="self-batt-pc">—</span>
-            </span>
-          </div>
-
-          <div class="beam">
-            <span class="track"></span>
-            <span class="pulse" id="beam-pulse"></span>
-          </div>
-
-          <div class="side peer-side">
-            <div class="device-icon">
-              <span class="ring"></span><span class="ring r2"></span>
-              <span id="peer-device-icon" style="display:flex">
-                <svg width="13" height="18" viewBox="0 0 11 16" fill="none" stroke="var(--fs-muted)" stroke-width="1.1">
-                  <rect x="0.5" y="0.5" width="10" height="15" rx="2" />
-                  <circle cx="5.5" cy="13" r="0.7" fill="var(--fs-muted)" stroke="none" />
-                </svg>
-              </span>
-            </div>
-            <span class="name" id="peer-name-pill">—</span>
-            <span class="meta" id="peer-meta">—</span>
-            <span class="batt" id="peer-batt">
-              <span class="bar"><i id="peer-battery-bar" style="width:0%"></i></span>
-              <span class="pc" id="peer-battery-text">—</span>
-            </span>
-          </div>
-        </div>
-
-        <div class="conn-meta">
-          <span class="crypto">
-            <svg width="9" height="10" viewBox="0 0 9 10" fill="none">
-              <rect x="1" y="4" width="7" height="5" stroke="currentColor" stroke-width="1.2" />
-              <path d="M2.5 4V2.5a2 2 0 014 0V4" stroke="currentColor" stroke-width="1.2" fill="none" />
+      <div class="link" id="dashboard-body" hidden>
+        <div class="end">
+          <span class="node" aria-hidden="true">
+            <svg width="17" height="14" viewBox="0 0 16 14" fill="none" stroke="currentColor" stroke-width="1.2">
+              <rect x="0.6" y="0.6" width="14.8" height="9.8" rx="1.4" />
+              <path d="M5 13h6M8 10.5V13" stroke-linecap="round" />
             </svg>
-            X25519 · ChaCha20
           </span>
-          <span class="linkst">
-            <span class="dot"></span>
-            <span id="peer-status-text">STANDBY</span>
+          <span class="end-text">
+            <span class="end-name" id="self-name">This device</span>
+            <span class="end-meta" id="self-meta">—</span>
           </span>
         </div>
-      </div>
 
-      <div class="pause-banner" id="pause-banner" style="display:none">
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="1.5" width="3" height="9" rx="1"/><rect x="7" y="1.5" width="3" height="9" rx="1"/></svg>
-        <span>Sync paused — peer battery below threshold. Resumes on charge.</span>
-      </div>
+        <div class="wire" aria-hidden="true">
+          <span class="track"></span>
+          <span class="seal" title="End-to-end encrypted · Noise IK · ChaCha20-Poly1305">
+            <svg width="9" height="11" viewBox="0 0 9 11" fill="none"><rect x="0.8" y="4.6" width="7.4" height="5.6" rx="1.2" stroke="currentColor" stroke-width="1.2"/><path d="M2.4 4.6V3.2a2.1 2.1 0 0 1 4.2 0v1.4" stroke="currentColor" stroke-width="1.2"/></svg>
+          </span>
+          <span class="packet" id="beam-pulse"></span>
+        </div>
 
-      <button class="unpair-btn" id="unpair-btn" title="Reset connection and unpair device">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
-          <path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10" />
-        </svg>
-        Reset session
-      </button>
+        <div class="end peer">
+          <span class="end-text">
+            <span class="end-name" id="peer-name-pill">—</span>
+            <span class="end-meta" id="peer-meta">—</span>
+          </span>
+          <span class="node" id="peer-device-icon" aria-hidden="true"></span>
+        </div>
+      </div>
     </section>
 
-    <!-- Pairing entry (single-window: shown here when no device is linked) -->
-    <section class="pairing-entry" id="pairing-entry" style="display:none">
-      <!-- DIR-P3-12: first-run onboarding. Purely additive: hidden once
-           dismissed (paired or skipped), leaving the plain empty state
-           below untouched for every subsequent unpaired render. -->
-      <div class="onboarding-steps" id="onboarding-steps" style="display:none">
-        <ol class="onboarding-list">
-          <li><span class="ob-num" aria-hidden="true">1</span><span class="ob-text">Install FluxSync on your other device — macOS, Windows, Linux, Android or iPhone.</span></li>
-          <li><span class="ob-num" aria-hidden="true">2</span><span class="ob-text">Scan the QR code or enter the 6-digit PIN shown there.</span></li>
-          <li><span class="ob-num" aria-hidden="true">3</span><span class="ob-text">Compare the 6 verification words on both screens and confirm.</span></li>
+    <div class="notice wait" id="pause-banner" role="status" hidden>
+      <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><rect x="2" y="1.5" width="3" height="9" rx="1"/><rect x="7" y="1.5" width="3" height="9" rx="1"/></svg>
+      <span id="pause-text">Paused — battery under the threshold. Resumes on charge.</span>
+    </div>
+
+    <!-- Daemon unreachable -->
+    <section class="empty" id="offline-state" hidden>
+      <svg class="empty-art" width="120" height="44" viewBox="0 0 120 44" fill="none" aria-hidden="true">
+        <rect x="1" y="9" width="30" height="22" rx="3" class="ln" />
+        <path d="M11 37h10M16 31v6" class="ln" stroke-linecap="round" />
+        <path d="M33 20h18" class="ln" stroke-dasharray="3 4" />
+        <path d="M55 15l10 10M65 15L55 25" class="x" stroke-linecap="round" />
+        <path d="M69 20h18" class="ln" stroke-dasharray="3 4" />
+        <rect x="89" y="9" width="30" height="22" rx="3" class="ln dim" />
+      </svg>
+      <h2>FluxSync isn't answering</h2>
+      <p>The background service (<span class="mono">fluxsyncd</span>) didn't respond. It usually restarts by itself in a few seconds.</p>
+      <button class="btn flux" id="retry-btn">Try again</button>
+    </section>
+
+    <!-- Unpaired -->
+    <section class="empty pairing" id="pairing-entry" hidden>
+      <svg class="empty-art" width="164" height="64" viewBox="0 0 164 64" fill="none" aria-hidden="true">
+        <rect x="2" y="10" width="26" height="44" rx="5" class="ln" />
+        <path d="M11 47h8" class="ln" stroke-linecap="round" />
+        <path d="M34 32h82" class="ln dash" stroke-dasharray="2 5" stroke-linecap="round" />
+        <rect class="pk" x="70" y="28.5" width="7" height="7" rx="1.5" />
+        <rect x="122" y="16" width="40" height="28" rx="3" class="ln" />
+        <path d="M134 52h16M142 44v8" class="ln" stroke-linecap="round" />
+      </svg>
+      <h2 id="pair-empty-title">One clipboard, all your devices</h2>
+      <p id="pair-empty-hint">Copy here, paste there. Straight across your network, end-to-end encrypted — no cloud, no account.</p>
+      <button class="btn flux lg" id="pair-cta">Pair a device</button>
+      <span class="pair-sub" id="pair-cta-sub">QR code or 6-digit code · same network</span>
+
+      <!-- DIR-P3-12: first-run onboarding; hidden for good once a device is
+           paired or "Hide" is pressed. -->
+      <div class="steps" id="onboarding-steps" hidden>
+        <div class="steps-head">
+          <span class="caps">How it works</span>
+          <button class="btn ghost sm" id="onboarding-skip">Hide</button>
+        </div>
+        <ol>
+          <li><span class="n mono">01</span><span>Install FluxSync on the other device — macOS, Windows, Linux or Android.</span></li>
+          <li><span class="n mono">02</span><span>Scan its QR code, or type the 6-digit code it shows.</span></li>
+          <li><span class="n mono">03</span><span>Check that both screens show the same 6 words, then confirm on each.</span></li>
         </ol>
-        <button class="onboarding-skip" id="onboarding-skip" aria-label="Skip the onboarding intro">Skip intro</button>
       </div>
-      <div class="pair-empty-glyph">
-        <svg width="76" height="46" viewBox="0 0 72 44" fill="none" stroke="currentColor" stroke-width="1.4">
-          <rect x="2" y="7" width="19" height="30" rx="4" />
-          <circle cx="11.5" cy="32" r="1" fill="currentColor" stroke="none" />
-          <rect x="46" y="11" width="24" height="16" rx="2.5" />
-          <path d="M50 31h16M58 27v4" />
-          <g class="wave"><path d="M28 18.5c3-3 7.5-3 10.5 0" opacity=".9" /></g>
-          <g class="wave w2"><path d="M25.5 23c4.5-4.5 11-4.5 15.5 0" opacity=".45" /></g>
-        </svg>
-      </div>
-      <h3 id="pair-empty-title">No device linked</h3>
-      <p class="pair-hint" id="pair-empty-hint">Pair a phone or another computer to sync<br>your clipboard, end-to-end encrypted.</p>
-      <button class="pair-cta" id="pair-cta">Pair a device</button>
-      <span class="pair-cta-sub" id="pair-cta-sub">QR code or 6-digit code · local network only</span>
     </section>
 
-    <!-- Scrollable lower area: history + firewall stack and scroll as one -->
-    <div class="tray-scroll" id="tray-scroll">
-      <!-- History -->
-      <section class="history-section">
-        <div class="section-header">
-          <span class="label">Recent clipboard</span>
-          <span class="header-actions">
-            <span class="count" id="recent-count">0 ITEMS</span>
-            <button class="history-clear-btn" id="clear-history-btn" title="Clear clipboard history (favorites kept)">Clear</button>
-          </span>
+    <!-- Paired: tabs -->
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Sections" hidden>
+      <button class="tab" role="tab" id="tab-clipboard" data-view="clipboard" aria-controls="view-clipboard" aria-selected="true">
+        Clipboard <span class="tab-n mono" id="recent-count">0</span>
+      </button>
+      <button class="tab" role="tab" id="tab-firewall" data-view="firewall" aria-controls="view-firewall" aria-selected="false" tabindex="-1">
+        Firewall <span class="tab-badge mono" id="pending-badge" hidden></span>
+      </button>
+      <button class="tab" role="tab" id="tab-devices" data-view="devices" aria-controls="view-devices" aria-selected="false" tabindex="-1">
+        Devices <span class="tab-n mono" id="devices-count">1</span>
+      </button>
+    </nav>
+
+    <div class="views" id="tray-scroll" hidden>
+      <!-- Pending firewall decisions announced from any tab -->
+      <button class="notice flux review" id="pending-strip" hidden>
+        <span class="pulse-dot" aria-hidden="true"></span>
+        <span id="pending-strip-text">1 item waiting for your decision</span>
+        <span class="go">Review</span>
+      </button>
+
+      <section class="view" id="view-clipboard" role="tabpanel" aria-labelledby="tab-clipboard">
+        <div class="toolbar">
+          <div class="search">
+            <svg class="search-ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+            <input type="search" id="history-search" class="field" placeholder="Search" aria-label="Search clipboard history" autocomplete="off" spellcheck="false" />
+            <span class="kbd search-kbd" aria-hidden="true">/</span>
+          </div>
+          <button class="btn ghost sm" id="clear-history-btn" title="Clear clipboard history (pinned items are kept)">Clear</button>
         </div>
-        <div class="history-search-row">
-          <input
-            type="search"
-            id="history-search"
-            class="history-search-input"
-            placeholder="Search history…"
-            aria-label="Search clipboard history"
-            autocomplete="off"
-          />
-        </div>
-        <div class="history-list" id="recent">
-          <!-- History items injected here -->
-        </div>
+        <div class="filters" id="history-filters" role="radiogroup" aria-label="Filter history"></div>
+        <div class="list" id="recent" role="list" aria-label="Clipboard history"></div>
       </section>
 
-      <!-- Firewall: master switch + per-kind rules + Ask pending queue -->
-      <section class="firewall-section" id="firewall-section" style="display:none">
-        <div class="section-header">
-          <span class="label">Firewall</span>
-          <span class="count">policies &amp; decisions</span>
+      <section class="view" id="view-firewall" role="tabpanel" aria-labelledby="tab-firewall" hidden>
+        <div class="pending" id="pending-section" aria-live="polite" hidden></div>
+        <div class="fw-master">
+          <div class="fw-master-text">
+            <span class="fw-title">Clipboard firewall</span>
+            <span class="fw-sub" id="fw-sub">Off — everything passes</span>
+          </div>
+          <button class="toggle" id="fw-toggle" role="switch" aria-checked="false" aria-label="Clipboard firewall"><span class="knob"></span></button>
         </div>
-        <div class="firewall-body" id="firewall-body">
-          <!-- Firewall UI injected here -->
+        <div class="matrix" id="fw-rules" role="grid" aria-label="Firewall rules">
+          <div class="mx-head" role="row">
+            <span role="columnheader" class="caps">Content</span>
+            <span role="columnheader" class="caps c">Allow</span>
+            <span role="columnheader" class="caps c">Ask</span>
+            <span role="columnheader" class="caps c">Block</span>
+          </div>
+        </div>
+        <p class="fw-foot">Rules apply in both directions — what you send and what you receive.</p>
+      </section>
+
+      <section class="view" id="view-devices" role="tabpanel" aria-labelledby="tab-devices" hidden>
+        <div class="devices" id="device-list"></div>
+        <div class="devices-actions">
+          <button class="btn flux block" id="pair-another">
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 1.5v9M1.5 6h9"/></svg>
+            Pair another device
+          </button>
+          <button class="btn ghost sm" id="reset-all">Reset all pairings…</button>
         </div>
       </section>
     </div>
 
     <!-- Footer -->
-    <footer class="tray-footer">
+    <footer class="foot">
       <span class="daemon">
-        <span class="dot" id="daemon-dot"></span>
-        <span id="daemon-label">fluxsyncd</span>
+        <span class="dot" id="daemon-dot" aria-hidden="true"></span>
+        <span id="daemon-label">Connecting…</span>
       </span>
-      <span class="data">⌘ , settings</span>
+      <span class="hints" aria-hidden="true">
+        <span class="kbd" id="kbd-mod">⌘</span><span class="kbd">,</span>
+        <span class="hint-l">Settings</span>
+      </span>
     </footer>
 
   </div>

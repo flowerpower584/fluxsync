@@ -28,7 +28,7 @@ private val DarkScheme = darkColorScheme(
 )
 
 private val LightScheme = lightColorScheme(
-    primary = Color(0xFF19A85B),
+    primary = Color(0xFF18A866),
     onPrimary = FsLightSurface,
     primaryContainer = FsOkSoft,
     onPrimaryContainer = FsLightFg,

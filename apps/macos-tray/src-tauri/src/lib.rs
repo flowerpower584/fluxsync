@@ -393,39 +393,42 @@ pub fn run() {
                 }
             });
 
+            // `state-update` fan-out to the WebViews, coalesced: at most one
+            // emit per 100 ms (≈ a paint frame) so a handshake burst can't
+            // saturate the WebView IPC, and always the NEWEST snapshot. The
+            // previous leading-edge throttle dropped any update landing
+            // inside the window, so the UI could sit on a stale state (e.g.
+            // "Connecting" after the link was up) until the 5 s safety poll.
+            let (state_tx, mut state_rx) = tokio::sync::watch::channel::<Option<Value>>(None);
+            let ah_emit = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while state_rx.changed().await.is_ok() {
+                    {
+                        let latest = state_rx.borrow_and_update();
+                        if let Some(state) = latest.as_ref() {
+                            let _ = ah_emit.emit("state-update", state);
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            });
+
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 use std::sync::{Arc, Mutex};
-                use std::time::Instant;
                 let last_name: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
                 let last_history_hash: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-                // Throttle `state-update` emits so a handshake burst can't
-                // saturate the WebView IPC. 100 ms ≈ one paint frame.
-                let last_emit: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
                 loop {
                     let ah = app_handle.clone();
                     let ln = last_name.clone();
                     let lh = last_history_hash.clone();
-                    let le = last_emit.clone();
+                    let tx = state_tx.clone();
 
                     let result = ipc::subscribe_state(move |state| {
-                        // 0. Forward the full state to any window listening
-                        //    on `state-update`. Replaces the per-window 1s
-                        //    polling loops in app.js / settings.js.
-                        {
-                            let mut guard = le.lock().unwrap();
-                            let now = Instant::now();
-                            let allow = match *guard {
-                                None => true,
-                                Some(prev) => now.duration_since(prev).as_millis() >= 100,
-                            };
-                            if allow {
-                                *guard = Some(now);
-                                drop(guard);
-                                let _ = ah.emit("state-update", state.clone());
-                            }
-                        }
+                        // 0. Hand the snapshot to the coalescing emitter
+                        //    above (replaces per-window polling loops).
+                        //    Notification logic below reads `state` first.
 
                         // 1. Check for pairing success
                         let name = state
@@ -575,6 +578,9 @@ pub fn run() {
                                 }
                             }
                         }
+
+                        // 2. Publish to the WebViews (coalesced, newest wins).
+                        tx.send_replace(Some(state));
                     })
                     .await;
                     match result {

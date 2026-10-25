@@ -1,266 +1,243 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=420,initial-scale=1" />
 <title>FluxSync — Pair</title>
+<script src="theme.js"></script>
+<link rel="stylesheet" href="shared.css" />
 <style>
-  :root{
-    --bg:#0B0B0C; --surface:#131316; --line:#1F1F22; --line-2:#2A2A2C;
-    --fg:#FAFAFA; --muted:#A1A1AA; --muted-2:#71717A; --muted-3:#5A5A5E;
-    --primary:#3FAE5A; --primary-d:#34944A;
-    --danger:#D43F3F; --warn:#D9A441;
-    --ui:-apple-system,BlinkMacSystemFont,"Segoe UI Variable","Segoe UI",system-ui,sans-serif;
-    --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Monaco,Consolas,monospace;
-  }
-  *{box-sizing:border-box}
-  html,body{margin:0;padding:0;height:100%;overflow:hidden}
-  body{
-    background:var(--surface);color:var(--fg);
-    font-family:var(--ui);font-size:15px;line-height:1.55;
-    -webkit-font-smoothing:antialiased;
-  }
-  ::selection{background:var(--primary);color:#fff}
-  code{font-family:var(--mono);font-size:.9em}
+  /* Pair window — v8 "Lien". Tokens/components from shared.css.
+     pair.js still paints placeholder words with var(--muted-3). */
+  :root { --muted-3: var(--subtle); }
+  html, body { height: 100%; overflow: hidden; }
 
-  .app{height:100vh;display:flex;flex-direction:column;background:var(--surface)}
+  .app { height: 100vh; display: flex; flex-direction: column; background: var(--surface); }
 
-  .tb{
-    display:flex;align-items:center;justify-content:space-between;
-    padding:0 16px;height:40px;
-    border-bottom:1px solid var(--line);
-    background:#0F0F11;flex-shrink:0;
-    -webkit-app-region:drag;user-select:none;
+  /* Nav row (the native title bar sits above it) */
+  .tb {
+    height: 44px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px 0 12px;
+    border-bottom: 1px solid var(--line);
+    user-select: none;
   }
-  .tb .title{
-    font-size:13.5px;font-weight:600;letter-spacing:-0.01em;
-    color:var(--fg);display:flex;align-items:center;gap:8px;
-    padding-left:60px;
+  .tb .title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .tb .back {
+    display: none;
+    appearance: none; border: 0; background: transparent; cursor: pointer;
+    width: 28px; height: 28px; border-radius: var(--r-sm);
+    align-items: center; justify-content: center; color: var(--muted);
   }
-  .tb .title .back{
-    color:var(--muted-2);font-size:14px;cursor:pointer;
-    -webkit-app-region:no-drag;
-    padding:2px 6px;display:none;
+  .tb .back:hover { color: var(--fg); background: var(--surface-2); }
+  .tb.has-back .title .back { display: inline-flex; }
+  .tb #tb-title {
+    padding-left: 4px;
+    font-family: var(--fs-mono); font-size: 10.5px; font-weight: 500;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
   }
-  .tb.has-back .title .back{display:inline}
-  .tb .title .back:hover{color:var(--fg)}
+  .tb.has-back #tb-title { padding-left: 0; }
 
-  .body{
-    flex:1;padding:24px 24px 20px;
-    display:flex;flex-direction:column;gap:14px;
-    overflow-y:auto;
-  }
-  .body h2.h{margin:0;font-size:22px;font-weight:700;letter-spacing:-0.02em;line-height:1.15}
-  .body .lede{margin:0;font-size:14px;color:var(--muted);line-height:1.5}
-  .divider{height:1px;background:var(--line);margin:2px 0}
-  .spacer{flex:1;min-height:4px}
+  .body { flex: 1; min-height: 0; overflow-y: auto; padding: 26px 26px 22px; display: flex; flex-direction: column; }
+  .screen { display: none; flex-direction: column; gap: 16px; flex: 1; min-height: 0; animation: screen-in .22s var(--ease); }
+  .screen.active { display: flex; }
+  @keyframes screen-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .screen > * { flex-shrink: 0; }
+  .spacer { flex: 1 1 auto !important; min-height: 6px; }
 
-  .screen{display:none;flex-direction:column;gap:16px;flex:1;min-height:0}
-  .screen.active{display:flex}
+  .h { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.03em; line-height: 1.15; }
+  .lede { margin: -6px 0 4px; font-size: 13px; color: var(--muted); line-height: 1.55; }
 
-  /* tile */
-  .tile{
-    border:1px solid var(--line-2);
-    padding:18px 18px;cursor:pointer;background:transparent;
-    transition:border-color .15s,background .15s;
-    display:flex;flex-direction:column;gap:6px;
-    font:inherit;color:inherit;text-align:left;width:100%;
+  /* Entry choices */
+  .tile {
+    appearance: none; width: 100%; text-align: left; cursor: pointer;
+    display: flex; align-items: center; gap: 14px;
+    padding: 16px 16px 16px 14px;
+    border-radius: var(--r-md);
+    border: 1px solid var(--line-strong);
+    background: transparent; color: var(--fg);
+    transition: border-color .15s, background .15s, transform .1s;
   }
-  .tile:hover{border-color:var(--muted-2);background:rgba(255,255,255,0.02)}
-  .tile.primary{background:var(--primary);border-color:var(--primary)}
-  .tile.primary:hover{background:var(--primary-d);border-color:var(--primary-d)}
-  .tile.disabled{opacity:0.45;cursor:not-allowed}
-  .tile.disabled:hover{border-color:var(--line-2);background:transparent}
-  .tile .pill{
-    font-family:var(--mono);font-size:10px;color:var(--muted-2);
-    letter-spacing:0.08em;text-transform:uppercase;font-weight:500;
+  .tile:hover { border-color: var(--flux-line); background: var(--surface-2); }
+  .tile:active { transform: translateY(1px); }
+  .tile .k {
+    width: 34px; height: 34px; flex-shrink: 0; border-radius: var(--r-sm);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--fs-mono); font-size: 13px; font-weight: 600;
+    border: 1px solid var(--line-strong); color: var(--muted);
   }
-  .tile.primary .pill{color:rgba(255,255,255,0.85)}
-  .tile .name{font-size:17px;font-weight:700;letter-spacing:-0.015em;color:var(--fg);line-height:1.2}
-  .tile.primary .name{color:#fff}
-  .tile .desc{font-size:13px;color:var(--muted);line-height:1.45}
-  .tile.primary .desc{color:rgba(255,255,255,0.85)}
+  .tile.primary .k { background: var(--flux); color: var(--on-flux); border-color: transparent; }
+  .tile .tile-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .tile .pill { font-family: var(--fs-mono); font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--subtle); }
+  .tile .name { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+  .tile .desc { font-size: 12px; color: var(--muted); line-height: 1.45; }
+  .tile .go { color: var(--subtle); flex-shrink: 0; transition: transform .15s var(--ease), color .15s; }
+  .tile:hover .go { color: var(--flux-ink); transform: translateX(2px); }
 
-  /* btn */
-  .btn{
-    border:1px solid var(--line-2);background:transparent;color:var(--fg);
-    font-family:var(--ui);font-size:14px;font-weight:600;
-    padding:12px 16px;cursor:pointer;
-    transition:border-color .15s,background .15s,color .15s;
-    display:inline-flex;align-items:center;justify-content:center;gap:8px;
-    width:100%;letter-spacing:-0.01em;
-  }
-  .btn:disabled{opacity:0.5;cursor:not-allowed}
-  .btn.primary{background:var(--primary);border-color:var(--primary);color:#fff}
-  .btn.primary:hover:not(:disabled){background:var(--primary-d);border-color:var(--primary-d)}
-  .btn.danger{color:var(--danger);border-color:rgba(212,63,63,0.4)}
-  .btn.danger:hover{background:rgba(212,63,63,0.08);border-color:var(--danger)}
-  .btn.ghost{color:var(--muted)}
-  .btn.ghost:hover{color:var(--fg);border-color:var(--muted-2)}
-  .btn.ghost.armed{color:var(--danger);border-color:rgba(212,63,63,0.4)}
+  .note { display: flex; gap: 10px; align-items: flex-start; font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .note svg { color: var(--live); flex-shrink: 0; margin-top: 2px; }
 
-  /* QR */
-  .qr-large{
-    padding:10px;background:#FAFAFA;border:1px solid var(--line-2);
-    width:max-content;align-self:center;
-  }
-  .qr-large{padding:8px}
-  .qr-large svg{display:block;width:200px;height:200px}
-  .qr-large.loading{
-    width:200px;height:200px;background:#0F0F11;
-    color:var(--muted-2);font-family:var(--mono);font-size:11px;
-    display:flex;align-items:center;justify-content:center;
-    padding:0;border-color:var(--line-2);
+  /* QR, framed with coral crop marks — it's a target to aim a camera at */
+  .qr-frame { position: relative; align-self: center; padding: 14px; }
+  .qr-frame .cm { position: absolute; width: 16px; height: 16px; border-color: var(--flux); border-style: solid; border-width: 0; }
+  .qr-frame .tl { top: 0; left: 0; border-top-width: 2px; border-left-width: 2px; }
+  .qr-frame .tr { top: 0; right: 0; border-top-width: 2px; border-right-width: 2px; }
+  .qr-frame .bl { bottom: 0; left: 0; border-bottom-width: 2px; border-left-width: 2px; }
+  .qr-frame .br { bottom: 0; right: 0; border-bottom-width: 2px; border-right-width: 2px; }
+  .qr-large { padding: 10px; background: var(--qr-paper); border-radius: var(--r-sm); width: max-content; }
+  .qr-large svg { display: block; width: 196px !important; height: 196px !important; }
+  .qr-large.loading {
+    width: 216px; height: 216px; padding: 0;
+    background: var(--surface-2); color: var(--subtle);
+    font-family: var(--fs-mono); font-size: 11px;
+    display: flex; align-items: center; justify-content: center;
   }
 
-  /* fingerprint words */
-  .fp-box{
-    border:1px solid var(--line-2);background:#0F0F11;
-    padding:12px 10px;
-    display:grid;grid-template-columns:repeat(3,1fr);gap:10px 4px;
+  .label-caps { font-family: var(--fs-mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--subtle); }
+
+  /* Verification words, numbered */
+  .fp-box {
+    counter-reset: w;
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    border-top: 1px solid var(--line-strong);
   }
-  .fp-box .w{
-    font-family:var(--mono);font-size:15px;color:var(--fg);
-    font-weight:600;letter-spacing:-0.005em;text-align:center;
+  .fp-box .w {
+    counter-increment: w;
+    display: flex; align-items: baseline; gap: 7px;
+    padding: 10px 0 9px;
+    border-bottom: 1px solid var(--line);
+    font-family: var(--fs-mono); font-size: 15px; font-weight: 500; color: var(--fg);
+  }
+  .fp-box .w::before { content: counter(w, decimal-leading-zero); font-size: 9.5px; color: var(--flux-ink); font-weight: 500; }
+  .fp-box.big .w { font-size: 17px; padding: 13px 0 12px; }
+
+  .pin-block { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 4px 0; }
+  .pin-block .label { font-family: var(--fs-mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--subtle); }
+  .pin-block .code { font-family: var(--fs-mono); font-size: 30px; font-weight: 600; letter-spacing: .12em; line-height: 1.1; }
+  .pin-block .countdown { font-family: var(--fs-mono); font-size: 10.5px; color: var(--subtle); }
+
+  .wait { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+  .wait .pulse { width: 7px; height: 7px; border-radius: 2px; background: var(--flux); animation: blink 1.2s ease-in-out infinite; flex-shrink: 0; }
+  @keyframes blink { 50% { opacity: .25; } }
+
+  .err {
+    padding: 9px 11px; border-radius: var(--r-sm);
+    background: var(--danger-soft); color: var(--danger);
+    font-size: 12px; line-height: 1.45;
   }
 
-  /* wait */
-  .wait{
-    display:flex;align-items:center;gap:10px;
-    font-family:var(--mono);font-size:11.5px;color:var(--muted);
+  /* PIN entry */
+  .pin-input { display: flex; gap: 8px; justify-content: center; }
+  .pin-input input {
+    width: 46px; height: 58px;
+    border-radius: var(--r-md);
+    border: 1px solid var(--line-strong);
+    background: var(--surface-2); color: var(--fg);
+    font-family: var(--fs-mono); font-size: 26px; font-weight: 600; text-align: center;
+    outline: none; caret-color: var(--flux);
+    transition: border-color .15s, background .15s;
   }
-  .wait .pulse{
-    width:8px;height:8px;border-radius:50%;background:var(--primary);
-    animation:pulse 1.4s ease-in-out infinite;
-  }
-  @keyframes pulse{
-    0%,100%{box-shadow:0 0 0 0 rgba(63,174,90,0.4)}
-    50%{box-shadow:0 0 0 6px rgba(63,174,90,0)}
-  }
+  .pin-input input:nth-child(3) { margin-right: 10px; }
+  .pin-input input:focus { border-color: var(--flux); background: var(--surface); }
+  .pin-input.shake { animation: shake .35s ease-in-out; }
+  @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+  .pin-hint { font-size: 12px; color: var(--subtle); text-align: center; margin: 0; }
+  .pin-hint.danger { color: var(--danger); }
 
-  /* addr hint */
-  .addr-hint{
-    font-family:var(--mono);font-size:10.5px;color:var(--muted-2);
-    letter-spacing:0.06em;text-align:center;text-transform:uppercase;
-  }
+  /* Connecting: two nodes, a crawling wire */
+  .linking { align-self: center; display: flex; align-items: center; gap: 10px; }
+  .linking .node { width: 36px; height: 36px; border-radius: var(--r-md); border: 1px solid var(--line-strong); display: flex; align-items: center; justify-content: center; color: var(--muted); }
+  .linking .w { width: 90px; height: 2px; background: repeating-linear-gradient(90deg, var(--flux) 0 4px, transparent 4px 10px); animation: crawl .8s linear infinite; }
+  @keyframes crawl { to { background-position: 10px 0; } }
 
-  /* success */
-  .success-mark{
-    align-self:center;
-    width:56px;height:56px;border-radius:50%;
-    background:rgba(63,174,90,0.12);border:1.5px solid var(--primary);
-    color:var(--primary);
-    display:flex;align-items:center;justify-content:center;
-    font-size:26px;line-height:1;margin:8px 0;
-  }
-  .peer-info{
-    text-align:center;display:flex;flex-direction:column;gap:6px;padding:4px 0;
-  }
-  .peer-info .name{font-size:19px;font-weight:700;letter-spacing:-0.015em}
-  .peer-info .ip{font-family:var(--mono);font-size:11.5px;color:var(--muted-2)}
+  .verify-note { margin: -6px 0 4px; font-size: 13px; color: var(--muted); line-height: 1.55; }
+  .verify-hint { margin: 0; font-size: 12px; color: var(--live-ink); display: flex; align-items: center; gap: 6px; }
+  .verify-actions { display: flex; gap: 10px; }
+  .verify-actions .btn { flex: 1; height: 42px; font-size: 13.5px; }
+  #unpair-btn:hover, #unpair-btn.armed { color: var(--danger); background: var(--danger-soft); }
+  .btn.live { background: var(--live); color: var(--on-live); border-color: transparent; }
+  .btn.live:hover { filter: brightness(1.06); background: var(--live); }
 
-  /* error */
-  .err{
-    background:rgba(212,63,63,0.08);border:1px solid rgba(212,63,63,0.4);
-    color:#FF7777;padding:10px 12px;font-size:12px;line-height:1.4;
-    font-family:var(--mono);
-  }
-
-  /* PR2: PIN block under QR + standalone in show screen */
-  .pin-block{
-    border:1px solid var(--line-2);background:#0F0F11;
-    padding:14px 12px;display:flex;flex-direction:column;gap:6px;align-items:center;
-  }
-  .pin-block .label{
-    font-family:var(--mono);font-size:10.5px;color:var(--muted-2);
-    letter-spacing:0.06em;text-transform:uppercase;
-  }
-  .pin-block .code{
-    font-family:var(--mono);font-size:30px;font-weight:700;letter-spacing:0.25em;
-    color:var(--fg);line-height:1.1;
-  }
-  .pin-block .countdown{
-    font-family:var(--mono);font-size:10.5px;color:var(--muted-2);
-  }
-
-  /* PR2: PIN entry — 6 boxes */
-  .pin-input{
-    display:flex;gap:8px;justify-content:center;
-  }
-  .pin-input input{
-    width:42px;height:54px;background:#0F0F11;color:var(--fg);
-    border:1px solid var(--line-2);font-family:var(--mono);
-    font-size:24px;font-weight:700;text-align:center;letter-spacing:0;
-    outline:none;transition:border-color .15s,background .15s;
-  }
-  .pin-input input:focus{border-color:var(--primary);background:#141416}
-  .pin-input.shake{animation:shake .35s ease-in-out}
-  @keyframes shake{
-    0%,100%{transform:translateX(0)}
-    25%{transform:translateX(-6px)}
-    75%{transform:translateX(6px)}
-  }
-  .pin-hint{
-    font-size:12px;color:var(--muted-2);text-align:center;font-family:var(--mono);
-  }
-  .pin-hint.danger{color:#FF7777}
-
-  /* PR2: verify-words gate */
-  .verify-note{
-    font-size:13px;color:var(--muted);text-align:center;line-height:1.5;
-  }
-  .verify-hint{
-    font-size:12px;color:var(--muted-2);text-align:center;font-family:var(--mono);
-  }
-  .verify-actions{
-    display:flex;gap:10px;
-  }
-  .verify-actions .btn{flex:1}
+  /* Paired */
+  .success { align-self: center; position: relative; width: 72px; height: 72px; margin: 6px 0 4px; }
+  .success svg { display: block; }
+  .success .ring { fill: none; stroke: var(--live); stroke-width: 2; stroke-dasharray: 214; stroke-dashoffset: 214; animation: draw .7s var(--ease) forwards; }
+  .success .tick { fill: none; stroke: var(--live); stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 40; stroke-dashoffset: 40; animation: draw .4s .45s var(--ease) forwards; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  .peer-info { text-align: center; display: flex; flex-direction: column; gap: 4px; }
+  .peer-info .kicker { font-family: var(--fs-mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--live-ink); }
+  .peer-info .name { font-size: 24px; font-weight: 600; letter-spacing: -.03em; }
+  .peer-info .ip { font-family: var(--fs-mono); font-size: 11px; color: var(--subtle); }
+  .center { text-align: center; }
 </style>
 </head>
 <body>
 <div class="app">
 
   <div class="tb" id="tb">
-    <span class="title"><span class="back" id="back-btn" role="button" tabindex="0" aria-label="Back">←</span> <span id="tb-title">Pair a device</span></span>
+    <span class="title">
+      <button class="back" id="back-btn" aria-label="Back">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 3L4.5 7l4 4"/></svg>
+      </button>
+      <span id="tb-title">Pair a device</span>
+    </span>
+    <svg class="mark" width="16" height="16" viewBox="0 0 18 18" aria-hidden="true">
+      <rect class="copy" x="2.2" y="3.2" width="9" height="10" rx="1.4" />
+      <rect class="copy front" x="5.8" y="6.2" width="9" height="10" rx="1.4" />
+      <circle class="dot" cx="15.2" cy="3" r="1.9" />
+    </svg>
   </div>
 
   <div class="body">
 
     <div class="screen active" data-screen="entry">
-      <h2 class="h">Pair a device</h2>
-      <p class="lede">Two devices to connect. Choose which one starts.</p>
+      <h2 class="h">Link a new device</h2>
+      <p class="lede">From then on, what you copy on one shows up on the other — directly, across your own network.</p>
 
       <button class="tile primary" id="show-this-btn">
-        <div class="pill">Step 1 of 2</div>
-        <div class="name">Show this device</div>
-        <div class="desc">Display a QR code for the other device to scan.</div>
+        <span class="k">A</span>
+        <span class="tile-body">
+          <span class="pill">Start here</span>
+          <span class="name">Show a QR code</span>
+          <span class="desc">Scan it with FluxSync on your phone or other computer.</span>
+        </span>
+        <svg class="go" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 3l4 4-4 4"/></svg>
       </button>
 
       <button class="tile" id="enter-code-btn">
-        <div class="pill">Step 2 of 2</div>
-        <div class="name">Enter peer code</div>
-        <div class="desc">Type the 6-digit code shown by another device.</div>
+        <span class="k">B</span>
+        <span class="tile-body">
+          <span class="pill">Or start there</span>
+          <span class="name">Enter a 6-digit code</span>
+          <span class="desc">Type the code shown on the other device.</span>
+        </span>
+        <svg class="go" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 3l4 4-4 4"/></svg>
       </button>
 
       <div class="spacer"></div>
-      <p class="lede" style="font-size:12.5px;color:var(--muted-2);text-align:center">
-        Both devices must be on the same network.
+      <p class="note">
+        <svg width="12" height="13" viewBox="0 0 9 10" fill="none" aria-hidden="true"><rect x="1" y="4" width="7" height="5" rx="1" stroke="currentColor" stroke-width="1.1"/><path d="M2.5 4V2.5a2 2 0 014 0V4" stroke="currentColor" stroke-width="1.1"/></svg>
+        <span>End-to-end encrypted. Both devices must be on the same network, and you'll confirm 6 words on each screen before anything syncs.</span>
       </p>
     </div>
 
     <div class="screen" data-screen="show">
-      <h2 class="h">Pair this device</h2>
-      <p class="lede">Scan with the FluxSync app on your other device.</p>
+      <h2 class="h">Scan to link</h2>
+      <p class="lede">Open FluxSync on the other device and point it at this code.</p>
 
-      <div class="qr-large loading" id="qr-card">Generating…</div>
+      <div class="qr-frame">
+        <span class="cm tl"></span><span class="cm tr"></span><span class="cm bl"></span><span class="cm br"></span>
+        <div class="qr-large loading" id="qr-card">Generating…</div>
+      </div>
 
-      <div class="divider"></div>
+      <div class="pin-block" id="pin-block" style="display:none">
+        <div class="label">No camera? Type this code</div>
+        <div class="code" id="pin-code">— — — — — —</div>
+        <div class="countdown" id="pin-countdown">Expires in 90 s</div>
+      </div>
 
-      <div style="display:flex;flex-direction:column;gap:6px">
-        <p class="lede" style="font-size:11px;color:var(--muted-2);font-family:var(--mono);text-transform:uppercase;letter-spacing:0.06em;text-align:center;margin:0">
-          Verification words
-        </p>
+      <div>
+        <div class="label-caps" style="margin-bottom:8px">Verification words</div>
         <div class="fp-box" id="fp-box">
           <div class="w" style="color:var(--muted-3)">—</div>
           <div class="w" style="color:var(--muted-3)">—</div>
@@ -271,21 +248,15 @@
         </div>
       </div>
 
-      <div class="pin-block" id="pin-block" style="display:none">
-        <div class="label">Or enter this code on the other device</div>
-        <div class="code" id="pin-code">— — — — — —</div>
-        <div class="countdown" id="pin-countdown">Expires in 90 s</div>
-      </div>
-
       <div class="spacer"></div>
-      <div class="wait"><span class="pulse"></span><span>Waiting for peer…</span></div>
+      <div class="wait"><span class="pulse"></span><span>Waiting for the other device…</span></div>
       <div id="pair-error" class="err" style="display:none" role="alert" aria-live="assertive"></div>
       <button class="btn ghost" id="unpair-btn">Unpair all devices</button>
     </div>
 
     <div class="screen" data-screen="pin-entry">
-      <h2 class="h">Enter peer code</h2>
-      <p class="lede">Type the 6-digit code shown on the other device.</p>
+      <h2 class="h">Enter the code</h2>
+      <p class="lede">Type the 6 digits shown on the other device.</p>
 
       <div class="pin-input" id="pin-input">
         <input inputmode="numeric" pattern="\d*" maxlength="1" autocomplete="off" aria-label="PIN digit 1 of 6" />
@@ -300,23 +271,26 @@
       <div id="pin-error" class="err" style="display:none" role="alert" aria-live="assertive"></div>
 
       <div class="spacer"></div>
-      <button class="btn primary" id="pin-submit-btn" disabled>Connect</button>
+      <button class="btn flux lg block" id="pin-submit-btn" disabled>Connect</button>
     </div>
 
     <div class="screen" data-screen="pin-progress">
       <div class="spacer"></div>
-      <div class="wait" style="justify-content:center"><span class="pulse"></span><span>Connecting…</span></div>
-      <p class="lede" style="text-align:center;font-size:13px">Negotiating secure channel.</p>
+      <div class="linking" aria-hidden="true">
+        <span class="node"><svg width="17" height="14" viewBox="0 0 16 14" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="0.6" y="0.6" width="14.8" height="9.8" rx="1.4"/><path d="M5 13h6M8 10.5V13" stroke-linecap="round"/></svg></span>
+        <span class="w"></span>
+        <span class="node"><svg width="12" height="17" viewBox="0 0 11 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="0.6" y="0.6" width="9.8" height="14.8" rx="2"/></svg></span>
+      </div>
+      <h2 class="h center" style="font-size:19px">Connecting…</h2>
+      <p class="lede center" style="margin-top:-8px">Negotiating an encrypted channel.</p>
       <div class="spacer"></div>
     </div>
 
     <div class="screen" data-screen="verify">
-      <h2 class="h">Verify connection</h2>
-      <p class="verify-note">
-        Both devices should show the same words. Confirm with the other person.
-      </p>
+      <h2 class="h">Do these words match?</h2>
+      <p class="verify-note">Both screens must show the same 6 words, in the same order. If they don't, someone may be in the middle — don't confirm.</p>
 
-      <div class="fp-box" id="verify-fp">
+      <div class="fp-box big" id="verify-fp">
         <div class="w" style="color:var(--muted-3)">—</div>
         <div class="w" style="color:var(--muted-3)">—</div>
         <div class="w" style="color:var(--muted-3)">—</div>
@@ -325,33 +299,32 @@
         <div class="w" style="color:var(--muted-3)">—</div>
       </div>
 
-      <p class="verify-hint" id="verify-peer-note" style="display:none">Other device confirmed</p>
+      <p class="verify-hint" id="verify-peer-note" style="display:none">The other device already confirmed.</p>
 
       <div id="verify-error" class="err" style="display:none" role="alert" aria-live="assertive"></div>
       <div class="spacer"></div>
       <div class="verify-actions" id="verify-actions">
-        <button class="btn danger" id="verify-reject-btn">Don't match</button>
-        <button class="btn primary" id="verify-accept-btn">Words match</button>
+        <button class="btn danger" id="verify-reject-btn">They don't match</button>
+        <button class="btn live" id="verify-accept-btn">They match</button>
       </div>
       <div class="wait" id="verify-waiting" style="display:none;justify-content:center">
-        <span class="pulse"></span><span>Waiting for the other device…</span>
+        <span class="pulse"></span><span>Waiting for the other device to confirm…</span>
       </div>
     </div>
 
     <div class="screen" data-screen="paired">
-      <div class="spacer" style="flex:0.4"></div>
-      <div class="success-mark">✓</div>
-      <p class="lede" style="font-size:14px;text-align:center;margin:0">Successfully paired with</p>
-      <div class="peer-info">
-        <div class="name" id="paired-name">peer</div>
-        <div class="ip" id="paired-id">peer 0x…</div>
+      <div class="spacer" style="flex:0.5 1 auto"></div>
+      <div class="success" aria-hidden="true">
+        <svg width="72" height="72" viewBox="0 0 72 72"><circle class="ring" cx="36" cy="36" r="34"/><path class="tick" d="M24 37l8 8 16-17"/></svg>
       </div>
-      <div class="divider"></div>
-      <p class="lede" style="font-size:13px;text-align:center;line-height:1.5">
-        Anything you copy on either device will now appear on the other.
-      </p>
+      <div class="peer-info">
+        <div class="kicker">Linked</div>
+        <div class="name" id="paired-name">peer</div>
+        <div class="ip" id="paired-id"></div>
+      </div>
+      <p class="lede center" style="margin-top:4px">Copy on either device — it's on the other one, instantly.</p>
       <div class="spacer"></div>
-      <button class="btn primary" id="done-btn">Done</button>
+      <button class="btn flux lg block" id="done-btn">Done</button>
     </div>
 
   </div>

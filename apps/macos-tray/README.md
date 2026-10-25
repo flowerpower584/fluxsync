@@ -8,11 +8,16 @@ code is linked into this binary; the tray is a pure IPC client.
 ```
 apps/macos-tray/
 ├── package.json          # Tauri CLI entry (npm-managed)
-├── src/                  # Static frontend (no bundler)
-│   ├── index.html        # Popup (320 × 460)
-│   ├── pair.html         # Pair window (420 × 540)
-│   ├── styles.css        # Design tokens (FS.dark)
+├── src/                  # Static frontend (no bundler, no JS deps)
+│   ├── shared.css        # "Lien" design system: tokens + components
+│   ├── theme.js          # Dark / light / system appearance (all windows)
+│   ├── ui.js             # Shared helpers: toast, confirm dialog, OS tag
+│   ├── fonts/            # IBM Plex Sans/Mono (OFL), bundled — no CDN
+│   ├── index.html        # Popup (360 × 540)
+│   ├── styles.css        # Popup layout
 │   ├── app.js            # Popup logic
+│   ├── settings.html/.css/.js  # Settings window (760 × 500)
+│   ├── pair.html         # Pair window (420 × 780)
 │   └── pair.js           # Pair window logic
 ├── src-tauri/
 │   ├── Cargo.toml        # Standalone (NOT in the workspace)
@@ -25,6 +30,21 @@ apps/macos-tray/
 │       └── ipc.rs        # UNIX socket client
 └── icons/                # PNG/ICNS for the tray + bundle (drop here)
 ```
+
+## Design system — "Lien"
+
+Everything visual comes from what FluxSync is and from its mark:
+
+- **Coral** (the two copies in the logo) — what *flows*: clipboard items
+  in transit, primary actions, the packet that crosses the link.
+- **Green** (the sync dot) — the *link* itself: live, verified, on.
+  Never used for anything else.
+- **Night ink** surfaces, **red** only for destructive actions, **amber**
+  for paused/waiting. Type is IBM Plex Sans (UI) and Plex Mono (data,
+  identities, labels).
+
+Tokens live in `src/shared.css`; the Android palette
+(`apps/android/.../ui/theme/Color.kt`) mirrors them.
 
 ## Prerequisites
 

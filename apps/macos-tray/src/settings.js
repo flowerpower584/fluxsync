@@ -1,41 +1,18 @@
-// FluxSync Settings Window Logic
+// FluxSync Settings window logic.
+import {
+  tagHostOS, OS_DEVICE_WORD, PLATFORM_LABELS, isRealPeerName, peerIdHex,
+  batteryKnown, setText, setAttr, showToast, confirmDialog,
+} from './ui.js';
+
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const $ = (id) => document.getElementById(id);
 
-(function tagHostOS() {
-  const ua = navigator.userAgent;
-  const os = /Windows/i.test(ua) ? 'windows'
-    : /Macintosh|Mac OS/i.test(ua) ? 'macos'
-    : /Linux/i.test(ua) ? 'linux'
-    : 'unknown';
-  document.body.dataset.os = os;
-  const deviceLabel = { windows: 'PC', macos: 'Mac', linux: 'Linux' }[os] || 'device';
-  const sub = document.getElementById('general-subtitle');
-  if (sub) sub.textContent = `How FluxSync behaves on this ${deviceLabel}.`;
-})();
+const HOST_OS = tagHostOS();
+setText($('general-subtitle'), `On this ${OS_DEVICE_WORD[HOST_OS] || 'device'}.`);
 
 let currentTab = 'general';
-let unlistenState = null;
 let lastState = null;
-
-// Toast singleton — same pattern as the tray popup, kept inline so the
-// two windows don't have to share a module.
-let toastTimer = null;
-function showToast(message) {
-  let el = document.getElementById('fs-toast');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'fs-toast';
-    el.className = 'fs-toast';
-    el.setAttribute('role', 'status');
-    el.setAttribute('aria-live', 'polite');
-    document.body.appendChild(el);
-  }
-  el.textContent = message;
-  el.classList.add('visible');
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('visible'), 3000);
-}
 
 async function refreshState() {
   try {
@@ -45,23 +22,24 @@ async function refreshState() {
       lastState = s;
       updateUI(s);
     }
-    setOfflineBanner(false);
+    setOnline(true);
   } catch (e) {
-    console.error('Failed to refresh settings state', e);
-    setOfflineBanner(true);
+    setOnline(false);
   }
 }
 
 // DIR-P3-03: surface daemon-unreachable instead of swallowing it — same
-// show/clear behavior as the tray popup's "DAEMON OFFLINE" hero state.
-function setOfflineBanner(show) {
-  const el = document.getElementById('offline-banner');
-  if (el) el.style.display = show ? 'flex' : 'none';
+// show/clear behavior as the tray popup's "Daemon offline" state.
+function setOnline(up) {
+  $('offline-banner').hidden = up;
+  const st = $('side-status');
+  st.classList.toggle('up', up);
+  st.classList.toggle('down', !up);
+  setText($('side-status-text'), up ? 'Service running' : 'Service offline');
 }
 
 // DIR-P3-06: keep `aria-checked` in lockstep with the visual `.on` class on
-// every `role="switch"` toggle button — the class alone is invisible to
-// assistive tech.
+// every `role="switch"` toggle — the class alone is invisible to AT.
 function setToggleState(btn, on) {
   if (!btn) return;
   btn.classList.toggle('on', on);
@@ -73,228 +51,235 @@ function fmtUptime(secs) {
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
   const s = Math.floor(secs % 60);
-  if (h > 0) return `${h}H ${m.toString().padStart(2, '0')}M`;
-  if (m > 0) return `${m}M ${s.toString().padStart(2, '0')}S`;
-  return `${s}S`;
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
+const slider = $('threshold-slider');
+let sliderDragging = false;
+function paintSlider(value) {
+  const min = Number(slider.min);
+  const max = Number(slider.max);
+  slider.style.setProperty('--fill', `${((value - min) / (max - min)) * 100}%`);
+  setText($('threshold-display'), `${value}%`);
 }
 
 function updateUI(s) {
-  // Device name: skip the refresh while the field is focused so a
-  // 5s poll (or a live state-update push) doesn't stomp what the user is
-  // mid-typing — same hazard `threshold-slider` doesn't have (a drag is
-  // transient; a text field holds partial input across ticks).
-  const nameInput = document.getElementById('device-name-input');
-  if (document.activeElement !== nameInput) {
+  // Device name: skip while the field is focused so a state push doesn't
+  // stomp what the user is mid-typing.
+  const nameInput = $('device-name-input');
+  if (document.activeElement !== nameInput && nameInput.value !== (s.device_name || '')) {
     nameInput.value = s.device_name || '';
   }
 
-  // General tab — battery threshold + slider stay in sync with the daemon.
-  document.getElementById('threshold-display').textContent = s.battery_threshold || 20;
-  document.getElementById('threshold-slider').value = s.battery_threshold || 20;
-
-  // Daemon-backed toggle: charge_override now lives on State.
-  setToggleState(document.getElementById('opt-resume-on-charge'), !!s.charge_override);
-
-  // Telemetry pane — pulls everything from `s.metrics` if present.
-  const m = s.metrics || null;
-  document.getElementById('metric-rtt').textContent = m && m.last_rtt_ms ? `${m.last_rtt_ms} MS` : '—';
-  document.getElementById('metric-rtt-p99').textContent = m && m.rtt_p99_ms ? `${m.rtt_p99_ms} MS` : '—';
-  document.getElementById('metric-items').textContent = m ? `${m.items_sent ?? 0} ↑ ${m.items_received ?? 0} ↓` : '—';
-  document.getElementById('metric-dups').textContent = m ? `${m.dedup_drops ?? 0}` : '—';
-  document.getElementById('metric-reconnects').textContent = m ? `${m.reconnects ?? 0}` : '—';
-  document.getElementById('metric-hs-failed').textContent = m ? `${m.handshakes_failed ?? 0}` : '—';
-  document.getElementById('metric-uptime').textContent = m ? fmtUptime(m.uptime_session_secs) : '—';
-
-  // Update device list if on devices tab
-  if (currentTab === 'devices') {
-    renderDevices(s);
+  // Threshold: never yank the thumb out from under a drag.
+  const threshold = s.battery_threshold || 20;
+  if (!sliderDragging && Number(slider.value) !== threshold) {
+    slider.value = threshold;
+    paintSlider(threshold);
   }
+
+  setToggleState($('opt-resume-on-charge'), !!s.charge_override);
+
+  if (s.version) {
+    setText($('side-version'), `v${s.version}`);
+    const build = s.build_id && s.build_id !== 'unknown' ? ` · build ${s.build_id}` : '';
+    setText($('about-version'), `Version ${s.version}${build}`);
+  }
+
+  // Network pane — everything from `s.metrics` when present.
+  const m = s.metrics || null;
+  setText($('metric-rtt'), m && m.last_rtt_ms ? `${m.last_rtt_ms} ms` : '—');
+  setText($('metric-rtt-p99'), m && m.rtt_p99_ms ? `${m.rtt_p99_ms} ms` : '—');
+  setText($('metric-items'), m ? `${m.items_sent ?? 0} / ${m.items_received ?? 0}` : '—');
+  setText($('metric-dups'), m ? `${m.dedup_drops ?? 0}` : '—');
+  setText($('metric-reconnects'), m ? `${m.reconnects ?? 0}` : '—');
+  setText($('metric-hs-failed'), m ? `${m.handshakes_failed ?? 0}` : '—');
+  setText($('metric-uptime'), m ? fmtUptime(m.uptime_session_secs) : '—');
+  const mdns = s.mdns_enabled !== false;
+  const pill = $('mdns-pill');
+  setText(pill, mdns ? 'ON' : 'OFF');
+  pill.className = 'pill ' + (mdns ? 'ok' : 'warn');
+
+  renderDevices(s);
 }
 
-// TOFU placeholder the daemon projects into a peer's name between handshake
-// completion and the `Msg::Hello` that carries its real device name (see
-// `fluxsyncd::handshake::TOFU_PLACEHOLDER_NAME`). Same treatment as the
-// "pending" sentinel — never a real identity, never shown raw.
-const TOFU_PLACEHOLDER = 'New Peer';
-const PLATFORM_LABELS = { macos: 'macOS', windows: 'Windows', linux: 'Linux', android: 'Android', ios: 'iOS' };
-// Friendlier stand-in for a peer whose Hello hasn't landed yet — mirrors
-// pair.js's `friendlyPeerName` (pair.js:61-66) so this pane never surfaces
-// the raw "New Peer"/"pending" bookkeeping values.
+// Friendlier stand-in for a peer whose Hello hasn't landed yet, so this
+// pane never surfaces the raw "New Peer"/"pending" bookkeeping values.
 const PLATFORM_FRIENDLY = {
   macos: 'a Mac', windows: 'a PC', linux: 'a Linux device',
   android: 'an Android phone', ios: 'an iPhone',
 };
-
-function isRealPeerName(name) {
-  const n = (name || '').trim();
-  return !!n && n !== 'pending' && n !== TOFU_PLACEHOLDER;
-}
-
 function friendlyDeviceName(name, platform) {
   if (isRealPeerName(name)) return name.trim();
   const label = PLATFORM_FRIENDLY[(platform || '').toLowerCase()];
   return label ? `Pairing with ${label}…` : 'Pairing…';
 }
 
-// peer_id rides the State DTO as a 32-byte array (serde `[u8;32]`); the
-// daemon `revoke` op wants the full hex string. Returns '' if malformed.
-function peerIdHex(id) {
-  if (!Array.isArray(id) || id.length !== 32) return '';
-  return id.map((b) => (b & 0xff).toString(16).padStart(2, '0')).join('');
-}
+const ICON_PHONE = '<svg width="13" height="18" viewBox="0 0 11 16" fill="none" stroke="currentColor" stroke-width="1.15"><rect x="0.5" y="0.5" width="10" height="15" rx="2"/><circle cx="5.5" cy="13" r="0.7" fill="currentColor" stroke="none"/></svg>';
+const ICON_COMPUTER = '<svg width="19" height="16" viewBox="0 0 16 14" fill="none" stroke="currentColor" stroke-width="1.15"><rect x="0.5" y="0.5" width="15" height="10" rx="1.5"/><path d="M5 13h6M8 10.5V13" stroke-linecap="round"/></svg>';
 
 // H-TRAY-01: `name`/`platform` are attacker-controlled (the peer's
 // self-reported Hello data). NEVER interpolate them into innerHTML — build
-// every row with the DOM API + textContent so a name like `<img onerror=…>`
-// can't run privileged Tauri invokes.
-function buildDeviceRow({ name, platform, battery, charging, connected, onUnpair }) {
+// every row with the DOM API + textContent.
+function buildDeviceRow({ name, platform, platformKey, battery, charging, connected, primary, onUnpair }) {
   const item = document.createElement('div');
   item.className = 'device-item';
 
-  const info = document.createElement('div');
+  const icon = document.createElement('div');
+  icon.className = 'd-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.innerHTML = (platformKey === 'android' || platformKey === 'ios') ? ICON_PHONE : ICON_COMPUTER;
 
+  const info = document.createElement('div');
+  info.className = 'd-info';
   const nameRow = document.createElement('div');
   nameRow.className = 'name-row';
-  const dot = document.createElement('div');
-  dot.className = 'dot';
   const nameEl = document.createElement('span');
   nameEl.className = 'name';
   nameEl.textContent = name;
-  nameRow.appendChild(dot);
-  nameRow.appendChild(nameEl);
+  nameEl.title = name;
+  const status = document.createElement('span');
+  status.className = 'status' + (connected ? ' on' : '');
+  status.textContent = connected ? 'CONNECTED' : 'OFFLINE';
+  nameRow.append(nameEl, status);
 
   const meta = document.createElement('div');
   meta.className = 'meta';
-  // 255 / missing / >100 = no real battery reading yet → '—', never a fake
-  // percentage (this is the "255%" bug: the old code printed `peer_battery`
-  // straight through with no sentinel guard).
-  const battText = typeof battery === 'number' && battery <= 100
-    ? `${battery}%${charging ? ' ⚡' : ''}`
-    : '—';
-  meta.textContent = platform ? `${battText} · ${platform}` : battText;
-
-  const lastSeen = document.createElement('div');
-  lastSeen.className = 'last-seen';
-  lastSeen.textContent = connected ? 'CONNECTED' : 'OFFLINE';
-
-  info.appendChild(nameRow);
-  info.appendChild(meta);
-  info.appendChild(lastSeen);
+  // 255 / missing / >100 = no real battery reading yet → never a fake %.
+  const bits = [];
+  if (platform) bits.push(platform);
+  if (batteryKnown(battery)) bits.push(`${battery}%${charging ? ' ⚡ charging' : ''}`);
+  if (primary) bits.push('primary link');
+  meta.textContent = bits.join(' · ') || '—';
+  info.append(nameRow, meta);
 
   const btn = document.createElement('button');
-  btn.className = 'unpair-btn';
-  btn.textContent = 'UNPAIR';
+  btn.className = 'btn danger sm';
+  btn.textContent = 'Unpair';
   btn.addEventListener('click', onUnpair);
 
-  item.appendChild(info);
-  item.appendChild(btn);
+  item.append(icon, info, btn);
   return item;
 }
 
-// FluxMesh: render every linked peer from `s.peers`, not just the legacy
-// single-peer projection — the old version only ever showed one row (and,
-// via `peer_battery` with no sentinel guard, sometimes "255%"). Falls back
-// to the legacy `peer_name`/`peer_battery` row only when `peers` is empty
+async function confirmUnpair(displayName) {
+  return confirmDialog({
+    title: `Unpair ${displayName}?`,
+    message: "It's disconnected and forgotten. You'll have to pair again to sync with it.",
+    confirmLabel: 'Unpair',
+    danger: true,
+  });
+}
+
+// FluxMesh: render every linked peer from `s.peers`. Falls back to the
+// legacy `peer_name`/`peer_battery` projection only when `peers` is empty
 // but a real (non-placeholder) legacy peer is projected — keeps this pane
-// working against an older daemon build that predates `State.peers`.
+// working against an older daemon build. Rebuilt only when something
+// visible changed, so state pushes never steal focus from a button.
+let devicesSig = null;
 function renderDevices(s) {
-  const list = document.getElementById('device-list');
-  list.innerHTML = '';
-
   const peers = Array.isArray(s.peers) ? s.peers : [];
+  const legacy = peers.length === 0 && isRealPeerName(s.peer_name);
+  const sig = peers.length
+    ? peers.map((p) => [peerIdHex(p.peer_id), p.name, p.platform, p.battery, p.charging, p.primary].join('|')).join('\n')
+    : (legacy ? ['legacy', s.peer_name, s.peer_platform, s.peer_battery, s.peer_charging, s.status].join('|') : 'none');
+  if (sig === devicesSig) return;
+  devicesSig = sig;
 
+  const count = peers.length || (legacy ? 1 : 0);
+  const countEl = $('tab-devices-count');
+  countEl.hidden = count === 0;
+  setText(countEl, String(count));
+
+  const list = $('device-list');
   if (peers.length > 0) {
-    peers.forEach((p) => {
+    list.replaceChildren(...peers.map((p) => {
       const hex = peerIdHex(p.peer_id);
+      const key = (p.platform || '').toLowerCase();
       const displayName = friendlyDeviceName(p.name, p.platform);
-      const row = buildDeviceRow({
+      return buildDeviceRow({
         name: displayName,
-        platform: PLATFORM_LABELS[(p.platform || '').toLowerCase()] || '',
+        platform: PLATFORM_LABELS[key] || '',
+        platformKey: key,
         battery: p.battery,
         charging: !!p.charging,
         // `s.peers` is rebuilt from the live session set at every
-        // `EmitState` (see `driver::build_peers`) — a dead session never
-        // lingers in it, so every entry here is, by construction, connected.
+        // `EmitState` (see `driver::build_peers`) — every entry is connected.
         connected: true,
+        primary: peers.length > 1 && !!p.primary,
         onUnpair: async () => {
-          if (!hex) return;
-          if (!confirm(`Unpair ${displayName}? You'll have to pair again to reconnect.`)) return;
+          if (!hex || !(await confirmUnpair(displayName))) return;
           try {
             await invoke('fluxsync_revoke_peer', { peerId: hex });
-            showToast('Device unpaired.');
+            showToast('Device unpaired', 'ok');
+            refreshState();
           } catch (err) {
-            showToast(`Unpair failed: ${err}`);
+            showToast(`Unpair failed: ${err}`, 'err');
           }
         },
       });
-      list.appendChild(row);
-    });
+    }));
     return;
   }
 
-  if (!isRealPeerName(s.peer_name)) {
+  if (!legacy) {
     const empty = document.createElement('div');
-    empty.style.cssText = 'text-align:center;color:var(--fs-muted);padding:20px;';
+    empty.className = 'device-empty';
     empty.textContent = 'No devices paired yet.';
-    list.appendChild(empty);
+    list.replaceChildren(empty);
     return;
   }
 
-  const linked = s.status === 'syncing' || s.status === 'paused';
-  const row = buildDeviceRow({
+  const key = (s.peer_platform || '').toLowerCase();
+  list.replaceChildren(buildDeviceRow({
     name: s.peer_name.trim(),
-    platform: PLATFORM_LABELS[(s.peer_platform || '').toLowerCase()] || '',
+    platform: PLATFORM_LABELS[key] || '',
+    platformKey: key,
     battery: s.peer_battery,
     charging: !!s.peer_charging,
-    connected: linked,
+    connected: s.status === 'syncing' || s.status === 'paused',
+    primary: false,
     onUnpair: async () => {
-      if (!confirm("Unpair this device? You'll have to pair again to reconnect.")) return;
+      if (!(await confirmUnpair(s.peer_name.trim()))) return;
       try {
         await invoke('fluxsync_unpair');
-        showToast('Device unpaired.');
+        showToast('Device unpaired', 'ok');
+        refreshState();
       } catch (err) {
-        showToast(`Unpair failed: ${err}`);
+        showToast(`Unpair failed: ${err}`, 'err');
       }
     },
-  });
-  list.appendChild(row);
+  }));
 }
 
-// ── Tab Navigation ──────────────────────────────────────────────
-document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const tabId = btn.getAttribute('data-tab');
-    switchTab(tabId);
-  });
-});
-
-function switchTab(tabId) {
+// ── Tabs ────────────────────────────────────────────────────────
+const TAB_ORDER = ['general', 'devices', 'network', 'about'];
+function switchTab(tabId, focus) {
+  if (!TAB_ORDER.includes(tabId)) return;
   currentTab = tabId;
-
-  // Update buttons
-  document.querySelectorAll('.tab-btn').forEach(b => {
-    const active = b.getAttribute('data-tab') === tabId;
+  document.querySelectorAll('.tab-btn').forEach((b) => {
+    const active = b.dataset.tab === tabId;
     b.classList.toggle('active', active);
     b.setAttribute('aria-selected', active ? 'true' : 'false');
-    // DIR-P3-06: roving tabindex — only the active tab sits in the Tab
-    // order; arrow keys (below) move focus between the rest.
+    // DIR-P3-06: roving tabindex — only the active tab sits in Tab order.
     b.tabIndex = active ? 0 : -1;
+    if (active && focus) b.focus();
   });
-
-  // Update panes
-  document.querySelectorAll('.pane').forEach(p => {
-    p.style.display = p.id === `pane-${tabId}` ? 'block' : 'none';
+  document.querySelectorAll('.pane').forEach((p) => {
+    p.hidden = p.id !== `pane-${tabId}`;
   });
-
-  refreshState();
+  $('pane-content').scrollTop = 0;
 }
 
-// DIR-P3-06: standard WAI-ARIA tabs keyboard pattern — arrow keys move
-// focus and activate (this sidebar is visually a column, so Up/Down are
-// primary; Left/Right also work since screen-reader users may expect the
-// horizontal convention regardless of layout). Home/End jump to the ends.
-const TAB_ORDER = ['general', 'devices', 'network', 'about'];
-document.querySelector('.sidebar').addEventListener('keydown', (e) => {
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+
+// DIR-P3-06: WAI-ARIA tabs keyboard pattern — arrows move focus and
+// activate; Home/End jump to the ends.
+document.querySelector('.tabs').addEventListener('keydown', (e) => {
   const idx = TAB_ORDER.indexOf(currentTab);
   let next = null;
   if (e.key === 'ArrowDown' || e.key === 'ArrowRight') next = TAB_ORDER[(idx + 1) % TAB_ORDER.length];
@@ -303,124 +288,163 @@ document.querySelector('.sidebar').addEventListener('keydown', (e) => {
   else if (e.key === 'End') next = TAB_ORDER[TAB_ORDER.length - 1];
   if (!next) return;
   e.preventDefault();
-  switchTab(next);
-  document.querySelector(`.tab-btn[data-tab="${next}"]`)?.focus();
+  switchTab(next, true);
 });
+
+// Deep link from the tray popup ("Devices ›"): it writes the wanted tab to
+// localStorage just before showing this (already loaded, hidden) window.
+const TAB_LINK_KEY = 'fs.settingsTab';
+function consumeTabLink(raw) {
+  try {
+    const v = JSON.parse(raw || 'null');
+    if (v && v.tab && Date.now() - (v.at || 0) < 10_000) switchTab(v.tab);
+  } catch (_) {}
+}
+window.addEventListener('storage', (e) => {
+  if (e.key === TAB_LINK_KEY && e.newValue) consumeTabLink(e.newValue);
+});
+try { consumeTabLink(localStorage.getItem(TAB_LINK_KEY)); } catch (_) {}
 
 // ── Controls ────────────────────────────────────────────────────
-document.getElementById('threshold-slider').addEventListener('input', (e) => {
-  document.getElementById('threshold-display').textContent = e.target.value;
-});
-
-document.getElementById('threshold-slider').addEventListener('change', async (e) => {
-  const val = parseInt(e.target.value);
+slider.addEventListener('pointerdown', () => { sliderDragging = true; });
+window.addEventListener('pointerup', () => { sliderDragging = false; });
+slider.addEventListener('input', () => paintSlider(Number(slider.value)));
+slider.addEventListener('change', async () => {
+  sliderDragging = false;
+  const val = parseInt(slider.value, 10);
   const prev = lastState ? (lastState.battery_threshold || 20) : 20;
   try {
     await invoke('fluxsync_set_threshold', { value: val });
   } catch (err) {
-    e.target.value = prev;
-    document.getElementById('threshold-display').textContent = prev;
-    showToast(`Couldn't update threshold: ${err}`);
+    slider.value = prev;
+    paintSlider(prev);
+    showToast(`Couldn't update threshold: ${err}`, 'err');
   }
 });
 
-// DIR-P3-01: save on blur (native `change` semantics for a text input),
-// and Enter triggers the same blur instead of needing a separate Save
-// button — mirrors the slider's "commit on release" feel.
-document.getElementById('device-name-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') e.target.blur();
+// DIR-P3-01: save on blur (native `change` semantics), Enter commits too.
+const nameInput = $('device-name-input');
+nameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') nameInput.blur();
+  if (e.key === 'Escape') {
+    nameInput.value = lastState ? (lastState.device_name || '') : '';
+    nameInput.blur();
+  }
 });
-
-document.getElementById('device-name-input').addEventListener('change', async (e) => {
-  const val = e.target.value.trim();
+nameInput.addEventListener('input', () => nameInput.classList.remove('error'));
+nameInput.addEventListener('change', async () => {
+  const val = nameInput.value.trim();
   const prev = lastState ? (lastState.device_name || '') : '';
+  if (val === prev) return;
   if (!val) {
-    e.target.value = prev;
-    showToast("Device name can't be empty.");
+    nameInput.value = prev;
+    showToast("Device name can't be empty", 'err');
     return;
   }
   try {
     await invoke('fluxsync_set_device_name', { name: val });
-    showToast('Device name updated.');
+    showToast('Device name updated — peers see it on their next connection', 'ok');
   } catch (err) {
-    e.target.value = prev;
-    showToast(`Couldn't rename device: ${err}`);
+    nameInput.value = prev;
+    nameInput.classList.add('error');
+    showToast(`Couldn't rename device: ${err}`, 'err');
   }
 });
 
-document.getElementById('opt-resume-on-charge').addEventListener('click', async () => {
-  const btn = document.getElementById('opt-resume-on-charge');
+async function flipSwitch(btn, command) {
   const isNowOn = !btn.classList.contains('on');
   setToggleState(btn, isNowOn);
   try {
-    await invoke('fluxsync_set_charge_override', { value: isNowOn });
+    await invoke(command, { value: isNowOn });
   } catch (err) {
     setToggleState(btn, !isNowOn);
-    showToast(`Couldn't update preference: ${err}`);
+    showToast(`Couldn't update preference: ${err}`, 'err');
   }
-});
+}
+$('opt-resume-on-charge').addEventListener('click', (e) => flipSwitch(e.currentTarget, 'fluxsync_set_charge_override'));
+$('opt-launch-at-login').addEventListener('click', (e) => flipSwitch(e.currentTarget, 'fluxsync_set_launch_at_login'));
 
-document.getElementById('opt-launch-at-login').addEventListener('click', async () => {
-  const btn = document.getElementById('opt-launch-at-login');
-  const isNowOn = !btn.classList.contains('on');
-  setToggleState(btn, isNowOn);
+// Appearance — stored by theme.js, shared live with every window.
+const themeSeg = $('theme-seg');
+function paintTheme() {
+  const pref = window.fsTheme ? window.fsTheme.get() : 'dark';
+  for (const b of themeSeg.querySelectorAll('button')) {
+    const on = b.dataset.themeChoice === pref;
+    setAttr(b, 'aria-checked', String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+}
+themeSeg.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-theme-choice]');
+  if (!b || !window.fsTheme) return;
+  window.fsTheme.set(b.dataset.themeChoice);
+  paintTheme();
+});
+themeSeg.addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const btns = [...themeSeg.querySelectorAll('button')];
+  const idx = btns.findIndex((b) => b.getAttribute('aria-checked') === 'true');
+  const next = btns[(idx + (e.key === 'ArrowRight' ? 1 : -1) + btns.length) % btns.length];
+  e.preventDefault();
+  next.click();
+  next.focus();
+});
+window.addEventListener('storage', (e) => { if (e.key === 'fs.theme') paintTheme(); });
+paintTheme();
+
+$('btn-add-device').addEventListener('click', () => invoke('fluxsync_open_pair'));
+
+$('btn-reset-session').addEventListener('click', async () => {
+  // `fluxsync_unpair` (unlike per-row `fluxsync_revoke_peer`) wipes trust
+  // for EVERY paired device — the copy must say so plainly.
+  const ok = await confirmDialog({
+    title: 'Reset all pairings?',
+    message: 'Every paired device is unpaired and the session is reset. A fresh QR code opens so you can pair again.',
+    confirmLabel: 'Reset everything',
+    danger: true,
+  });
+  if (!ok) return;
   try {
-    await invoke('fluxsync_set_launch_at_login', { value: isNowOn });
+    await invoke('fluxsync_unpair');
+    await new Promise((r) => setTimeout(r, 100));
+    await invoke('fluxsync_open_pair');
+    showToast('Session reset', 'ok');
+    refreshState();
   } catch (err) {
-    setToggleState(btn, !isNowOn);
-    showToast(`Couldn't update preference: ${err}`);
+    showToast(`Reset failed: ${err}`, 'err');
   }
 });
 
-document.getElementById('btn-add-device').addEventListener('click', () => {
-  invoke('fluxsync_open_pair');
-});
+const REPO = 'https://github.com/flowerpower584/fluxsync';
+$('link-license').addEventListener('click', () => invoke('fluxsync_open_url', { url: `${REPO}/blob/main/LICENSE-MIT` }));
+$('link-author').addEventListener('click', () => invoke('fluxsync_open_url', { url: 'https://github.com/flowerpower584' }));
+// QA #6/#7: no fake update check. FluxSync ships no auto-updater by design —
+// open the releases page so the user can compare with the version above.
+$('btn-check-updates').addEventListener('click', () => invoke('fluxsync_open_url', { url: `${REPO}/releases/latest` }));
 
-document.getElementById('btn-reset-session').addEventListener('click', async () => {
-  // `fluxsync_unpair` (unlike per-row `fluxsync_revoke_peer` in
-  // `renderDevices`) wipes trust for EVERY paired device, not just one —
-  // the confirm copy must say so plainly before the user commits to it.
-  if (confirm('This will unpair ALL your devices and reset the session. Continue?')) {
-    try {
-      await invoke('fluxsync_unpair');
-      await new Promise(r => setTimeout(r, 100));
-      await invoke('fluxsync_open_pair');
-      showToast("Session reset successfully.");
-    } catch (err) {
-      showToast(`Reset failed: ${err}`);
-    }
+// Settings has no menu bar, so wire the usual close shortcut.
+document.addEventListener('keydown', (e) => {
+  if (document.querySelector('.fs-scrim')) return;
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key.toLowerCase() === 'w') {
+    e.preventDefault();
+    window.__TAURI__.window.getCurrentWindow().close();
   }
-});
-
-document.getElementById('link-license').addEventListener('click', () => {
-  invoke('fluxsync_open_url', { url: 'https://github.com/flowerpower584/fluxsync/blob/main/LICENSE-MIT' });
-});
-
-document.getElementById('link-author').addEventListener('click', () => {
-  invoke('fluxsync_open_url', { url: 'https://github.com/flowerpower584' });
-});
-
-document.getElementById('btn-check-updates').addEventListener('click', () => {
-  // QA #6/#7: don't claim a hardcoded (wrong) version or fake an update
-  // check. Report the daemon's own version when known; FluxSync ships no
-  // auto-updater by design — releases live on GitHub.
-  const v = lastState && lastState.version ? ` (v${lastState.version})` : '';
-  showToast(`FluxSync${v} has no auto-update — get releases from GitHub.`);
 });
 
 // ── Initialization ─────────────────────────────────────────────
+paintSlider(Number(slider.value));
 (async () => {
   await refreshState();
   // Launch at login reflects real OS autostart state, not a cached pref.
   try {
-    const enabled = await invoke('fluxsync_get_launch_at_login');
-    setToggleState(document.getElementById('opt-launch-at-login'), !!enabled);
-  } catch (e) {
-    console.error('Failed to read launch-at-login state', e);
-  }
-  unlistenState = await listen('state-update', (event) => {
+    setToggleState($('opt-launch-at-login'), !!(await invoke('fluxsync_get_launch_at_login')));
+  } catch (_) { /* leave it off */ }
+  await listen('state-update', (event) => {
     lastState = event.payload;
+    setOnline(true);
     updateUI(event.payload);
   });
 })();
-setInterval(refreshState, 5000);
+// Safety poll: the network counters keep moving even when no event fires.
+setInterval(() => { if (!document.hidden) refreshState(); }, 5000);

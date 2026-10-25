@@ -3,6 +3,60 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+**"Lien" — a from-scratch redesign of the desktop app (macOS, Windows,
+Linux) around what FluxSync is: a direct link between your devices and
+the clipboard items that flow across it. Plus a performance pass on the
+state stream from the daemon to the UI.**
+
+### Changed
+- New design system, derived from the FluxSync mark: coral (the two
+  copies) for what flows — items in transit, primary actions, the packet
+  that crosses the link; green (the sync dot) only for the live, verified
+  link; night-ink surfaces; red only for destructive actions. IBM Plex
+  Sans/Mono, bundled locally (the old Google Fonts import was blocked by
+  the app CSP, so the UI had been rendering in fallback fonts).
+- Tray popup rebuilt: state headline + the link between this device and
+  the peer (end-to-end seal on the wire, coral packet on every sync),
+  Clipboard / Firewall / Devices tabs, numbered history rows (01–09 double
+  as ⌘/Ctrl+1–9), direction and origin device on every item, a
+  Firewall rules matrix, and dedicated offline / unpaired screens.
+- Settings and Pair windows rebuilt on the same system (numbered
+  sections, hairline rows, crop-marked QR, numbered verification words,
+  a "They match" step that reads as what it is).
+- Dark, light or system appearance, shared live across all windows.
+- In-app confirmation dialogs replace `window.confirm()`.
+- Android palette tokens moved to the same night/green/coral values
+  (names unchanged; layouts untouched).
+
+### Added
+- History filters (pinned, text, links, code, images), instant search
+  with Enter-to-copy, open-in-browser for links, keyboard navigation
+  (↑/↓, `p` to pin, `o` to open, `/` or ⌘/Ctrl+F to search, Esc to hide).
+- Pending firewall decisions are announced on every tab with a badge.
+
+### Fixed
+- Desktop battery shown as "255%" on machines without a battery.
+- Copying an image back from history always failed (CSP blocked the
+  `fetch(data:)` path); bytes are now decoded locally.
+- Onboarding promised an iPhone app that doesn't exist.
+- The tray's `state-update` throttle dropped the newest update inside its
+  100 ms window, leaving the UI on a stale state until the 5 s poll; it now
+  coalesces and always delivers the latest snapshot.
+
+### Performance
+- Popup renders are coalesced per frame, keyed and incremental: a
+  heartbeat push with 50 history items went from ~150 ms of layout and
+  ~400 new DOM nodes to well under a frame and zero new nodes.
+- Image thumbnails are downscaled once and LRU-capped instead of keeping
+  full PNG payloads in memory.
+- Daemon: identical state snapshots no longer wake IPC subscribers, the
+  state stream serializes straight from the watch borrow (no deep clone
+  per client per change) and no longer sends a new subscriber its first
+  snapshot twice; the vault persister and ghost-timeout watcher stop
+  cloning the full history on every heartbeat.
+
 ## [v0.7.0] — 2026-07-10
 
 **FluxMesh multi-device topology, FluxVault encrypted history, and

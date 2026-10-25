@@ -71,11 +71,11 @@ function showScreen(name) {
   });
   const titles = {
     entry: 'Pair a device',
-    show: 'Show this device',
-    'pin-entry': 'Enter peer code',
+    show: 'Show a QR code',
+    'pin-entry': 'Enter a code',
     'pin-progress': 'Connecting',
-    verify: 'Verify',
-    paired: 'Paired',
+    verify: 'Verify the words',
+    paired: 'Linked',
   };
   tbTitle.textContent = titles[name] || 'Pair';
   // Back button on every secondary screen except the terminal ones

@@ -934,10 +934,15 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
             let mut rx = state_rx;
             let mut last_discovering_with_peer: Option<std::time::Instant> = None;
             loop {
-                let state = rx.borrow().clone();
+                // Only two fields matter here; a full `clone()` copied the
+                // whole history (full item text) on every heartbeat publish.
+                let discovering_with_peer = {
+                    let state = rx.borrow_and_update();
+                    state.phase == "discovering" && !state.peer_name.is_empty()
+                };
 
                 // Ghost Timeout Check
-                if state.phase == "discovering" && !state.peer_name.is_empty() {
+                if discovering_with_peer {
                     if let Some(start) = last_discovering_with_peer {
                         if Instant::now().duration_since(start) > Duration::from_secs(600) {
                             tracing::warn!("Ghost Timeout: 10 minutes elapsed without reconnection. Unpairing.");
@@ -1327,7 +1332,16 @@ async fn dispatch(
                 let mut snap = app.snapshot().clone();
                 let primary = transport.cached_peer_id().await;
                 snap.peers = build_peers(transport, peer_meta, primary).await;
-                let _ = state_watch_tx.send(snap);
+                // Only wake subscribers (IPC clients re-serialize the whole
+                // State, history included) when something actually changed.
+                state_watch_tx.send_if_modified(|current| {
+                    if *current == snap {
+                        false
+                    } else {
+                        *current = snap;
+                        true
+                    }
+                });
             }
             Action::EmitLog(entry) => {
                 tracing::info!(level = ?entry.level, msg = %entry.msg, "log");
@@ -3728,6 +3742,13 @@ async fn run_vault_persister(
         }
         let (history, wipe_gen) = {
             let snap = rx.borrow_and_update();
+            // Heartbeats re-publish State every few seconds with the history
+            // untouched. This is exactly `persist_history_change`'s own
+            // early return (no new wipe generation, same list as on disk),
+            // checked before cloning every item's full text.
+            if snap.vault_wipe_gen == last_wipe_gen && snap.history == ctx.last {
+                continue;
+            }
             (snap.history.clone(), snap.vault_wipe_gen)
         };
         persist_history_change(
@@ -7274,15 +7295,20 @@ async fn handle_ipc_client(
             }
         }
         Channel::State => {
-            let snap = state_rx.borrow().clone();
-            write_json_line(&mut write_half, &snap).await?;
+            // Serialize under the watch borrow instead of cloning the State
+            // (its history carries every item's full text) for each client
+            // on each change. `borrow_and_update` marks the opening snapshot
+            // as seen: with a plain `borrow`, `changed()` fired immediately
+            // and every new subscriber received that first snapshot twice.
+            let line = json_line(&*state_rx.borrow_and_update())?;
+            write_line(&mut write_half, &line).await?;
             loop {
                 tokio::select! {
                     () = shutdown.cancelled() => return Ok(()),
                     changed = state_rx.changed() => {
                         if changed.is_err() { return Ok(()); }
-                        let snap = state_rx.borrow().clone();
-                        write_json_line(&mut write_half, &snap).await?;
+                        let line = json_line(&*state_rx.borrow_and_update())?;
+                        write_line(&mut write_half, &line).await?;
                     }
                 }
             }
@@ -7310,9 +7336,22 @@ where
     W: AsyncWriteExt + Unpin,
     T: serde::Serialize,
 {
+    write_line(writer, &json_line(value)?).await
+}
+
+/// One NDJSON line (`value` + `\n`), built synchronously so callers can
+/// serialize while holding a `watch` borrow and drop it before awaiting.
+fn json_line<T: serde::Serialize>(value: &T) -> Result<String> {
     let mut s = serde_json::to_string(value)?;
     s.push('\n');
-    writer.write_all(s.as_bytes()).await?;
+    Ok(s)
+}
+
+async fn write_line<W>(writer: &mut W, line: &str) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    writer.write_all(line.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
 }
