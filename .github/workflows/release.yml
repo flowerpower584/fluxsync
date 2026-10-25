@@ -20,14 +20,55 @@ name: release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch: {}
+  # Release without pushing a tag: run this workflow from the Actions tab
+  # on the commit to release; the first job creates the tag there.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release, e.g. v0.8.0-beta.1 (created on this commit if missing)"
+        required: true
 
 permissions:
   contents: write
 
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
+  tag:
+    name: Tag + version check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The app version must match the tag, or the bundles would be named
+      # after one version and published under another.
+      - name: Version matches the tag
+        run: |
+          set -e
+          case "$TAG" in v*) ;; *) echo "::error::Tag must look like v1.2.3 or v1.2.3-beta.1, got '$TAG'."; exit 1 ;; esac
+          app=$(jq -r .version apps/macos-tray/src-tauri/tauri.conf.json)
+          if [ "v$app" != "$TAG" ]; then
+            echo "::error::tauri.conf.json says $app but the tag is $TAG."
+            exit 1
+          fi
+
+      - name: Create the tag (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -e
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "Tag $TAG already exists; releasing it as is."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "FluxSync $TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+
   desktop:
     name: ${{ matrix.label }}
+    needs: tag
     strategy:
       fail-fast: false
       matrix:
@@ -101,8 +142,8 @@ jobs:
           NO_STRIP: "true"
         with:
           projectPath: apps/macos-tray
-          tagName: ${{ github.ref_name }}
-          releaseName: FluxSync ${{ github.ref_name }}
+          tagName: ${{ env.TAG }}
+          releaseName: FluxSync ${{ env.TAG }}
           releaseBody: |
             **Universal clipboard — local-first, peer-to-peer, end-to-end encrypted.**
             One Rust daemon, GUI apps for macOS, Windows, Linux and Android, zero servers.
@@ -115,7 +156,7 @@ jobs:
 
             See [CHANGELOG.md](https://github.com/flowerpower584/fluxsync/blob/main/CHANGELOG.md) for the full release notes.
           releaseDraft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.TAG, '-') }}
           # No auto-updater wired up — skip the latest.json / .app.tar.gz
           # updater artifacts that otherwise clutter the release.
           includeUpdaterJson: false
@@ -135,7 +176,7 @@ jobs:
             aarch64-apple-darwin) arch=aarch64 ;;
             *) arch=x64 ;;
           esac
-          ver="${GITHUB_REF_NAME#v}"
+          ver="${TAG#v}"
           app="apps/macos-tray/src-tauri/target/${{ matrix.target }}/release/bundle/macos/FluxSync.app"
           stage="FluxSync-${ver}-mac-${arch}"
           mkdir "$stage"
@@ -145,13 +186,14 @@ jobs:
           cp packaging/macos/README-FIRST.txt "$stage/"
           zip="FluxSync_${ver}_${arch}.zip"
           ditto -c -k --norsrc --keepParent "$stage" "$zip"
-          gh release upload "$GITHUB_REF_NAME" "$zip" \
+          gh release upload "$TAG" "$zip" \
             --repo "$GITHUB_REPOSITORY" --clobber
-          gh release delete-asset "$GITHUB_REF_NAME" "FluxSync_${ver}_${arch}.dmg" \
+          gh release delete-asset "$TAG" "FluxSync_${ver}_${arch}.dmg" \
             --repo "$GITHUB_REPOSITORY" --yes || true
 
   android:
     name: Android (arm64-v8a)
+    needs: tag
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -219,16 +261,16 @@ jobs:
         run: |
           set -e
           src=apps/android/app/build/outputs/apk/release/app-release.apk
-          cp "$src" "FluxSync-${{ github.ref_name }}-arm64-v8a.apk"
+          cp "$src" "FluxSync-${{ env.TAG }}-arm64-v8a.apk"
           ls -la FluxSync-*.apk
 
       - name: Attach APK to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.TAG }}
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          files: FluxSync-${{ github.ref_name }}-arm64-v8a.apk
+          prerelease: ${{ contains(env.TAG, '-') }}
+          files: FluxSync-${{ env.TAG }}-arm64-v8a.apk
 
   checksums:
     name: Checksums + release notes
@@ -241,7 +283,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release download "${{ github.ref_name }}" \
+          gh release download "${{ env.TAG }}" \
             --repo "${{ github.repository }}" \
             --dir release-assets
 
@@ -255,7 +297,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.ref_name }}" \
+          gh release upload "${{ env.TAG }}" \
             release-assets/SHA256SUMS.txt \
             --repo "${{ github.repository }}" \
             --clobber
@@ -266,7 +308,7 @@ jobs:
       - name: Set release notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.TAG }}
         run: |
           set -e
           notes=".github/release-notes/${TAG}.md"
