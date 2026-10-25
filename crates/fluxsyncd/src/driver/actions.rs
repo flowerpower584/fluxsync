@@ -468,6 +468,22 @@ pub(super) async fn dispatch(
                 // `HandshakeOk` — not only on this primary-link transition.
             }
             Action::CloseSession => {
+                // Close the primary slot only if it still holds the peer the
+                // FSM is closing. A `PeerLost` queued for a primary that has
+                // since left can be processed after a DIFFERENT device took
+                // the free slot; closing "the primary" then killed that
+                // newcomer's fresh session instead.
+                let tracked = app.snapshot().peer_id;
+                let occupant = transport.cached_peer_id().await;
+                if tracked != [0u8; 32]
+                    && occupant.is_some_and(|id| id != tracked)
+                    && transport.has_session().await
+                {
+                    tracing::debug!(
+                        "CloseSession: primary slot now belongs to another peer; leaving it up"
+                    );
+                    continue;
+                }
                 // [FIX] Handshake Ghosting: inform peer before dropping session
                 let frame = Frame {
                     version: PROTOCOL_VERSION,

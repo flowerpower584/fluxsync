@@ -4403,3 +4403,53 @@ async fn track_inflight_merges_peers_and_resets_the_retry_budget() {
     assert_eq!(inf.attempts, 0);
     assert!(inf.first_sent.elapsed() < Duration::from_secs(5));
 }
+
+/// T4: `CloseSession` (from a `PeerLost`) closes the session of the peer the
+/// FSM is tracking. If another device took the primary slot in between —
+/// the old primary said Bye, the slot was free, a different device linked
+/// before the queued `PeerLost` was processed — its brand-new session must
+/// survive.
+#[tokio::test]
+async fn close_session_spares_a_different_peer_now_in_the_primary_slot() {
+    use fluxsync_core::{App, Config, Event, StubWallClock};
+    use fluxsync_crypto::{test_util::pair_for_test, Identity};
+    use std::sync::Arc;
+
+    let (transport, _) = super::Transport::bind("127.0.0.1", 0).await.unwrap();
+    let transport = Arc::new(transport);
+    let me = Identity::generate();
+    let newcomer = Identity::generate();
+    let (sess, _) = pair_for_test(&me, &newcomer).unwrap();
+    transport.install_session(newcomer.peer_id(), sess).await;
+    transport
+        .set_peer_info(newcomer.peer_id(), "127.0.0.1:40002".parse().unwrap())
+        .await;
+
+    // The FSM still tracks the old primary, which already left.
+    let wall = StubWallClock::new("12:00", 0);
+    let mut app = App::new(Config::default());
+    app.handle(Event::ToggleOn, &wall);
+    app.handle(
+        Event::PeerSeen {
+            peer_id: [0xA1; 32],
+            name: "old primary".into(),
+        },
+        &wall,
+    );
+    app.handle(Event::HandshakeOk, &wall);
+    let actions = app.handle(
+        Event::PeerLost {
+            peer_id: [0xA1; 32],
+        },
+        &wall,
+    );
+    assert!(actions.contains(&fluxsync_core::Action::CloseSession));
+
+    let sh = super::Shared::for_test(transport.clone());
+    let mut seq_store = None;
+    super::actions::dispatch(actions, &mut app, &mut seq_store, &sh).await;
+    assert!(
+        transport.has_session_for(newcomer.peer_id()).await,
+        "the newcomer's session was closed on behalf of the old primary"
+    );
+}
