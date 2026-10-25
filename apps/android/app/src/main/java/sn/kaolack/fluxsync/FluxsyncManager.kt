@@ -1,5 +1,6 @@
 package sn.kaolack.fluxsync
 
+import android.os.SystemClock
 import sn.kaolack.fluxsync.vm.DaemonState
 import sn.kaolack.fluxsync.vm.LogEntryView
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,31 +30,38 @@ object FluxsyncManager {
     val logCursor: Long get() = _logCursor.get()
 
     /**
+     * How long after we write or push a text a repeat of it still counts as
+     * an echo: a clip listener reading back our own peer write, or the a11y
+     * "Copy" detector and a clip listener both seeing one copy. Real echoes
+     * land within a second or two; anything later is the user copying that
+     * text again, which must sync (copy A, copy B, copy A sends A twice).
+     * Mirrors `fluxsync_core::ECHO_WINDOW_MS`.
+     */
+    internal const val ECHO_WINDOW_MS = 5_000L
+
+    /**
      * #6 echo guard: trimmed texts recently written to the system clipboard
-     * BY US (inbound peer items). A bounded recency set, not a single
-     * @Volatile string — two peer items landing back-to-back must BOTH stay
-     * suppressed, and the older one can't be forgotten the instant the newer
-     * one arrives. Written by the a11y poll loop (IO), read by MainActivity's
-     * clip listener (Main) → its own monitor.
+     * BY US (inbound peer items), each with the elapsedRealtime of the write.
+     * A bounded recency map, not a single @Volatile string — two peer items
+     * landing back-to-back must BOTH stay suppressed, and the older one can't
+     * be forgotten the instant the newer one arrives. Written by the a11y poll
+     * loop (IO), read by MainActivity's clip listener (Main) → its own monitor.
      */
     private const val PEER_CLIP_CAP = 16
     private val peerClipLock = Any()
-    private val peerClips = LinkedHashSet<String>()
+    private val peerClips = LinkedHashMap<String, Long>()
 
-    fun rememberPeerClip(text: String) {
+    fun rememberPeerClip(text: String, nowMs: Long = SystemClock.elapsedRealtime()) {
         val key = text.trim()
         if (key.isEmpty()) return
-        synchronized(peerClipLock) {
-            peerClips.remove(key)
-            peerClips.add(key)
-            evict(peerClips, PEER_CLIP_CAP)
-        }
+        synchronized(peerClipLock) { record(peerClips, key, nowMs, PEER_CLIP_CAP) }
     }
 
-    fun isRecentPeerClip(text: String): Boolean {
+    /** True only within [ECHO_WINDOW_MS] of writing [text] from a peer. */
+    fun isRecentPeerClip(text: String, nowMs: Long = SystemClock.elapsedRealtime()): Boolean {
         val key = text.trim()
         if (key.isEmpty()) return false
-        return synchronized(peerClipLock) { peerClips.contains(key) }
+        return synchronized(peerClipLock) { isEcho(peerClips[key], nowMs) }
     }
 
     /** Drop the echo guard on disconnect so a fresh pair starts clean. */
@@ -62,28 +70,42 @@ object FluxsyncManager {
     }
 
     /**
-     * #5 outbound dedup: trimmed texts recently pushed to the daemon. The
-     * a11y "Copy"-button detector and MainActivity's clip listener + onResume
-     * re-push all run in this one process; without a shared window a single
-     * copy fires two pushes, and onResume re-broadcasts a stale local item on
-     * every app open. [markPushedIfNew] is an atomic check-and-set: true means
-     * "newly recorded, caller should push", false means "duplicate, skip".
+     * #5 outbound dedup: trimmed texts recently pushed to the daemon, each
+     * with the elapsedRealtime of the push. The a11y "Copy"-button detector
+     * and the clip listeners all run in this one process; without a shared
+     * window a single copy fires two pushes. [markPushedIfNew] is an atomic
+     * check-and-set: true means "newly recorded, caller should push", false
+     * means "pushed less than [ECHO_WINDOW_MS] ago, skip".
      */
     private const val PUSHED_CLIP_CAP = 16
     private val pushedClipLock = Any()
-    private val pushedClips = LinkedHashSet<String>()
+    private val pushedClips = LinkedHashMap<String, Long>()
 
-    fun markPushedIfNew(text: String): Boolean {
+    fun markPushedIfNew(text: String, nowMs: Long = SystemClock.elapsedRealtime()): Boolean {
         val key = text.trim()
         if (key.isEmpty()) return false
         synchronized(pushedClipLock) {
-            if (!pushedClips.add(key)) {
-                // already present → refresh recency, signal duplicate
-                pushedClips.remove(key)
-                pushedClips.add(key)
-                return false
-            }
-            evict(pushedClips, PUSHED_CLIP_CAP)
+            if (isEcho(pushedClips[key], nowMs)) return false
+            record(pushedClips, key, nowMs, PUSHED_CLIP_CAP)
+            return true
+        }
+    }
+
+    /**
+     * MainActivity.onResume's re-push gate. onResume is not a copy event: it
+     * fires on every app open, and the clipboard usually still holds what we
+     * last pushed or wrote from a peer, so re-sending it clobbers the peer
+     * with an old clip each time. Unlike the clip listeners, this skips any
+     * text either guard still remembers, however old; only text FluxSync
+     * hasn't handled is recorded (as [markPushedIfNew] would) and pushed.
+     */
+    fun markResumePushIfNew(text: String, nowMs: Long = SystemClock.elapsedRealtime()): Boolean {
+        val key = text.trim()
+        if (key.isEmpty()) return false
+        if (synchronized(peerClipLock) { key in peerClips }) return false
+        synchronized(pushedClipLock) {
+            if (key in pushedClips) return false
+            record(pushedClips, key, nowMs, PUSHED_CLIP_CAP)
             return true
         }
     }
@@ -92,9 +114,15 @@ object FluxsyncManager {
         synchronized(pushedClipLock) { pushedClips.clear() }
     }
 
-    private fun evict(set: LinkedHashSet<String>, cap: Int) {
-        while (set.size > cap) {
-            val it = set.iterator()
+    private fun isEcho(seenAtMs: Long?, nowMs: Long): Boolean =
+        seenAtMs != null && nowMs - seenAtMs < ECHO_WINDOW_MS
+
+    /** Store [key] as the newest entry, then drop the oldest past [cap]. */
+    private fun record(map: LinkedHashMap<String, Long>, key: String, nowMs: Long, cap: Int) {
+        map.remove(key) // re-insert so it counts as most-recent
+        map[key] = nowMs
+        while (map.size > cap) {
+            val it = map.keys.iterator()
             it.next()
             it.remove()
         }
