@@ -48,6 +48,12 @@ pub struct State {
     /// the daemon rebuilds it at every `EmitState` from the live session set
     /// (so a dead session never lingers as a ghost entry).
     pub peers: Vec<PeerInfo>,
+    /// Every paired (trusted) device, online or not — what a "Devices"
+    /// screen lists, so a device that is offline right now can still be
+    /// seen and unpaired. Rebuilt by the daemon at every `EmitState` from
+    /// the trust store joined with the live session set.
+    #[serde(default)]
+    pub paired: Vec<PairedDevice>,
     pub history: Vec<HistoryItem>,
     pub status: Status,
     pub version: String,
@@ -162,6 +168,22 @@ pub struct PeerInfo {
     /// Negotiated capability set from this peer's `Msg::Hello.caps`
     /// (DIR-P1-01). Empty until its Hello arrives.
     pub caps: Vec<String>,
+}
+
+/// One paired device in `State.paired`: a trusted peer and whether it holds
+/// a live session right now. `platform`/`battery` are only known while it is
+/// online (empty / 255 otherwise).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PairedDevice {
+    pub peer_id: [u8; 32],
+    pub name: String,
+    pub platform: String,
+    pub online: bool,
+    /// The device the legacy `State.peer_*` fields project.
+    pub primary: bool,
+    pub battery: u8,
+    pub charging: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -339,6 +361,7 @@ impl State {
             peer_battery: 255, // sentinel: unknown until first BatteryStatus → UI shows "—"
             peer_charging: false,
             peers: Vec::new(),
+            paired: Vec::new(),
             history: Vec::new(),
             status: Status::Inactive,
             version: config.version.clone(),

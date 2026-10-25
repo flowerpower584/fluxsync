@@ -379,6 +379,41 @@ pub(super) async fn build_peers(
         .collect()
 }
 
+/// `State.paired`: every trusted device joined with the live `peers` list.
+/// Sorted (primary, then online, then by name) so an unchanged set always
+/// yields an identical `State` — `EmitState` only wakes subscribers when the
+/// snapshot actually differs.
+pub(super) async fn build_paired(
+    trusted: &TrustedSet,
+    peers: &[PeerInfo],
+    primary: Option<[u8; 32]>,
+) -> Vec<PairedDevice> {
+    let mut out: Vec<PairedDevice> = trusted
+        .lock()
+        .await
+        .iter()
+        .map(|(id, tp)| {
+            let live = peers.iter().find(|p| p.peer_id == *id);
+            PairedDevice {
+                peer_id: *id,
+                name: live
+                    .map(|p| p.name.clone())
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| tp.name.clone()),
+                platform: live.map(|p| p.platform.clone()).unwrap_or_default(),
+                online: live.is_some(),
+                primary: live.is_some() && Some(*id) == primary,
+                battery: live.map_or(255, |p| p.battery),
+                charging: live.is_some_and(|p| p.charging),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        (b.primary, b.online, &a.name, a.peer_id).cmp(&(a.primary, a.online, &b.name, b.peer_id))
+    });
+    out
+}
+
 /// Wait this long for an ack before re-sending an inflight item.
 pub(super) const RETRANSMIT_INTERVAL: Duration = Duration::from_secs(2);
 /// Drop the item after this many re-sends with no ack.
@@ -505,6 +540,19 @@ impl Shared {
             let _ = self.event_tx.try_send(Event::MeshPeersChanged);
         }
         ids
+    }
+
+    /// The `State` clients see: the app's snapshot plus connection metrics,
+    /// the live mesh peer list and the paired-device list. Shared by
+    /// `EmitState` (the watch) and `Status` (a direct poll).
+    pub(super) async fn publishable_state(&self, app: &mut App) -> State {
+        let m = self.metrics.lock().await.snapshot();
+        app.set_metrics(Some(m));
+        let mut snap = app.snapshot().clone();
+        let primary = self.transport.cached_peer_id().await;
+        snap.peers = build_peers(&self.transport, &self.peer_meta, primary).await;
+        snap.paired = build_paired(&self.trusted, &snap.peers, primary).await;
+        snap
     }
 
     /// A context with fresh, empty state around `transport` — for unit

@@ -16,7 +16,6 @@ pub(super) async fn handle_driver_cmd(
         transport,
         event_tx,
         log_tail,
-        metrics,
         inflight,
         peer_meta,
         pending_pairs,
@@ -39,13 +38,7 @@ pub(super) async fn handle_driver_cmd(
     };
     let resp = match op {
         CmdOp::Status => {
-            let m = metrics.lock().await.snapshot();
-            app.set_metrics(Some(m));
-            // FluxMesh Phase 3: enrich with the live mesh peer list, same as
-            // the watch-published snapshot (a direct Status poll bypasses it).
-            let mut snap = app.snapshot().clone();
-            let primary = transport.cached_peer_id().await;
-            snap.peers = build_peers(transport, peer_meta, primary).await;
+            let snap = sh.publishable_state(app).await;
             CmdResponse::ok(req_id, Some(CmdData::State(Box::new(snap))))
         }
         CmdOp::Reconnect {} => {
@@ -465,15 +458,18 @@ pub(super) async fn handle_driver_cmd(
             // transient disconnect, which must NOT drop pending — see its
             // doc comment), a revoke is permanent, so this always runs,
             // independent of the primary-failover branch below.
+            // Read before `PeerRevoked`, which clears the projection of the
+            // peer it revokes.
+            let was_primary = app.snapshot().peer_id == arr;
             let mut revoke_actions = app.handle(Event::PeerRevoked { peer_id: arr }, &**wall);
             purge_dropped_pending_from_outbox_stage(&revoke_actions, outbox_stage).await;
             purge_peer_from_inflight(arr, inflight).await;
             // If the revoked peer was the primary, rebind State: fail over to a
             // live secondary if one exists, else walk Linked → Discovering
             // (CloseSession touches only the session, not the trust store).
-            let active = app.snapshot().peer_id;
-            if active == arr && !try_primary_failover(transport, event_tx, peer_meta).await {
+            if was_primary && !try_primary_failover(transport, event_tx, peer_meta).await {
                 revoke_actions.extend(app.handle(Event::PeerLost { peer_id: arr }, &**wall));
+                revoke_actions.extend(reannounce_trusted_peer(app, sh).await);
             }
             dispatch(revoke_actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
@@ -628,15 +624,16 @@ pub(super) async fn handle_driver_cmd(
                 if peer_meta.lock().await.remove(&arr).is_some() {
                     let _ = event_tx.try_send(Event::MeshPeersChanged);
                 }
+                let was_primary = app.snapshot().peer_id == arr;
                 let mut reject_actions = app.handle(Event::PeerRevoked { peer_id: arr }, &**wall);
                 purge_dropped_pending_from_outbox_stage(&reject_actions, outbox_stage).await;
                 purge_peer_from_inflight(arr, inflight).await;
                 // If the rejected peer was the primary, rebind State the
                 // same way `CmdOp::Revoke` does: fail over to a live
                 // secondary if one exists, else walk Linked → Discovering.
-                let active = app.snapshot().peer_id;
-                if active == arr && !try_primary_failover(transport, event_tx, peer_meta).await {
+                if was_primary && !try_primary_failover(transport, event_tx, peer_meta).await {
                     reject_actions.extend(app.handle(Event::PeerLost { peer_id: arr }, &**wall));
+                    reject_actions.extend(reannounce_trusted_peer(app, sh).await);
                 }
                 dispatch(reject_actions, app, seq_store, sh).await;
             }
@@ -1099,5 +1096,17 @@ async fn resume_live_primary(app: &mut App, seq_store: &mut Option<SeqStore>, sh
     for ev in [Event::PeerSeen { peer_id, name }, Event::HandshakeOk] {
         let actions = app.handle(ev, &*sh.wall_clock);
         dispatch(actions, app, seq_store, sh).await;
+    }
+}
+
+/// After the projected primary is revoked with no live peer to fail over to:
+/// name a remaining paired device (if any) as the one this daemon waits for,
+/// the same pick the boot path makes, so clients keep showing "paired" rather
+/// than an empty, unpaired screen.
+async fn reannounce_trusted_peer(app: &mut App, sh: &Shared) -> Vec<Action> {
+    let trusted = sh.trusted.lock().await;
+    match choose_boot_trusted_peer(&trusted, None) {
+        Some(peer) => app.handle(Event::SetTrustedPeer { name: peer.name }, &*sh.wall_clock),
+        None => Vec::new(),
     }
 }

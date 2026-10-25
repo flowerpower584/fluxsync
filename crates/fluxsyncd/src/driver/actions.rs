@@ -154,7 +154,6 @@ pub(super) async fn dispatch(
         last_written_hashes,
         metrics,
         inflight,
-        peer_meta,
         outbox,
         pending_pairs,
         ..
@@ -163,13 +162,7 @@ pub(super) async fn dispatch(
         tracing::debug!(?action, "dispatching action");
         match action {
             Action::EmitState => {
-                let m = metrics.lock().await.snapshot();
-                app.set_metrics(Some(m));
-                // FluxMesh Phase 3: enrich the single-peer snapshot with the
-                // live mesh peer list before publishing.
-                let mut snap = app.snapshot().clone();
-                let primary = transport.cached_peer_id().await;
-                snap.peers = build_peers(transport, peer_meta, primary).await;
+                let snap = sh.publishable_state(app).await;
                 // Only wake subscribers (IPC clients re-serialize the whole
                 // State, history included) when something actually changed.
                 state_watch_tx.send_if_modified(|current| {

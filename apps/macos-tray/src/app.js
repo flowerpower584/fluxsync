@@ -15,7 +15,7 @@
 //     out a 20 KB single-line text node per row was the main cost).
 
 import {
-  IS_MAC, tagHostOS, OS_NAMES, OS_DEVICE_WORD, PLATFORM_LABELS, TOFU_PLACEHOLDER,
+  IS_MAC, tagHostOS, OS_NAMES, OS_DEVICE_WORD, PLATFORM_LABELS,
   isRealPeerName, peerIdHex, batteryKnown, setText, setAttr, showToast, confirmDialog,
 } from './ui.js';
 
@@ -161,8 +161,7 @@ function render(s) {
   // second peer already linked (`peers.length >= 2`), the dashboard for the
   // confirmed primary must keep showing while a second device verifies.
   const soleUnverified = activeSas && (!s.peers || s.peers.length <= 1);
-  const isPaired = !!s && !!s.peer_name && s.peer_name.trim() !== '' && s.peer_name !== 'pending' &&
-    s.peer_name !== TOFU_PLACEHOLDER && !soleUnverified;
+  const isPaired = !!primaryName(s) && !soleUnverified;
 
   // Single-window UX: dashboard + history when linked, or an inline "Pair a
   // device" CTA when not — never auto-spawn the separate pair window.
@@ -187,6 +186,20 @@ function render(s) {
   renderLink(s, isPaired);
   renderMetrics(s);
   renderFooter(true, s);
+}
+
+// The device this one syncs with, for display: the live/projected primary,
+// else the paired device the daemon is waiting for (boot, or the link is
+// down), else any paired device. '' = nothing paired. A paired device that
+// is merely offline must never read as "Not paired".
+function primaryName(s) {
+  if (!s) return '';
+  if (isRealPeerName(s.peer_name)) return s.peer_name.trim();
+  const paired = Array.isArray(s.paired) ? s.paired : null;
+  if (paired && paired.length === 0) return '';
+  if (isRealPeerName(s.trusted_peer_name)) return s.trusted_peer_name.trim();
+  const d = paired && paired.find((p) => isRealPeerName(p.name));
+  return d ? d.name.trim() : '';
 }
 
 function renderUnpaired(soleUnverified) {
@@ -244,7 +257,7 @@ function setHero(state, label, sub) {
 }
 
 function renderHero(s) {
-  const peer = s.peer_name || 'your device';
+  const peer = primaryName(s) || 'your device';
   if (!s.on) return setHero('off', 'Off', `Your clipboard stays on this ${HOST_WORD}`);
 
   // 255 = battery not read yet (desktop / boot) → not "low"; only a real
@@ -289,8 +302,9 @@ function setMeta(target, label, level, charging, threshold) {
 let lastPeerPlatform = null;
 function renderPeer(s) {
   const threshold = s.battery_threshold ?? 20;
-  setText(el.peerName, s.peer_name || '—');
-  el.peerName.title = s.peer_name || '';
+  const name = primaryName(s);
+  setText(el.peerName, name || '—');
+  el.peerName.title = name;
 
   const p = (s.peer_platform || '').toLowerCase();
   if (p !== lastPeerPlatform) {
@@ -436,7 +450,7 @@ function setHistory(s) {
     }
     const primaryHex = peerIdHex(s.peer_id);
     if (primaryHex && s.peer_name && !peerNames.has(primaryHex)) peerNames.set(primaryHex, s.peer_name);
-    peerNames.set('', s.peer_name || 'peer');
+    peerNames.set('', primaryName(s) || 'peer');
   }
   // Rows only change on add/remove/pin/peer rename — never on heartbeats.
   let sig = '';
@@ -1077,21 +1091,29 @@ el.fwRules.addEventListener('keydown', (e) => {
 });
 
 // ── Devices (FluxMesh) ───────────────────────────────────────────
-// Every linked device, with a per-device unpair. Built with textContent
-// only — peer names are attacker-controlled (Hello data). Rebuilt only
-// when something visible changed.
+// Every paired device — online or not — with a per-device unpair. A daemon
+// that publishes `paired` lists offline devices too (so one that dropped off
+// can still be seen and unpaired); an older one only has the live `peers`.
+// Built with textContent only — peer names are attacker-controlled (Hello
+// data). Rebuilt only when something visible changed.
 let devicesSig = null;
-function renderDevices(s) {
-  const peers = Array.isArray(s.peers) && s.peers.length ? s.peers : [{
+function devicesOf(s) {
+  if (Array.isArray(s.paired) && s.paired.length) return s.paired;
+  const live = Array.isArray(s.peers) && s.peers.length ? s.peers : [{
     peer_id: s.peer_id, name: s.peer_name, platform: s.peer_platform,
     battery: s.peer_battery, charging: s.peer_charging, primary: true,
   }];
-  const sig = peers.map((p) => [peerIdHex(p.peer_id), p.name, p.platform, p.battery, p.charging, p.primary].join('|')).join('\n');
+  return live.map((p) => ({ ...p, online: true }));
+}
+function renderDevices(s) {
+  const devices = devicesOf(s);
+  const onlineCount = devices.filter((d) => d.online).length;
+  const sig = devices.map((p) => [peerIdHex(p.peer_id), p.name, p.platform, p.battery, p.charging, p.primary, p.online].join('|')).join('\n');
   if (sig === devicesSig) return;
   devicesSig = sig;
-  setText(el.devicesCount, String(peers.length));
-  el.devices.replaceChildren(...peers.map((p) => {
-    const row = make('div', 'dev');
+  setText(el.devicesCount, String(devices.length));
+  el.devices.replaceChildren(...devices.map((p) => {
+    const row = make('div', p.online ? 'dev' : 'dev is-offline');
     const key = (p.platform || '').toLowerCase();
     const node = make('span', 'node');
     node.setAttribute('aria-hidden', 'true');
@@ -1103,15 +1125,15 @@ function renderDevices(s) {
     name.title = display;
     const meta = make('span', 'dev-meta');
     const live = make('span', 'live');
-    live.textContent = p.primary && peers.length > 1 ? 'PRIMARY' : 'LINKED';
+    live.textContent = !p.online ? 'OFFLINE' : (p.primary && onlineCount > 1 ? 'PRIMARY' : 'LINKED');
     const bits = [PLATFORM_LABELS[key] || p.platform || ''];
-    if (batteryKnown(p.battery)) bits.push(`${p.battery}%${p.charging ? ' · charging' : ''}`);
+    if (p.online && batteryKnown(p.battery)) bits.push(`${p.battery}%${p.charging ? ' · charging' : ''}`);
     meta.append(live, document.createTextNode(bits.filter(Boolean).join(' · ')));
     text.append(name, meta);
     const btn = make('button', 'btn danger sm');
     btn.textContent = 'Unpair';
-    // The daemon `revoke` op drops just this peer; with no id (older
-    // daemon) fall back to `unpair`, which resets the primary link.
+    // The daemon `revoke` op drops just this peer (linked or not); with no
+    // id (older daemon) fall back to `unpair`, which resets the primary link.
     const hex = peerIdHex(p.peer_id);
     btn.addEventListener('click', () => unpairPeer(hex, display));
     row.append(node, text, btn);

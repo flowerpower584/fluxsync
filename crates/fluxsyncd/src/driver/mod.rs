@@ -42,7 +42,8 @@ use base32::Alphabet;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use fluxsync_core::{
     dedup::DedupRing, kind_of, Action, App, Config as CoreConfig, Decision, DeviceId, Direction,
-    Event, EventId, HistoryItem, LogEntry, LogLevel, PeerInfo, SeenSet, State, WallClock,
+    Event, EventId, HistoryItem, LogEntry, LogLevel, PairedDevice, PeerInfo, SeenSet, State,
+    WallClock,
 };
 use fluxsync_crypto::gen_pair_pin;
 use fluxsync_crypto::{fingerprint, Identity};

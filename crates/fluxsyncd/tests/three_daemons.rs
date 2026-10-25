@@ -1535,3 +1535,148 @@ async fn toggle_off_drops_secondary_links_too() {
         let _ = timeout(Duration::from_secs(2), h).await;
     }
 }
+
+async fn paired(ipc: &PathBuf) -> Vec<(String, bool, bool)> {
+    let resp = ipc_send_recv(
+        ipc,
+        CmdRequest {
+            id: 6,
+            op: CmdOp::Status,
+        },
+    )
+    .await;
+    match resp.data {
+        Some(CmdData::State(s)) => s
+            .paired
+            .iter()
+            .map(|d| (d.name.clone(), d.online, d.primary))
+            .collect(),
+        other => panic!("expected State, got {other:?}"),
+    }
+}
+
+/// `State.paired` lists every trusted device with its live link state, so a
+/// device that drops offline stays visible (and unpairable) instead of
+/// vanishing from the device list like it does from `State.peers`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn paired_lists_every_trusted_device_with_its_link_state() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ([_ipc_a, ipc_b, ipc_c], shutdown, handles) = spawn_hub_line(dir.path()).await;
+
+    assert_eq!(
+        paired(&ipc_b).await,
+        vec![
+            ("node-a".to_string(), true, true),
+            ("node-c".to_string(), true, false),
+        ]
+    );
+
+    // C switches sync off: it leaves B's live peer list but stays paired.
+    let r = ipc_send_recv(
+        &ipc_c,
+        CmdRequest {
+            id: 9,
+            op: CmdOp::Toggle { on: false },
+        },
+    )
+    .await;
+    assert!(r.ok, "toggle off failed: {r:?}");
+    let offline = wait_until(Duration::from_secs(3), || async {
+        paired(&ipc_b).await
+            == vec![
+                ("node-a".to_string(), true, true),
+                ("node-c".to_string(), false, false),
+            ]
+    })
+    .await;
+    assert!(offline, "B's paired list: {:?}", paired(&ipc_b).await);
+    assert_eq!(mesh_peers(&ipc_b).await, (1, 1));
+
+    shutdown.cancel();
+    for h in handles {
+        let _ = timeout(Duration::from_secs(2), h).await;
+    }
+}
+
+/// C6: revoking the sole linked device must clear the single-peer projection
+/// (no "searching for" a device the user just unpaired — which the ghost
+/// watcher would later take for a vanished peer and wipe history over) while
+/// keeping the clipboard history, like a full unpair does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn revoking_the_sole_primary_forgets_it_but_keeps_history() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ([ipc_a, ipc_b, _ipc_c], shutdown, handles) = spawn_hub_line(dir.path()).await;
+
+    let r = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 2,
+            op: CmdOp::Push {
+                text: "kept after revoke".into(),
+            },
+        },
+    )
+    .await;
+    assert!(r.ok, "push failed: {r:?}");
+    assert!(
+        wait_until(Duration::from_secs(3), || async {
+            history_count(&ipc_b, "kept after revoke").await == 1
+        })
+        .await,
+        "item never reached B"
+    );
+
+    let b_hex = {
+        let resp = ipc_send_recv(
+            &ipc_a,
+            CmdRequest {
+                id: 3,
+                op: CmdOp::Status,
+            },
+        )
+        .await;
+        match resp.data {
+            Some(CmdData::State(s)) => s.peer_id.iter().fold(String::new(), |mut out, b| {
+                write!(out, "{b:02x}").unwrap();
+                out
+            }),
+            other => panic!("expected State, got {other:?}"),
+        }
+    };
+    let r = ipc_send_recv(
+        &ipc_a,
+        CmdRequest {
+            id: 4,
+            op: CmdOp::Revoke { peer_id: b_hex },
+        },
+    )
+    .await;
+    assert!(r.ok, "revoke failed: {r:?}");
+
+    let forgotten = wait_until(Duration::from_secs(3), || async {
+        let resp = ipc_send_recv(
+            &ipc_a,
+            CmdRequest {
+                id: 5,
+                op: CmdOp::Status,
+            },
+        )
+        .await;
+        matches!(resp.data, Some(CmdData::State(s))
+            if s.peer_name.is_empty() && s.peer_id == [0u8; 32] && s.phase != "linked")
+    })
+    .await;
+    assert!(forgotten, "A still projects the device it revoked");
+    assert_eq!(
+        history_count(&ipc_a, "kept after revoke").await,
+        1,
+        "revoking a device must not cost the local history"
+    );
+
+    shutdown.cancel();
+    for h in handles {
+        let _ = timeout(Duration::from_secs(2), h).await;
+    }
+}

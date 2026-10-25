@@ -322,6 +322,9 @@ html, body { height: 100%; overflow: hidden; }
 .dev-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dev-meta { font-size: 11px; color: var(--subtle); display: flex; align-items: center; gap: 6px; }
 .dev-meta .live { color: var(--live-ink); font-family: var(--fs-mono); font-size: 9.5px; font-weight: 600; letter-spacing: .08em; }
+.tray .dev.is-offline .node { color: var(--subtle); border-color: var(--line-strong); }
+.dev.is-offline .dev-name { color: var(--muted); }
+.dev.is-offline .dev-meta .live { color: var(--subtle); }
 .devices-actions { padding: 12px 14px 14px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
 #reset-all:hover { color: var(--danger); background: var(--danger-soft); }
 

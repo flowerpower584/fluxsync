@@ -125,7 +125,7 @@ const ICON_COMPUTER = '<svg width="19" height="16" viewBox="0 0 16 14" fill="non
 // every row with the DOM API + textContent.
 function buildDeviceRow({ name, platform, platformKey, battery, charging, connected, primary, onUnpair }) {
   const item = document.createElement('div');
-  item.className = 'device-item';
+  item.className = connected ? 'device-item' : 'device-item is-offline';
 
   const icon = document.createElement('div');
   icon.className = 'd-icon';
@@ -152,7 +152,7 @@ function buildDeviceRow({ name, platform, platformKey, battery, charging, connec
   if (platform) bits.push(platform);
   if (batteryKnown(battery)) bits.push(`${battery}%${charging ? ' ⚡ charging' : ''}`);
   if (primary) bits.push('primary link');
-  meta.textContent = bits.join(' · ') || '—';
+  meta.textContent = bits.join(' · ') || (connected ? '—' : 'Not connected right now');
   info.append(nameRow, meta);
 
   const btn = document.createElement('button');
@@ -162,6 +162,52 @@ function buildDeviceRow({ name, platform, platformKey, battery, charging, connec
 
   item.append(icon, info, btn);
   return item;
+}
+
+function renderPaired(devices) {
+  const sig = 'paired\n' + devices
+    .map((p) => [peerIdHex(p.peer_id), p.name, p.platform, p.battery, p.charging, p.primary, p.online].join('|'))
+    .join('\n');
+  if (sig === devicesSig) return;
+  devicesSig = sig;
+
+  const countEl = $('tab-devices-count');
+  countEl.hidden = devices.length === 0;
+  setText(countEl, String(devices.length));
+
+  const list = $('device-list');
+  if (devices.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'device-empty';
+    empty.textContent = 'No devices paired yet.';
+    list.replaceChildren(empty);
+    return;
+  }
+  const onlineCount = devices.filter((p) => p.online).length;
+  list.replaceChildren(...devices.map((p) => {
+    const hex = peerIdHex(p.peer_id);
+    const key = (p.platform || '').toLowerCase();
+    const displayName = friendlyDeviceName(p.name, p.platform);
+    return buildDeviceRow({
+      name: displayName,
+      platform: PLATFORM_LABELS[key] || '',
+      platformKey: key,
+      battery: p.online ? p.battery : 255,
+      charging: !!p.charging,
+      connected: !!p.online,
+      primary: onlineCount > 1 && !!p.primary,
+      onUnpair: async () => {
+        if (!hex || !(await confirmUnpair(displayName))) return;
+        try {
+          await invoke('fluxsync_revoke_peer', { peerId: hex });
+          showToast('Device unpaired', 'ok');
+          refreshState();
+        } catch (err) {
+          showToast(`Unpair failed: ${err}`, 'err');
+        }
+      },
+    });
+  }));
 }
 
 async function confirmUnpair(displayName) {
@@ -180,6 +226,12 @@ async function confirmUnpair(displayName) {
 // visible changed, so state pushes never steal focus from a button.
 let devicesSig = null;
 function renderDevices(s) {
+  // A daemon that publishes `paired` lists every paired device, online or
+  // not — the authoritative list. Offline ones can still be unpaired.
+  if (Array.isArray(s.paired)) {
+    renderPaired(s.paired);
+    return;
+  }
   const peers = Array.isArray(s.peers) ? s.peers : [];
   const legacy = peers.length === 0 && isRealPeerName(s.peer_name);
   const sig = peers.length

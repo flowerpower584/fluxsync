@@ -919,6 +919,22 @@ impl App {
             }
             Event::PeerRevoked { peer_id } => {
                 pending_dropped = self.drop_pending_for(*peer_id);
+                // The revoked device is the one the single-peer projection
+                // shows: forget it the way `ManualUnpair` does (history kept).
+                // Left in place, the UI kept "searching for" a device the
+                // user had just unpaired, and 10 minutes later the ghost
+                // watcher took it for a vanished peer and wiped the history.
+                // A different device pairing later still trips the FS-046
+                // swap wipe — `last_paired_peer_id` is untouched.
+                if *peer_id != [0u8; 32] && *peer_id == self.state.peer_id {
+                    self.state.peer_name.clear();
+                    self.state.peer_platform.clear();
+                    self.state.peer_caps.clear();
+                    self.state.peer_id = [0u8; 32];
+                    self.state.trusted_peer_name = None;
+                    self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
+                    self.state.peer_charging = false;
+                }
             }
             _ => {}
         }
@@ -1539,6 +1555,53 @@ mod tests {
         assert!(!app.state.on);
         assert_eq!(app.state.peer_id, [0u8; 32]);
         assert_eq!(app.state.trusted_peer_name, None);
+    }
+
+    /// C6: revoking the device the projection shows forgets it (no
+    /// "searching for" a revoked device, nothing for the ghost watcher to
+    /// time out) but keeps the history, like `ManualUnpair`.
+    #[test]
+    fn revoking_the_projected_peer_clears_projection_keeps_history() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Phone A".into(),
+            },
+            &wall(),
+        );
+        app.handle(Event::HandshakeOk, &wall());
+        app.handle(
+            Event::SetTrustedPeer {
+                name: "Phone A".into(),
+            },
+            &wall(),
+        );
+        app.handle(
+            Event::LocalClipboardChange {
+                hash: [1; 32],
+                kind: Kind::Text,
+                payload: b"keep me".to_vec(),
+                preview: "keep me".into(),
+                sensitive: false,
+                lamport: 1,
+            },
+            &wall(),
+        );
+        let wipe_gen = app.state.vault_wipe_gen;
+
+        // A secondary's revoke leaves the projection alone…
+        app.handle(Event::PeerRevoked { peer_id: [8; 32] }, &wall());
+        assert_eq!(app.state.peer_name, "Phone A");
+
+        // …the projected peer's clears it.
+        app.handle(Event::PeerRevoked { peer_id: [7; 32] }, &wall());
+        assert_eq!(app.state.peer_name, "");
+        assert_eq!(app.state.peer_id, [0u8; 32]);
+        assert_eq!(app.state.trusted_peer_name, None);
+        assert_eq!(app.state.history.len(), 1, "history is kept");
+        assert_eq!(app.state.vault_wipe_gen, wipe_gen, "no vault wipe");
     }
 
     #[test]

@@ -119,6 +119,8 @@ html, body { height: 100%; overflow: hidden; }
   display: flex; align-items: center; justify-content: center;
   color: var(--fg);
 }
+.device-item.is-offline .d-icon { color: var(--subtle); border-color: var(--line-strong); }
+.device-item.is-offline .name { color: var(--muted); }
 .device-item .d-info { flex: 1; min-width: 0; }
 .device-item .name-row { display: flex; align-items: baseline; gap: 10px; }
 .device-item .name { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
