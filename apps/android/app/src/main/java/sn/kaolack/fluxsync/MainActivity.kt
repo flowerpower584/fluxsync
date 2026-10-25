@@ -37,10 +37,11 @@ import sn.kaolack.fluxsync.vm.FluxsyncViewModel
  *     pushed to the peer, and re-checks the clipboard in `onResume`.
  *     Echoes of peer items we just wrote are dropped via
  *     `FluxsyncManager.isRecentPeerClip`; a single copy is pushed once via
- *     `FluxsyncManager.markPushedIfNew`. This is a foreground convenience
- *     path only — the AccessibilityService owns the daemon AND runs the
- *     same clipboard capture in the background, so sync does not depend on
- *     this Activity being alive.
+ *     `FluxsyncManager.markPushedIfNew`, and `onResume` never re-sends a
+ *     clip already synced (`FluxsyncManager.markResumePushIfNew`). This is
+ *     a foreground convenience path only — the AccessibilityService owns
+ *     the daemon AND runs the same clipboard capture in the background, so
+ *     sync does not depend on this Activity being alive.
  *   * **Lifecycle** — the Activity's lifecycleScope unregisters the
  *     listener in `onDestroy`, which the ViewModel can't do (no Context).
  *
@@ -90,8 +91,9 @@ class MainActivity : ComponentActivity() {
         val text = raw.toString()
         if (text.isEmpty()) return@OnPrimaryClipChangedListener
         // #6 echo guard: skip items we just wrote from a peer. A bounded
-        // recency set (not one volatile string) keeps two peer items that
-        // arrive back-to-back both suppressed.
+        // recency map (not one volatile string) keeps two peer items that
+        // arrive back-to-back both suppressed; after the echo window the
+        // same text is a real re-copy and syncs.
         if (FluxsyncManager.isRecentPeerClip(text)) return@OnPrimaryClipChangedListener
         // #5: dedup against the a11y copy detector so one local copy is
         // pushed once, not twice.
@@ -159,15 +161,14 @@ class MainActivity : ComponentActivity() {
         
         // #5: re-check the clipboard on open, but don't re-broadcast a stale
         // local item. onResume fires on every foreground, so an unguarded push
-        // here clobbers the peer with an old clip each time. Skip peer echoes
-        // (isRecentPeerClip) and anything already pushed (markPushedIfNew).
+        // here clobbers the peer with an old clip each time. The listeners'
+        // 5 s echo window doesn't fit here — the clip may be minutes old — so
+        // markResumePushIfNew skips anything already pushed or written from a
+        // peer, whatever its age.
         val clip = clipboard.primaryClip
         if (clip != null && clip.itemCount > 0) {
             val text = clip.getItemAt(0).coerceToText(this)?.toString()
-            if (!text.isNullOrEmpty() &&
-                !FluxsyncManager.isRecentPeerClip(text) &&
-                FluxsyncManager.markPushedIfNew(text)
-            ) {
+            if (!text.isNullOrEmpty() && FluxsyncManager.markResumePushIfNew(text)) {
                 currentVm?.pushText(text)
             }
         }
