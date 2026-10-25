@@ -90,7 +90,11 @@ jobs:
             target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
+      # Build what the tag points to, also on a manual re-run of an
+      # existing tag from a newer workflow.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Install Rust + target
         uses: dtolnay/rust-toolchain@stable
@@ -165,7 +169,9 @@ jobs:
       # macOS builds are not notarized, so the bare .dmg greets users with
       # Gatekeeper's "damaged app" dialog. Replace it with a zip holding the
       # .app plus a self-serve installer that clears quarantine and re-signs
-      # ad-hoc; drop the dmg tauri-action uploaded.
+      # ad-hoc; drop the dmg tauri-action uploaded. The bundler deletes its
+      # intermediate bundle/macos/FluxSync.app once the dmg is built, so the
+      # .app is copied out of the dmg.
       - name: Package macOS zip (replaces dmg)
         if: runner.os == 'macOS'
         env:
@@ -177,10 +183,13 @@ jobs:
             *) arch=x64 ;;
           esac
           ver="${TAG#v}"
-          app="apps/macos-tray/src-tauri/target/${{ matrix.target }}/release/bundle/macos/FluxSync.app"
+          dmg="apps/macos-tray/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/FluxSync_${ver}_${arch}.dmg"
           stage="FluxSync-${ver}-mac-${arch}"
           mkdir "$stage"
-          ditto "$app" "$stage/FluxSync.app"
+          mnt=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
+          ditto "$mnt/FluxSync.app" "$stage/FluxSync.app"
+          hdiutil detach "$mnt"
           install -m 755 "packaging/macos/Install FluxSync.command" \
             "$stage/Install FluxSync.command"
           cp packaging/macos/README-FIRST.txt "$stage/"
@@ -196,7 +205,11 @@ jobs:
     needs: tag
     runs-on: ubuntu-latest
     steps:
+      # Build what the tag points to, also on a manual re-run of an
+      # existing tag from a newer workflow.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - uses: actions/setup-java@v5
         with:
@@ -277,7 +290,10 @@ jobs:
     needs: [desktop, android]
     runs-on: ubuntu-latest
     steps:
+      # The notes come from what the tag points to.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Download release assets
         env:
