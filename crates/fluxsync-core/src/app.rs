@@ -712,7 +712,11 @@ impl App {
                 // repeated `EventId` first — and content seen longer ago is
                 // a genuine re-copy on the peer, applied again (see
                 // `DedupRing::observe_clipboard`).
-                if !self.dedup.observe_clipboard(computed, wall.unix_millis()) {
+                // A resync delivery is catch-up, never a fresh copy: content
+                // already held here (even outside the echo window) is a
+                // duplicate, not something to re-apply or rewrite.
+                let already_held = *resync && self.dedup.contains(&computed);
+                if already_held || !self.dedup.observe_clipboard(computed, wall.unix_millis()) {
                     suppress_action = true;
                 } else if !sensitive {
                     // Record only items the firewall ADMITS. A Block or Defer
@@ -1640,6 +1644,59 @@ mod tests {
             writes(&app.handle(remote("beta"), &at(130_000))),
             "the peer re-copying older content must land here too"
         );
+    }
+
+    /// A resync (catch-up) delivery of content already in history changes
+    /// nothing: it is not a fresh copy, so it must neither re-apply nor
+    /// rewrite the existing row (e.g. flip it to `resync`). Restored rows are
+    /// "fresh" to the echo window unless newest, so this has to be checked
+    /// on its own.
+    #[test]
+    fn resync_delivery_of_held_content_leaves_history_alone() {
+        let item = |text: &str| HistoryItem {
+            kind: Kind::Text,
+            preview: text.into(),
+            time: "12:00".into(),
+            source: crate::state::HistorySource::Remote,
+            sensitive: false,
+            lamport: 1,
+            hash: hex32(DedupRing::hash(text.as_bytes()).as_bytes()),
+            favorite: false,
+            resync: false,
+            source_peer_id: None,
+        };
+        let mut app = boot();
+        app.restore_history(vec![item("newer"), item("held")]);
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Phone".into(),
+            },
+            &wall(),
+        );
+        app.handle(Event::HandshakeOk, &wall());
+        let acts = app.handle(
+            Event::FrameReceivedClipboard {
+                peer_id: [7; 32],
+                hash: *DedupRing::hash(b"held").as_bytes(),
+                kind: Kind::Text,
+                payload: b"held".to_vec(),
+                preview: "held".into(),
+                lamport: 2,
+                sensitive: false,
+                resync: true,
+            },
+            &wall(),
+        );
+        assert!(acts.contains(&Action::DuplicateDropped), "{acts:?}");
+        let previews: Vec<_> = app
+            .state
+            .history
+            .iter()
+            .map(|h| (h.preview.as_str(), h.resync))
+            .collect();
+        assert_eq!(previews, [("newer", false), ("held", false)]);
     }
 
     /// C6: revoking the device the projection shows forgets it (no
