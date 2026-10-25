@@ -151,9 +151,16 @@ const LOW_ORDER_POINTS: [[u8; 32]; 7] = [
 /// the cheap "I forged the URI" attacks where the attacker hands the
 /// user a degenerate key that yields a predictable handshake.
 pub fn validate_peer_pubkey(pubkey: &[u8; 32]) -> Result<(), CryptoError> {
+    // X25519 ignores bit 255 of the u-coordinate (RFC 7748 §5), so each
+    // low-order point also has a twin with that bit set. Compare on the
+    // masked value — as libsodium's `has_small_order` does — or the twins
+    // (e.g. `[0; 31] ++ [0x80]`) slip through and still yield an all-zero
+    // shared secret.
+    let mut masked = *pubkey;
+    masked[31] &= 0x7f;
     let mut bad = subtle::Choice::from(0u8);
     for p in &LOW_ORDER_POINTS {
-        bad |= pubkey.ct_eq(p);
+        bad |= masked.ct_eq(p);
     }
     if bool::from(bad) {
         Err(CryptoError::InvalidPeerPubkey)
@@ -176,6 +183,19 @@ mod tests {
         let mut p = [0u8; 32];
         p[0] = 0x01;
         assert!(validate_peer_pubkey(&p).is_err());
+    }
+
+    #[test]
+    fn low_order_points_with_bit_255_set_rejected() {
+        // Every listed point, with the bit X25519 ignores flipped on.
+        for p in &super::LOW_ORDER_POINTS {
+            let mut twin = *p;
+            twin[31] |= 0x80;
+            assert!(
+                validate_peer_pubkey(&twin).is_err(),
+                "high-bit twin of a low-order point accepted: {twin:02x?}"
+            );
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //!
 //! See `docs/PROTOCOL.md` for the full wire-format specification.
 
+mod cbor_bytes;
 mod codec;
 mod error;
 mod types;
@@ -33,6 +34,13 @@ pub const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 /// so the final datagram (CBOR + Noise overhead ≈ 1.1-1.2 KiB) stays under the
 /// 1500 B Wi-Fi MTU — one lost IP fragment would kill the whole UDP datagram.
 pub const MAX_CHUNK_DATA: usize = 1024;
+
+/// Largest encoded `Frame` that still fits one datagram everywhere:
+/// PROTOCOL.md's 1232 B UDP payload (IPv6 minimum MTU 1280 minus IP/UDP
+/// headers) less the transport envelope (1 type byte, 12-byte nonce,
+/// 16-byte AEAD tag). Senders pick single-frame vs chunked by this, not by
+/// payload length alone — the item header fields ride along too.
+pub const MAX_FRAME_PLAINTEXT: usize = 1232 - 1 - 12 - 16;
 
 /// Hard cap on chunk-count per item — bounds reassembly buffer and refuses
 /// trivial DoS allocations from a malicious peer. 16384 × 1 KiB = 16 MiB,

@@ -118,8 +118,11 @@ pub struct Hello {
 #[serde(deny_unknown_fields)]
 pub struct ClipboardItem {
     pub lamport: u64,
+    #[serde(with = "crate::cbor_bytes::array32")]
     pub hash: [u8; 32],
     pub kind: Kind,
+    /// Encoded as a CBOR byte string (see `cbor_bytes`); arrays still decode.
+    #[serde(with = "crate::cbor_bytes")]
     pub payload: Vec<u8>,
     pub sensitive: bool,
     pub wall_time_ms: u64,
@@ -127,6 +130,7 @@ pub struct ClipboardItem {
     /// `peer_id` / `DeviceId` bytes. With `event_seq` it forms the
     /// item's `EventId`, the mesh anti-loop identity that is independent
     /// of `hash` (a relay quotes the original origin, not its own id).
+    #[serde(with = "crate::cbor_bytes::array32")]
     pub origin: [u8; 32],
     /// Origin device's strictly-increasing per-item sequence number.
     pub event_seq: u64,
@@ -150,9 +154,12 @@ pub struct Heartbeat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Chunk {
+    #[serde(with = "crate::cbor_bytes::array32")]
     pub item_id: [u8; 32],
     pub idx: u16,
     pub total: u16,
+    /// Encoded as a CBOR byte string (see `cbor_bytes`); arrays still decode.
+    #[serde(with = "crate::cbor_bytes")]
     pub data: Vec<u8>,
 }
 
@@ -160,6 +167,7 @@ pub struct Chunk {
 #[serde(deny_unknown_fields)]
 pub struct Ack {
     pub lamport: u64,
+    #[serde(with = "crate::cbor_bytes::array32")]
     pub hash: [u8; 32],
 }
 
@@ -171,6 +179,7 @@ pub struct Ack {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Nak {
+    #[serde(with = "crate::cbor_bytes::array32")]
     pub item_id: [u8; 32],
     pub want_header: bool,
     pub missing: Vec<u16>,

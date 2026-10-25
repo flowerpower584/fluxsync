@@ -4071,3 +4071,30 @@ async fn rekey_watchdog_rekeys_a_secondary_session() {
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(1), watchdog).await;
 }
+
+/// Every frame `build_item_frames` emits must fit one sealed datagram:
+/// a payload just under `MAX_CHUNK_DATA` used to go out as a single frame
+/// that overflowed the MTU budget once the item header rode along.
+#[test]
+fn item_frames_always_fit_one_datagram() {
+    for len in [0, 1, 500, 1000, 1023, 1024, 1025, 3000, 10_000] {
+        let payload = vec![0xA5; len];
+        let frames = super::build_item_frames(
+            u64::MAX,
+            [0xCD; 32],
+            fluxsync_proto::Kind::Text,
+            &payload,
+            false,
+            [0xEF; 32],
+            u64::MAX,
+        );
+        assert!(!frames.is_empty(), "{len}: no frames");
+        for f in &frames {
+            assert!(
+                f.len() <= fluxsync_proto::MAX_FRAME_PLAINTEXT,
+                "{len}-byte payload produced a {}-byte frame",
+                f.len()
+            );
+        }
+    }
+}

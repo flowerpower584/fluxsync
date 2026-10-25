@@ -33,7 +33,10 @@ pub(super) fn build_item_frames(
     event_seq: u64,
 ) -> Vec<Vec<u8>> {
     let mut frames: Vec<Vec<u8>> = Vec::new();
-    if payload.len() <= MAX_CHUNK_DATA {
+    // Single frame only when the whole encoded frame — payload plus the
+    // item header — fits one datagram; a payload just under
+    // `MAX_CHUNK_DATA` can still overflow it once the header rides along.
+    let single = if payload.len() <= MAX_CHUNK_DATA {
         let item = ClipboardItem {
             lamport,
             hash,
@@ -44,14 +47,21 @@ pub(super) fn build_item_frames(
             origin,
             event_seq,
         };
-        if let Ok(bytes) = fluxsync_proto::encode(&Frame {
+        match fluxsync_proto::encode(&Frame {
             version: PROTOCOL_VERSION,
             msg: Msg::ClipboardItem(item),
         }) {
-            frames.push(bytes);
-        } else {
-            tracing::error!("build_item_frames: CBOR encode failed");
+            Ok(bytes) => Some(bytes).filter(|b| b.len() <= fluxsync_proto::MAX_FRAME_PLAINTEXT),
+            Err(e) => {
+                tracing::error!(error = %e, "build_item_frames: CBOR encode failed");
+                return frames;
+            }
         }
+    } else {
+        None
+    };
+    if let Some(bytes) = single {
+        frames.push(bytes);
     } else {
         // Large payload: a header frame (empty payload), then one per chunk.
         let header = ClipboardItem {
