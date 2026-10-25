@@ -35,17 +35,23 @@ pub(super) async fn gate_outbound(
         .collect()
 }
 
-/// FIX3 (synchronous security-wipe disk clear): if `app`'s `vault_wipe_gen`
-/// has advanced past `*last_wipe_gen` since the last call, synchronously
-/// clear the resync outbox — both the real `SharedOutbox` and its
-/// `Ask`-staged entries (FIX2) — and the on-disk vault, AWAITING both
-/// before returning. Returns whether a wipe actually ran.
+/// FIX3 (synchronous security-wipe mirror): if `app`'s `vault_wipe_gen`
+/// has advanced past `*last_wipe_gen` since the last call, make everything
+/// outside the in-memory history hold exactly what the wipe kept there —
+/// nothing for an untrusted-peer or peer-swap wipe, the favorites for a ghost
+/// timeout — AWAITING it before returning: the resync outbox (and its
+/// `Ask`-staged entries) and in-flight frames are dropped, the image cache
+/// keeps only the kept rows' bytes, and the on-disk vault is deleted, or
+/// atomically rewritten with the kept rows when there are any (never "delete
+/// then rewrite", which a crash in between would turn into losing them).
+/// `vault` is the keystore dir and the at-rest key. Returns whether a wipe
+/// actually ran.
 ///
 /// Callers MUST run this after `app.handle` but before the resulting
 /// `Action`s are `dispatch`ed — `dispatch`'s `Action::EmitState` is what
 /// publishes the new state to IPC/watch subscribers, and this must finish
 /// first so nobody can observe "history cleared" while the outbox or
-/// `history.enc` still hold the wiped secret. See the call site in `run()`'s
+/// `history.enc` still hold a wiped secret. See the call site in `run()`'s
 /// main event loop.
 ///
 /// Factored out of that loop (rather than left inline) so it is
@@ -57,13 +63,14 @@ pub(super) async fn sync_security_wipe_if_needed(
     outbox: &SharedOutbox,
     outbox_stage: &PendingOutboxStage,
     inflight: &InflightMap,
-    keystore_dir: Option<&PathBuf>,
+    vault: Option<(&PathBuf, &[u8; 32])>,
 ) -> bool {
     let gen_now = app.snapshot().vault_wipe_gen;
     if gen_now == *last_wipe_gen {
         return false;
     }
     *last_wipe_gen = gen_now;
+    let kept = app.snapshot().history.clone();
     outbox.lock().await.clear_all();
     outbox_stage.lock().await.clear();
     // Bug #9: a sensitive item's outbound frames are tracked in `inflight`
@@ -71,26 +78,48 @@ pub(super) async fn sync_security_wipe_if_needed(
     // gated), so without this a wiped item's plaintext frames survive the
     // wipe in RAM and keep retransmitting to its targets.
     inflight.lock().await.clear();
-    // L1 fix: a security wipe must also purge any inbound image bytes
-    // stashed in `IMAGE_CACHE` (`WriteClipboard`'s image handler, every
-    // platform) — a process-wide store with no other trigger to clear it,
-    // so a wiped peer's approved-but-not-yet-fetched image could otherwise
-    // still be pulled via `CmdOp::FetchItem` after the rest of the vault is
-    // gone.
+    // L1 fix: a security wipe must also purge inbound image bytes stashed in
+    // `IMAGE_CACHE` (`WriteClipboard`'s image handler, every platform) — a
+    // process-wide store with no other trigger to clear it, so a wiped
+    // image could otherwise still be pulled via `CmdOp::FetchItem`. Only a
+    // kept row's bytes stay, so a kept (favorite) image still previews and
+    // copies.
     if let Ok(mut g) = image_cache().lock() {
-        g.clear();
+        g.retain(|(hash, _)| kept.iter().any(|h| &h.hash == hash));
     }
-    if let Some(dir) = keystore_dir {
-        let dir = dir.clone();
-        match tokio::task::spawn_blocking(move || history_store::clear(&dir)).await {
+    if let Some((dir, key)) = vault {
+        let (dir, key) = (dir.clone(), zeroize::Zeroizing::new(*key));
+        let result = tokio::task::spawn_blocking(move || {
+            if kept.is_empty() {
+                return history_store::clear(&dir);
+            }
+            let now = now_ms();
+            let entries: Vec<VaultEntry> = kept
+                .into_iter()
+                .map(|item| VaultEntry {
+                    item,
+                    created_ms: now,
+                })
+                .collect();
+            history_store::save(
+                &dir,
+                &key,
+                &entries,
+                now,
+                history_store::DEFAULT_TTL_SECS,
+                history_store::DEFAULT_DISK_CAP,
+            )
+        })
+        .await;
+        match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::warn!(
                 error = %e,
-                "synchronous security-wipe disk clear failed; persister will retry"
+                "synchronous security-wipe disk mirror failed; persister will retry"
             ),
             Err(e) => tracing::warn!(
                 error = %e,
-                "synchronous security-wipe disk clear task join failed"
+                "synchronous security-wipe disk mirror task join failed"
             ),
         }
     }

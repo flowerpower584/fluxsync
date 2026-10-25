@@ -308,6 +308,7 @@ pub async fn run_rekey_initiator(
         return Ok(());
     }
     transport.set_peer_info(peer_id, peer_addr).await;
+    transport.metrics.lock().await.on_rekey();
     crate::driver::persist_last_addr(
         keystore_dir.as_deref(),
         &transport,
@@ -392,6 +393,10 @@ pub async fn run_responder(
     } else {
         None
     };
+    // This handshake replaces a session that is live right now (a rekey, or
+    // the peer re-handshaking over it) — counted as a rekey, not a reconnect.
+    let replaces_live = replacing_live_session
+        || (secondary_generation.is_some() && transport.has_session_for(peer_id).await);
 
     // T1: each msg1 answers once — a replay of a trusted peer's earlier msg1
     // must not replace its live session (see `AnsweredInits`). Recorded only
@@ -584,6 +589,9 @@ pub async fn run_responder(
         return Ok(());
     }
     transport.set_peer_info(peer_id, from).await;
+    if replaces_live {
+        transport.metrics.lock().await.on_rekey();
+    }
     // last_addr persistence + redial: covers both the TOFU
     // and already-trusted branches above in one place, since both funnel
     // through this same post-install point.
@@ -597,9 +605,8 @@ pub async fn run_responder(
     // being Linked, so re-firing it would surface a redundant "Peer identity
     // confirmed" log/EmitState for what must stay an invisible rotation.
     // `HandshakeOk` still fires unconditionally: in `Phase::Linked` it is a
-    // no-op in the FSM (see `fsm::transition`'s fallback arm) but keeps
-    // `MetricsTracker::on_handshake_ok` bookkeeping consistent, same as any
-    // other completed handshake.
+    // no-op in the FSM (see `fsm::transition`'s fallback arm), and the
+    // driver greets the new session with our `Hello` on it.
     if !replacing_live_session {
         let _ = event_tx.try_send(Event::PeerSeen {
             peer_id,

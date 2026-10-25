@@ -14,11 +14,10 @@
 //! 1. Continuity: clipboard items pushed before, during, and after the
 //!    forced rekey all arrive in the peer's history exactly once.
 //! 2. Invisibility: `phase` never leaves `"linked"` on either daemon while
-//!    the rekey happens (no visible disconnect/reconnect flap), and the
-//!    handshake bookkeeping (`ConnectionMetrics.reconnects`, which both
-//!    the rekey initiator and the rekey responder bump via
-//!    `Event::HandshakeOk`) shows a second completed handshake landed on
-//!    both sides. `session_generation`'s own advance/CAS mechanics are
+//!    the rekey happens (no visible disconnect/reconnect flap), both sides
+//!    count the rekey (`ConnectionMetrics.rekeys`), and neither counts it
+//!    as a reconnect (`ConnectionMetrics.reconnects` stays at 1).
+//!    `session_generation`'s own advance/CAS mechanics are
 //!    covered directly by unit tests in `transport.rs` (the daemon does
 //!    not expose the raw counter over IPC).
 
@@ -114,6 +113,10 @@ async fn reconnects(ipc: &PathBuf) -> u64 {
         .metrics
         .as_ref()
         .map_or(0, |m| m.reconnects)
+}
+
+async fn rekeys(ipc: &PathBuf) -> u64 {
+    status(ipc).await.metrics.as_ref().map_or(0, |m| m.rekeys)
 }
 
 async fn push(ipc: &PathBuf, text: &str) {
@@ -246,25 +249,35 @@ async fn rekey_mid_traffic_loses_no_items_and_stays_invisible() {
 
     // ── 4. cross the forced age threshold, push "during" right as the
     //    rekey watchdog is expected to fire, then wait for BOTH daemons to
-    //    show a second completed handshake (reconnects: 1 -> 2) — the
-    //    initiator side bumps it via `run_rekey_initiator`'s
-    //    `Event::HandshakeOk`, the responder side via `run_responder`'s
-    //    (pre-existing, unconditional) one. Neither side's identity as
-    //    initiator is deterministic from the test's point of view (it
-    //    depends on the two randomly generated peer_ids), so this waits
-    //    on both symmetrically instead of assuming which one acts.
+    //    count it (`rekeys`: the initiator in `run_rekey_initiator`, the
+    //    responder when its install replaced the live session). Neither
+    //    side's identity as initiator is deterministic from the test's
+    //    point of view (it depends on the two randomly generated peer_ids),
+    //    so this waits on both symmetrically instead of assuming which one
+    //    acts.
     tokio::time::sleep(Duration::from_millis(FORCED_REKEY_AGE_MS)).await;
     push(&ipc_a, "during-rekey").await;
 
     let rekeyed = wait_until(Duration::from_secs(5), || async {
-        reconnects(&ipc_a).await >= 2 && reconnects(&ipc_b).await >= 2
+        rekeys(&ipc_a).await >= 1 && rekeys(&ipc_b).await >= 1
     })
     .await;
     assert!(
         rekeyed,
-        "planned rekey did not complete on both sides within 5s (reconnects A={}, B={})",
+        "planned rekey did not complete on both sides within 5s (rekeys A={}, B={})",
+        rekeys(&ipc_a).await,
+        rekeys(&ipc_b).await
+    );
+    // Invisible in the diagnostics too: a rekey is not a reconnect.
+    assert_eq!(
         reconnects(&ipc_a).await,
-        reconnects(&ipc_b).await
+        1,
+        "a rekey counted as a reconnect on A"
+    );
+    assert_eq!(
+        reconnects(&ipc_b).await,
+        1,
+        "a rekey counted as a reconnect on B"
     );
 
     // ── 5. push "after" once the rekey has landed ──

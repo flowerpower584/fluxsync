@@ -78,10 +78,12 @@ pub struct State {
     #[serde(default)]
     pub pending: Vec<PendingItem>,
     /// Monotonic counter bumped on every *security* history wipe
-    /// (untrusted-peer-seen, ghost-timeout, FS-046 peer-swap). The daemon's
-    /// vault persister watches it: a change means "also wipe the on-disk
-    /// vault and forget cached favorites" so a favorited secret cannot be
-    /// re-appended and the encrypted file cannot outlive the in-memory wipe.
+    /// (untrusted-peer-seen, ghost-timeout, FS-046 peer-swap). The daemon
+    /// watches it: a change means "make the on-disk vault (and the image
+    /// cache) hold exactly what the in-memory history kept" — nothing for
+    /// the untrusted-peer and peer-swap wipes, the favorites for a ghost
+    /// timeout — so nothing the wipe dropped can be re-appended or outlive
+    /// it on disk.
     /// `#[serde(skip)]` keeps it out of the IPC JSON — it is an in-process
     /// signal only, so the macOS/Android wire shape is unchanged.
     #[serde(skip)]
@@ -197,6 +199,9 @@ pub struct ConnectionMetrics {
     pub last_rtt_ms: u32,
     pub rtt_p99_ms: u32,
     pub network_changes: u64,
+    /// Times the link came (back) up: the primary link going from down to
+    /// linked. A mesh secondary joining or a rekey under a live link is not
+    /// a reconnect.
     pub reconnects: u64,
     pub decrypt_failures: u64,
     /// DIR-P1-09: content-hash dedup drops (an echo of our own local copy,
@@ -227,6 +232,12 @@ pub struct ConnectionMetrics {
     /// clipboard; see `Action::ResyncApplySuppressed`.
     #[serde(default)]
     pub resync_applies_suppressed: u64,
+    /// Sessions whose keys were replaced under a live link — planned rekeys
+    /// (DIR-P2-03), or a peer re-handshaking over its still-live session.
+    /// Invisible to the user: never a reconnect, and the session uptime
+    /// keeps running.
+    #[serde(default)]
+    pub rekeys: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

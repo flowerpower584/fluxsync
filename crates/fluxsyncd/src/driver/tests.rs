@@ -2,6 +2,10 @@ use super::load_trusted_peers;
 use crate::handshake;
 use crate::keystore::{save_peers, StoredPeer};
 
+/// The image cache is process-global: tests that fill, wipe or inspect it
+/// hold this so parallel tests can't clear each other's entries mid-test.
+static IMAGE_CACHE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // ── Pre-`Shared` call shapes ───────────────────────────────────────────
 // Most tests here predate `Shared` and hand each driver handle over one by
 // one. These adapters fold those arguments into a `Shared` — cloning the very
@@ -342,6 +346,7 @@ async fn l4_persist_last_addr_filters_bogus_address_classes() {
 /// action) to keep the test focused on `purge_cached_images` alone.
 #[test]
 fn clear_history_purges_cached_images_for_cleared_hashes() {
+    let _cache = IMAGE_CACHE_TEST_LOCK.blocking_lock();
     use super::{image_cache, lookup_cached_image, purge_cached_images};
 
     let keep = "bb".repeat(32);
@@ -579,6 +584,7 @@ async fn c2_persister_clears_disk_vault_and_favorites_on_wipe_gen_bump() {
 /// gen change must touch neither.
 #[tokio::test]
 async fn sync_security_wipe_if_needed_clears_outbox_and_disk_synchronously() {
+    let _cache = IMAGE_CACHE_TEST_LOCK.lock().await;
     use super::{sync_security_wipe_if_needed, Outbox, OutboxEntry, PendingOutboxStage};
     use crate::history_store;
     use fluxsync_core::{App, Config, Event, HistoryItem, HistorySource, StubWallClock};
@@ -670,7 +676,7 @@ async fn sync_security_wipe_if_needed_clears_outbox_and_disk_synchronously() {
         &outbox,
         &outbox_stage,
         &inflight,
-        Some(&dir_buf),
+        Some((&dir_buf, &key)),
     )
     .await;
     assert!(!wiped, "must not fire when vault_wipe_gen hasn't advanced");
@@ -707,7 +713,7 @@ async fn sync_security_wipe_if_needed_clears_outbox_and_disk_synchronously() {
         &outbox,
         &outbox_stage,
         &inflight,
-        Some(&dir_buf),
+        Some((&dir_buf, &key)),
     )
     .await;
     assert!(wiped, "must fire once vault_wipe_gen advances");
@@ -739,7 +745,7 @@ async fn sync_security_wipe_if_needed_clears_outbox_and_disk_synchronously() {
         &outbox,
         &outbox_stage,
         &inflight,
-        Some(&dir_buf),
+        Some((&dir_buf, &key)),
     )
     .await;
     assert!(
@@ -755,6 +761,7 @@ async fn sync_security_wipe_if_needed_clears_outbox_and_disk_synchronously() {
 /// same as `clear_history_purges_cached_images_for_cleared_hashes`.
 #[tokio::test]
 async fn sync_security_wipe_if_needed_clears_image_cache() {
+    let _cache = IMAGE_CACHE_TEST_LOCK.lock().await;
     use super::{
         image_cache, lookup_cached_image, sync_security_wipe_if_needed, Outbox, PendingOutboxStage,
     };
@@ -818,6 +825,7 @@ async fn sync_security_wipe_if_needed_clears_image_cache() {
 /// gate), and a security wipe purges whatever was cached before it.
 #[tokio::test]
 async fn write_clipboard_populates_desktop_image_cache_gated_by_sensitivity_and_wipe() {
+    let _cache = IMAGE_CACHE_TEST_LOCK.lock().await;
     use super::{
         encode_png, image_cache, image_rgba_hash, lookup_cached_image,
         sync_security_wipe_if_needed, Outbox, PendingOutboxStage,
@@ -4452,4 +4460,150 @@ async fn close_session_spares_a_different_peer_now_in_the_primary_slot() {
         transport.has_session_for(newcomer.peer_id()).await,
         "the newcomer's session was closed on behalf of the old primary"
     );
+}
+
+/// A ghost-timeout wipe keeps the favorites — in memory (core), and so on
+/// disk and in the image cache too: the vault is atomically rewritten with
+/// exactly the kept rows (never deleted then rewritten), and only a kept
+/// image keeps its bytes. Everything else the wipe dropped is gone.
+#[tokio::test]
+async fn ghost_wipe_mirror_keeps_favorites_on_disk_and_in_image_cache() {
+    use super::{image_cache, lookup_cached_image, sync_security_wipe_if_needed, Outbox};
+    use crate::history_store::{self, VaultEntry};
+    use fluxsync_core::{App, Config, Event, HistoryItem, HistorySource, Kind, StubWallClock};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let _cache = IMAGE_CACHE_TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir_buf = dir.path().to_path_buf();
+    let key = [0x33u8; 32];
+    let row = |preview: &str, hash: &str, kind: Kind, favorite: bool| HistoryItem {
+        kind,
+        preview: preview.into(),
+        time: "12:00".into(),
+        source: HistorySource::Remote,
+        sensitive: false,
+        lamport: 1,
+        hash: hash.into(),
+        favorite,
+        resync: false,
+        source_peer_id: None,
+    };
+    let (pinned_img, plain_img) = ("aa".repeat(32), "bb".repeat(32));
+    let history = vec![
+        row("pinned text", &"cc".repeat(32), Kind::Text, true),
+        row("plain text", &"dd".repeat(32), Kind::Text, false),
+        row("pinned image", &pinned_img, Kind::Image, true),
+        row("plain image", &plain_img, Kind::Image, false),
+    ];
+    let entries: Vec<VaultEntry> = history
+        .iter()
+        .map(|item| VaultEntry {
+            item: item.clone(),
+            created_ms: 1_000,
+        })
+        .collect();
+    history_store::save(&dir_buf, &key, &entries, 1_000, 3_600, 100).expect("seed vault");
+    {
+        let mut g = image_cache().lock().unwrap();
+        g.clear();
+        g.push_back((pinned_img.clone(), vec![1, 2, 3]));
+        g.push_back((plain_img.clone(), vec![4, 5, 6]));
+    }
+
+    let mut app = App::new(Config::default());
+    app.restore_history(history);
+    let mut last_wipe_gen = app.snapshot().vault_wipe_gen;
+    app.handle(Event::GhostTimeout, &StubWallClock::new("12:00", 1_000));
+
+    let outbox = Arc::new(Mutex::new(Outbox::new()));
+    let outbox_stage: super::PendingOutboxStage = Arc::new(Mutex::new(HashMap::new()));
+    let inflight: super::InflightMap = Arc::new(Mutex::new(HashMap::new()));
+    let wiped = sync_security_wipe_if_needed(
+        &app,
+        &mut last_wipe_gen,
+        &outbox,
+        &outbox_stage,
+        &inflight,
+        Some((&dir_buf, &key)),
+    )
+    .await;
+    assert!(wiped);
+
+    let on_disk: Vec<String> = history_store::load(&dir_buf, &key, super::now_ms(), 3_600)
+        .expect("vault still readable")
+        .into_iter()
+        .map(|e| e.item.preview)
+        .collect();
+    assert_eq!(on_disk, ["pinned text", "pinned image"]);
+    assert!(
+        lookup_cached_image(&pinned_img).is_some(),
+        "a kept image keeps its bytes"
+    );
+    assert!(
+        lookup_cached_image(&plain_img).is_none(),
+        "a wiped image's bytes are gone"
+    );
+    image_cache().lock().unwrap().clear();
+}
+
+/// The persister's backstop path agrees: on a wipe that kept rows it
+/// replaces the vault with them in one atomic save instead of deleting it.
+#[tokio::test]
+async fn persister_wipe_with_kept_rows_rewrites_the_vault() {
+    use super::{persist_history_change, BackoffMap, DiscoveryCache, VaultCtx};
+    use crate::history_store::{self, VaultEntry};
+    use fluxsync_core::{HistoryItem, HistorySource, Kind};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let key = zeroize::Zeroizing::new([0x44u8; 32]);
+    let row = |preview: &str, hash: &str, favorite: bool| HistoryItem {
+        kind: Kind::Text,
+        preview: preview.into(),
+        time: "12:00".into(),
+        source: HistorySource::Local,
+        sensitive: false,
+        lamport: 1,
+        hash: hash.into(),
+        favorite,
+        resync: false,
+        source_peer_id: None,
+    };
+    let before = vec![
+        row("pinned", &"11".repeat(32), true),
+        row("plain", &"22".repeat(32), false),
+    ];
+    let entries: Vec<VaultEntry> = before
+        .iter()
+        .map(|item| VaultEntry {
+            item: item.clone(),
+            created_ms: 1_000,
+        })
+        .collect();
+    history_store::save(dir.path(), &key, &entries, 1_000, 3_600, 100).expect("seed");
+    let mut ctx = VaultCtx {
+        dir: dir.path().to_path_buf(),
+        key: key.clone(),
+        last: before.clone(),
+        entries,
+    };
+    let disc_cache: DiscoveryCache = Arc::new(Mutex::new(HashMap::new()));
+    let backoff: BackoffMap = Arc::new(Mutex::new(HashMap::new()));
+    let mut last_wipe_gen = 0;
+
+    let kept = vec![before[0].clone()];
+    persist_history_change(&mut ctx, &mut last_wipe_gen, kept, 1, &disc_cache, &backoff).await;
+
+    assert_eq!(last_wipe_gen, 1, "the wipe is done once the rewrite lands");
+    let on_disk: Vec<String> = history_store::load(dir.path(), &key, super::now_ms(), 3_600)
+        .expect("vault readable")
+        .into_iter()
+        .map(|e| e.item.preview)
+        .collect();
+    assert_eq!(on_disk, ["pinned"]);
 }

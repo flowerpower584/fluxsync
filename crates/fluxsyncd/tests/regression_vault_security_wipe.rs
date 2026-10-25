@@ -154,8 +154,10 @@ fn fav_history(hash: &str) -> Vec<HistoryItem> {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// TEST 1 (REAL core): every security-wipe trigger clears history AND bumps
-// `vault_wipe_gen`. ManualUnpair (control) keeps history and does NOT bump.
+// TEST 1 (REAL core): every security-wipe trigger trims history AND bumps
+// `vault_wipe_gen` — UntrustedPeerSeen and the FS-046 swap to nothing, the
+// GhostTimeout to the favorites. ManualUnpair (control) keeps history and
+// does NOT bump.
 // The bumped generation is exactly what the daemon's vault persister watches
 // to delete the on-disk vault.
 // ───────────────────────────────────────────────────────────────────────────
@@ -192,22 +194,37 @@ fn security_wipe_clears_history_and_bumps_vault_wipe_gen() {
         );
     }
 
-    // ── GhostTimeout while NOT Linked (fresh App is Idle): security wipe. ──
+    // ── GhostTimeout while NOT Linked (fresh App is Idle): wipe that keeps
+    //    the favorites — a device that has been away is no security event,
+    //    and the user pinned those to keep them. ──
     {
         let mut app = App::new(Config::default());
-        app.restore_history(fav_history("h2"));
+        let mut items = fav_history("h2");
+        let mut plain = items[0].clone();
+        plain.preview = "not pinned".into();
+        plain.hash = "h2b".into();
+        plain.favorite = false;
+        items.push(plain);
+        app.restore_history(items);
         let gen0 = app.snapshot().vault_wipe_gen;
 
         app.handle(Event::GhostTimeout, &wall);
 
-        assert!(
-            app.snapshot().history.is_empty(),
-            "GhostTimeout (unlinked) must clear in-memory history"
+        let kept: Vec<_> = app
+            .snapshot()
+            .history
+            .iter()
+            .map(|h| h.preview.as_str())
+            .collect();
+        assert_eq!(
+            kept,
+            [SECRET],
+            "GhostTimeout (unlinked) must drop everything but the favorites"
         );
         assert_eq!(
             app.snapshot().vault_wipe_gen,
             gen0 + 1,
-            "GhostTimeout (unlinked) must bump vault_wipe_gen"
+            "GhostTimeout (unlinked) must bump vault_wipe_gen so disk follows"
         );
     }
 
@@ -268,7 +285,7 @@ fn security_wipe_clears_history_and_bumps_vault_wipe_gen() {
         );
     }
 
-    println!("TEST 1: all 3 security triggers wipe + bump; ManualUnpair control keeps history.");
+    println!("TEST 1: all 3 security triggers wipe + bump (ghost keeps favorites); ManualUnpair control keeps history.");
 }
 
 // ───────────────────────────────────────────────────────────────────────────

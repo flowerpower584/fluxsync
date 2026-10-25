@@ -61,6 +61,13 @@ fix.**
   no resync with it, and its pairing confirmation could wait forever.
 - Revoking the only linked device left it on screen as "Searching for…",
   and ten minutes later the ghost timeout wiped the whole history.
+- When the linked device has been away for ten minutes, the history wipe
+  now keeps your favorites (in memory, on disk and their image bytes);
+  the vault is rewritten atomically with what is kept. The wipes for an
+  untrusted key or a different device pairing still take everything.
+- Connection diagnostics: a second device joining, or a session rekey,
+  no longer counts as a reconnect or resets the session uptime; rekeys
+  have their own `rekeys` counter.
 - Two items arriving back to back could land on the clipboard in the
   wrong order, leaving the older one.
 - A 1 KiB text item, and every full image chunk, exceeded the datagram

@@ -60,50 +60,56 @@ pub(super) async fn persist_history_change(
     disc_cache: &DiscoveryCache,
     backoff: &BackoffMap,
 ) {
-    // A security wipe (untrusted-peer, ghost-timeout, peer-swap) cleared
-    // the in-memory history for safety; mirror it on disk. Delete the
-    // encrypted vault and forget cached favorites so a pinned secret can't
-    // be re-appended by rebuild() and the file can't outlive the wipe.
+    // A security wipe (untrusted-peer, ghost-timeout, peer-swap) trimmed the
+    // in-memory history — to nothing, or to the favorites for a ghost
+    // timeout. Mirror it on disk: forget the cached entries so rebuild()
+    // can't re-append anything the wipe dropped, then either delete the
+    // vault (nothing kept) or let the save below atomically replace it with
+    // what was kept. Deleting first and rewriting after would lose the kept
+    // rows to a crash in between.
     //
     // FIX3: this is now belt-and-braces. The main event loop (see the
     // `vault_wipe_gen` before/after check around `Some(event) =
-    // event_rx.recv()` in `run()`) already performs this exact disk clear
-    // SYNCHRONOUSLY, inline, before the wiping event's new state is even
-    // published to subscribers — this async path only re-runs the same
-    // (idempotent) clear as a backstop. CORRECTION to a previous version of
-    // this comment: a crash landing in the gap between the in-memory wipe
-    // and either clear reaching disk is NOT auto-healed on the next boot —
-    // boot only loads+restores whatever `history.enc` exists (see `run()`'s
-    // vault rehydrate, well before `initial_wipe_gen` is even seeded) and
-    // never re-wipes it, so a stray file from that gap survives until some
-    // later, unrelated wipe trigger clears it. Residual, low-severity (the
-    // user's own secret, on the user's own device), and now far less likely
-    // to matter thanks to the synchronous path above.
+    // event_rx.recv()` in `run()`) already mirrors the wipe to disk
+    // SYNCHRONOUSLY, before the wiping event's new state is even published
+    // to subscribers (`sync_security_wipe_if_needed`) — this async path only
+    // re-runs the same (idempotent) mirror as a backstop. A crash landing in
+    // the gap between the in-memory wipe and either mirror reaching disk is
+    // NOT auto-healed on the next boot — boot only loads+restores whatever
+    // `history.enc` exists and never re-wipes it, so a stray file from that
+    // gap survives until some later wipe. Residual, low-severity (the user's
+    // own data, on the user's own device), and now far less likely to matter
+    // thanks to the synchronous path.
+    let mut wipe_done_by_save = false;
     if wipe_gen != *last_wipe_gen {
         ctx.entries.clear();
         // DIR-P2-04a: a security wipe means this peer relationship is no
         // longer trusted; the mDNS discovery cache still holds its
         // pubkey, name, addrs, and pairing PIN from before the wipe.
         // Purge it too — eagerly, since an in-memory clear cannot fail,
-        // rather than gating it on the disk clear below.
+        // rather than gating it on the disk mirror below.
         disc_cache.lock().await.clear();
         // DIR-P1-02: same rationale — drop every peer's backoff timer.
         backoff.lock().await.clear();
-        let dir = ctx.dir.clone();
-        match tokio::task::spawn_blocking(move || history_store::clear(&dir)).await {
-            // Only advance past this generation once the file is actually
-            // gone; on failure keep last_wipe_gen so the next state publish
-            // re-attempts the clear instead of permanently losing the wipe.
-            Ok(Ok(())) => *last_wipe_gen = wipe_gen,
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "vault security wipe failed; will retry on next change");
+        if history.is_empty() {
+            let dir = ctx.dir.clone();
+            match tokio::task::spawn_blocking(move || history_store::clear(&dir)).await {
+                // Only advance past this generation once the file is actually
+                // gone; on failure keep last_wipe_gen so the next state
+                // publish re-attempts it instead of permanently losing the wipe.
+                Ok(Ok(())) => *last_wipe_gen = wipe_gen,
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "vault security wipe failed; will retry on next change");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "vault security wipe task join failed; will retry on next change");
+                }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "vault security wipe task join failed; will retry on next change");
-            }
+        } else {
+            wipe_done_by_save = true;
         }
-        // Force the post-wipe history (empty, or freshly-started for a
-        // peer-swap) to be re-persisted below instead of short-circuiting.
+        // Force the post-wipe history to be re-persisted below instead of
+        // short-circuiting.
         ctx.last = Vec::new();
     }
     if history == ctx.last {
@@ -129,6 +135,9 @@ pub(super) async fn persist_history_change(
         Ok(Ok(())) => {
             ctx.entries = entries;
             ctx.last = history;
+            if wipe_done_by_save {
+                *last_wipe_gen = wipe_gen;
+            }
         }
         Ok(Err(e)) => tracing::warn!(error = %e, "vault persist failed"),
         Err(e) => tracing::warn!(error = %e, "vault persist task join failed"),

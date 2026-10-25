@@ -200,6 +200,11 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // *before* the first snapshot, so every consumer sees the restored
     // list immediately. Best-effort: a load failure (wrong identity,
     // tampered file) logs and starts empty rather than aborting boot.
+    // The at-rest key, kept for the event loop's synchronous security-wipe
+    // mirror, which rewrites the vault with whatever a wipe keeps.
+    let vault_key = keystore_dir
+        .as_ref()
+        .map(|_| identity.derive_at_rest_key(history_store::AT_REST_CONTEXT));
     let vault: Option<(PathBuf, zeroize::Zeroizing<[u8; 32]>, Vec<VaultEntry>)> = if let Some(dir) =
         keystore_dir.as_ref()
     {
@@ -801,9 +806,6 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
             biased;
             () = shutdown.cancelled() => break,
             Some(event) = event_rx.recv() => {
-                if let Event::HandshakeOk = event {
-                    metrics.lock().await.on_handshake_ok();
-                }
                 if let Event::BatteryChangedSelf { level, charging } = &event {
                     shared.self_batt_level.store(*level, std::sync::atomic::Ordering::Relaxed);
                     shared.self_batt_charging.store(*charging, std::sync::atomic::Ordering::Relaxed);
@@ -818,7 +820,15 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                         transport.secondary_liveness().await.into_iter().map(|(id, _)| id),
                     );
                 }
+                let link_was_up = link_is_up(&app);
                 let actions = app.handle(event.clone(), &*wall_clock);
+                // Session uptime and `reconnects` track the primary link
+                // coming (back) up — not every completed handshake: a mesh
+                // secondary joining or a rekey under a live link reached
+                // here too and reset them.
+                if !link_was_up && link_is_up(&app) {
+                    metrics.lock().await.on_link_up();
+                }
                 if !actions.is_empty() {
                     tracing::debug!(?event, ?actions, phase=?app.snapshot().phase, "FSM transition");
                 }
@@ -848,7 +858,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                     &outbox,
                     &outbox_stage,
                     &inflight,
-                    keystore_dir.as_ref(),
+                    keystore_dir.as_ref().zip(vault_key.as_deref()),
                 )
                 .await;
                 // Bug #9: the silent-secondary-timeout path is the other
@@ -965,4 +975,12 @@ fn spawn_clipboard_writer(disable_clipboard: bool) -> Option<ClipboardWriter> {
     }
     let _ = disable_clipboard;
     None
+}
+
+/// The primary link is up: linked, or battery-paused/halted over a live link.
+fn link_is_up(app: &App) -> bool {
+    matches!(
+        app.snapshot().phase.as_str(),
+        "linked" | "paused" | "halted"
+    )
 }

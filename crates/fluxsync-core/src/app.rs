@@ -829,13 +829,17 @@ impl App {
                 // Approved scoping (same rationale as the FS-046 swap above):
                 // a ghosted primary only needs its OWN secrets forgotten when
                 // a confirmed secondary is still linked; only a primary that
-                // was the sole linked peer earns the full wipe.
+                // was the sole linked peer earns the wipe. Favorites survive
+                // it: a device that has simply been away (out of range,
+                // switched off) is no security event, and the user pinned
+                // those to keep them. The other wipes (an untrusted key, a
+                // different device pairing) still take everything.
                 if self.other_peers_linked() {
                     pending_dropped = self.drop_pending_for(lost_peer_id);
                 } else {
-                    self.state.history.clear();
+                    self.state.history.retain(|h| h.favorite);
                     self.drop_pending_all();
-                    self.state.vault_wipe_gen += 1; // also wipe the on-disk vault
+                    self.state.vault_wipe_gen += 1; // also rewrite the on-disk vault
                 }
                 self.state.sas_phase = "idle".to_string();
                 self.state.sas_peer = None;

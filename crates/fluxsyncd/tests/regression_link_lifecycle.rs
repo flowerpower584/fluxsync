@@ -1,10 +1,13 @@
-//! Regression: pausing sync and resuming it must bring the link back.
+//! Regressions on the primary link's lifecycle, between real daemons
+//! (keystore, real pairing, mDNS off so links only come from the daemons'
+//! own dials):
 //!
-//! `Toggle{on:false}` closes the primary session (and tells the peer with a
-//! `Bye`); `Toggle{on:true}` must then relink on its own — same identity,
-//! same keystore, no `PairAccept` — and carry clipboard items again. mDNS is
-//! off on both daemons so the relink can only come from the daemon's own
-//! redial of the persisted `last_addr`.
+//! - Pausing sync and resuming it must bring the link back:
+//!   `Toggle{on:false}` closes the session (and tells the peer with a `Bye`);
+//!   `Toggle{on:true}` must then relink on its own — same identity, same
+//!   keystore, no `PairAccept` — and carry clipboard items again.
+//! - Pairing another device is not a reconnect: the link that was already
+//!   up keeps its `reconnects` count and session uptime.
 
 #![cfg(unix)]
 
@@ -390,4 +393,72 @@ async fn toggle_off_then_on_relinks_and_syncs_again() {
     shutdown.cancel();
     let _ = timeout(Duration::from_secs(5), h_a).await;
     let _ = timeout(Duration::from_secs(5), h_b).await;
+}
+
+async fn reconnects(ipc: &Path) -> u64 {
+    status(ipc)
+        .await
+        .metrics
+        .as_ref()
+        .map_or(0, |m| m.reconnects)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn pairing_another_device_is_not_a_reconnect() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut ipcs = Vec::new();
+    let mut ports = Vec::new();
+    let shutdown = CancellationToken::new();
+    let mut handles = Vec::new();
+    for name in ["a", "b", "c"] {
+        let id = Identity::generate();
+        let port = pick_free_udp_port().await;
+        let ks = dir.path().join(format!("ks-{name}"));
+        std::fs::create_dir(&ks).unwrap();
+        let ipc = ks.join(format!("{name}.sock"));
+        handles.push(tokio::spawn(run(
+            cfg_for(&id, port, &ks, &ipc, &format!("device-{name}")),
+            shutdown.clone(),
+        )));
+        ipcs.push(ipc);
+        ports.push(port);
+    }
+    for ipc in &ipcs {
+        assert!(ipc_up(ipc, Duration::from_secs(5)).await, "ipc not up");
+        set_threshold(ipc, 5).await;
+    }
+    let (ipc_a, ipc_b, ipc_c) = (&ipcs[0], &ipcs[1], &ipcs[2]);
+    let addr_a: SocketAddr = format!("127.0.0.1:{}", ports[0]).parse().unwrap();
+
+    pair_daemons(ipc_a, addr_a, ipc_b).await;
+    assert_eq!(reconnects(ipc_a).await, 1, "A's link to B came up once");
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    // C pairs with A while A's link to B is up.
+    pair_daemons(ipc_a, addr_a, ipc_c).await;
+    assert!(
+        wait_until(Duration::from_secs(5), || async {
+            status(ipc_a).await.peers.len() == 2
+        })
+        .await,
+        "C never joined A's mesh"
+    );
+
+    let m = status(ipc_a).await.metrics.clone().expect("metrics");
+    assert_eq!(
+        m.reconnects, 1,
+        "C joining was counted as a reconnect of A's link"
+    );
+    assert!(
+        m.uptime_session_secs >= 1,
+        "C joining reset the session uptime of A's link ({} s)",
+        m.uptime_session_secs
+    );
+
+    shutdown.cancel();
+    for h in handles {
+        let _ = timeout(Duration::from_secs(5), h).await;
+    }
 }

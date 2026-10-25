@@ -35,6 +35,7 @@ impl MetricsTracker {
                 items_received: 0,
                 items_resynced: 0,
                 resync_applies_suppressed: 0,
+                rekeys: 0,
             },
             session_start: None,
             last_heartbeat_sent: None,
@@ -52,10 +53,18 @@ impl MetricsTracker {
         self.metrics.handshakes_total += 1;
     }
 
-    pub fn on_handshake_ok(&mut self) {
+    /// The primary link came (back) up. Only for that transition: a mesh
+    /// secondary's handshake or a rekey under a live link must not reset the
+    /// session uptime or count as a reconnect (see [`Self::on_rekey`]).
+    pub fn on_link_up(&mut self) {
         self.session_start = Some(Instant::now());
         self.metrics.reconnects += 1;
         self.metrics.heartbeats_missed_consecutive = 0;
+    }
+
+    /// A planned rekey replaced a live session's keys.
+    pub fn on_rekey(&mut self) {
+        self.metrics.rekeys += 1;
     }
 
     pub fn on_handshake_fail(&mut self) {
