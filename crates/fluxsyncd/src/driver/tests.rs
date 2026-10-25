@@ -4372,3 +4372,34 @@ fn oversized_png_is_refused_before_decoding() {
         Some((64, 64))
     );
 }
+
+/// R8: re-sending an item whose hash is still in flight keeps the peers the
+/// old entry was waiting on, but gives the new frames a fresh retry budget —
+/// inheriting the old attempt count and age got them abandoned early.
+#[tokio::test]
+async fn track_inflight_merges_peers_and_resets_the_retry_budget() {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    let inflight: super::InflightMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let long_ago = Instant::now()
+        .checked_sub(Duration::from_secs(80))
+        .expect("monotonic clock far enough from its origin");
+    inflight.lock().await.insert(
+        [9; 32],
+        super::Inflight {
+            frames: vec![b"old".to_vec()],
+            attempts: super::MAX_RETRANSMIT - 1,
+            last_sent: long_ago,
+            first_sent: long_ago,
+            pending_peers: HashSet::from([[1; 32]]),
+        },
+    );
+    super::track_inflight(&inflight, [9; 32], vec![b"new".to_vec()], [[2; 32]]).await;
+    let map = inflight.lock().await;
+    let inf = &map[&[9; 32]];
+    assert_eq!(inf.frames, vec![b"new".to_vec()]);
+    assert_eq!(inf.pending_peers, HashSet::from([[1; 32], [2; 32]]));
+    assert_eq!(inf.attempts, 0);
+    assert!(inf.first_sent.elapsed() < Duration::from_secs(5));
+}

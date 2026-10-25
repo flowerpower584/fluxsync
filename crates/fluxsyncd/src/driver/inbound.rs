@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// One due retransmit: the peers still owing an ack, and the item's frames.
+type RetransmitBatch = (Vec<[u8; 32]>, Vec<Vec<u8>>);
+
 pub(super) async fn transport_recv_loop(sh: Arc<Shared>) -> Result<()> {
     let Shared {
         transport,
@@ -40,7 +43,7 @@ pub(super) async fn transport_recv_loop(sh: Arc<Shared>) -> Result<()> {
                 // Re-send any clipboard item a peer hasn't acked yet, to the
                 // peers still pending. Frames whose item exceeds MAX_RETRANSMIT
                 // are dropped.
-                let mut to_send: Vec<([u8; 32], Vec<u8>)> = Vec::new();
+                let mut to_send: Vec<RetransmitBatch> = Vec::new();
                 {
                     let mut map = inflight.lock().await;
                     let mut done: Vec<[u8; 32]> = Vec::new();
@@ -76,18 +79,37 @@ pub(super) async fn transport_recv_loop(sh: Arc<Shared>) -> Result<()> {
                             pending = item.pending_peers.len(),
                             "retransmitting unacked item"
                         );
-                        for peer in &item.pending_peers {
-                            for f in &item.frames {
-                                to_send.push((*peer, f.clone()));
-                            }
-                        }
+                        to_send.push((
+                            item.pending_peers.iter().copied().collect(),
+                            item.frames.clone(),
+                        ));
                     }
                     for h in done {
                         map.remove(&h);
                     }
                 }
-                for (peer, bytes) in &to_send {
-                    let _ = transport.send_encrypted_to(*peer, bytes).await;
+                // Off this loop, and paced like the first send (bursts of
+                // 16, then 2 ms): resending a large image is thousands of
+                // datagrams, and blasting them from here both overran the
+                // link and stopped this loop from reading the very acks
+                // that would end the retransmits.
+                if !to_send.is_empty() {
+                    let transport = transport.clone();
+                    tokio::spawn(async move {
+                        let mut burst = 0usize;
+                        for (peers, frames) in &to_send {
+                            for peer in peers {
+                                for bytes in frames {
+                                    let _ = transport.send_encrypted_to(*peer, bytes).await;
+                                    burst += 1;
+                                    if burst == 16 {
+                                        burst = 0;
+                                        tokio::time::sleep(Duration::from_millis(2)).await;
+                                    }
+                                }
+                            }
+                        }
+                    });
                 }
             }
             _ = nak_interval.tick() => {
@@ -1227,31 +1249,9 @@ pub(super) async fn dispatch_inbound_frame(frame: Frame, peer_id: [u8; 32], sh: 
                         tokio::time::sleep(Duration::from_millis(2)).await;
                     }
                 }
-                // Inflight merge fix: `inflight` is keyed by hash only. A
-                // blind `insert` here would REPLACE any entry already
-                // tracking OTHER peers still awaiting an ack for this same
-                // hash (from a concurrent live `SendItem`/`forward_frames`
-                // fan-out), silently dropping them from `pending_peers` so
-                // they'd never get a retransmit. Merge instead: if an entry
-                // exists, fold this peer into its `pending_peers` and refresh
-                // the resend copy; only insert fresh when none exists.
-                match inflight.lock().await.entry(hash) {
-                    std::collections::hash_map::Entry::Occupied(mut e) => {
-                        let inf = e.get_mut();
-                        inf.pending_peers.insert(peer_id);
-                        inf.frames = frames;
-                        inf.last_sent = Instant::now();
-                    }
-                    std::collections::hash_map::Entry::Vacant(v) => {
-                        v.insert(Inflight {
-                            frames,
-                            attempts: 0,
-                            last_sent: Instant::now(),
-                            first_sent: Instant::now(),
-                            pending_peers: std::iter::once(peer_id).collect(),
-                        });
-                    }
-                }
+                // Merged into any entry already in flight for this hash
+                // (a concurrent live send or relay) — see `track_inflight`.
+                track_inflight(inflight, hash, frames, [peer_id]).await;
                 metrics.lock().await.on_item_resynced();
                 served += 1;
             }

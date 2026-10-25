@@ -226,6 +226,35 @@ pub(super) type PendingInitiator = Arc<Mutex<Option<mpsc::UnboundedSender<(Socke
 /// Map of clipboard items sent but not yet acked, keyed by item hash.
 pub(super) type InflightMap = Arc<Mutex<HashMap<[u8; 32], Inflight>>>;
 
+/// Track `frames` (one item, keyed by content hash) as awaiting acks from
+/// `peers`. An entry already in flight for the same hash — a concurrent
+/// relay, a resync serve, an earlier send — keeps its pending peers
+/// (replacing it would silently drop them from retransmission), and takes
+/// the new frames with a fresh retry budget: the old attempt count and age
+/// belonged to frames no longer being sent, and got a new send abandoned
+/// after a single retry.
+pub(super) async fn track_inflight(
+    inflight: &InflightMap,
+    hash: [u8; 32],
+    frames: Vec<Vec<u8>>,
+    peers: impl IntoIterator<Item = [u8; 32]>,
+) {
+    let now = Instant::now();
+    let mut map = inflight.lock().await;
+    let inf = map.entry(hash).or_insert_with(|| Inflight {
+        frames: Vec::new(),
+        attempts: 0,
+        last_sent: now,
+        first_sent: now,
+        pending_peers: HashSet::new(),
+    });
+    inf.pending_peers.extend(peers);
+    inf.frames = frames;
+    inf.attempts = 0;
+    inf.last_sent = now;
+    inf.first_sent = now;
+}
+
 /// Resync-on-reconnect (resync-1): shared resend buffer of recent
 /// non-sensitive items, written on send/first-sight-receive and read to
 /// build a `ResyncOffer` / serve a `ResyncPull`. See `crate::outbox`.

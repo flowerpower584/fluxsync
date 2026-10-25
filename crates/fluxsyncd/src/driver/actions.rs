@@ -337,28 +337,9 @@ pub(super) async fn dispatch(
                         // target was pending-gated above: nobody is awaiting
                         // an ack, so no `Inflight` entry is needed.
                         if !send_targets.is_empty() {
-                            // Inflight merge fix: same rationale as
-                            // `forward_frames` — a blind `insert` here would
-                            // replace an entry a concurrent mesh relay of
-                            // this exact hash already created, dropping its
-                            // pending peers. Merge instead.
-                            match inflight.lock().await.entry(hash) {
-                                std::collections::hash_map::Entry::Occupied(mut e) => {
-                                    let inf = e.get_mut();
-                                    inf.pending_peers.extend(send_targets);
-                                    inf.frames = frames;
-                                    inf.last_sent = Instant::now();
-                                }
-                                std::collections::hash_map::Entry::Vacant(v) => {
-                                    v.insert(Inflight {
-                                        frames,
-                                        attempts: 0,
-                                        last_sent: Instant::now(),
-                                        first_sent: Instant::now(),
-                                        pending_peers: send_targets.into_iter().collect(),
-                                    });
-                                }
-                            }
+                            // Merged into any entry already in flight for
+                            // this hash — see `track_inflight`.
+                            track_inflight(inflight, hash, frames, send_targets).await;
                         }
                     }
                 }
