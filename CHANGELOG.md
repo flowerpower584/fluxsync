@@ -7,8 +7,10 @@ Versions follow [SemVer](https://semver.org/).
 
 **"Lien" — a from-scratch redesign of the desktop app (macOS, Windows,
 Linux) around what FluxSync is: a direct link between your devices and
-the clipboard items that flow across it. Plus a performance pass on the
-state stream from the daemon to the UI.**
+the clipboard items that flow across it. And a rework of the daemon from
+the inside out: a new driver architecture, and a long list of link, sync
+and security bugs fixed, each pinned by a test that fails without the
+fix.**
 
 ### Changed
 - New design system, derived from the FluxSync mark: coral (the two
@@ -31,10 +33,59 @@ state stream from the daemon to the UI.**
   (names unchanged; layouts untouched).
 
 ### Added
+- Devices lists every paired device, online or not (new `State.paired`):
+  a device that is offline can still be seen and unpaired on its own.
+  A paired device that is merely offline no longer reads "Not paired".
+- A device rename reaches linked devices immediately, not on the next
+  reconnect.
 - History filters (pinned, text, links, code, images), instant search
   with Enter-to-copy, open-in-browser for links, keyboard navigation
   (↑/↓, `p` to pin, `o` to open, `/` or ⌘/Ctrl+F to search, Esc to hide).
 - Pending firewall decisions are announced on every tab with a badge.
+
+### Fixed — sync and links
+- Copying A, then B, then A again never synced the second A (in either
+  direction): echo suppression swallowed any content seen among the last
+  50 items. A repeat now counts as an echo only when it is the current
+  content or was seen in the last 5 seconds. History moves a re-copied
+  item to the top instead of duplicating it.
+- Switching sync off didn't: the other device re-linked to it right away,
+  and switching back on then left it stuck "Searching" beside a live link.
+  Off now means no link at all, and on relinks.
+- Unpair and sync-off only ever reached the primary device; other linked
+  devices stayed connected (and kept trusting this one).
+- Dialing a second device re-pointed the live link at it: the linked
+  device's traffic went to the wrong address.
+- Devices that joined while this one was already linked (a mesh
+  secondary, a peer restarting) never received its name and capabilities:
+  no resync with it, and its pairing confirmation could wait forever.
+- Revoking the only linked device left it on screen as "Searching for…",
+  and ten minutes later the ghost timeout wiped the whole history.
+- Two items arriving back to back could land on the clipboard in the
+  wrong order, leaving the older one.
+- A 1 KiB text item, and every full image chunk, exceeded the datagram
+  budget: byte fields went out as CBOR integer arrays. They are now byte
+  strings (half the size, wire-compatible both ways) and every frame is
+  checked to fit.
+- A re-sent item inherited its predecessor's spent retry budget and was
+  abandoned after one retry; whole-item retransmits no longer blast
+  thousands of datagrams from the receive loop.
+- Android: a daemon that missed its start-up deadline kept running with no
+  handle, holding the UDP port so every retry failed.
+
+### Security
+- A captured handshake from a trusted device, replayed, replaced its live
+  session and redirected its traffic — a link anyone on the LAN could cut
+  repeatedly. Each handshake now answers once.
+- A stray datagram could abort a pairing or reconnect in progress.
+- A peer still pending confirmation (or kept from an item by the firewall)
+  could pull the item's frames with a NAK.
+- X25519 public keys with bit 255 set bypassed the low-order point check.
+- Received images are decoded under explicit limits (16384 px a side,
+  256 MiB) instead of inflating whatever a PNG header declares.
+- `pending_pulls` is bounded under a flood of resync offers.
+- Every on-disk save (peers, vault, firewall, device name, sequence
+  horizon) now fsyncs its directory after the atomic rename.
 
 ### Fixed
 - Desktop battery shown as "255%" on machines without a battery.
@@ -44,6 +95,16 @@ state stream from the daemon to the UI.**
 - The tray's `state-update` throttle dropped the newest update inside its
   100 ms window, leaving the UI on a stale state until the 5 s poll; it now
   coalesces and always delivers the latest snapshot.
+
+### Architecture
+- The daemon's 11k-line `driver.rs` is a `driver/` module tree, one
+  concern per file, around a single `Arc<Shared>` context instead of
+  twenty-argument functions (see docs/ARCHITECTURE.md §3b).
+- Six hand-rolled atomic writes are one `fsutil::write_atomic`; three
+  copies of the in-flight merge are one `track_inflight`; the state
+  snapshot is built in one place for the watch and for `status`.
+- Keystore I/O runs on the blocking pool, OS clipboard writes on one
+  ordered writer thread, retransmits in their own paced task.
 
 ### Performance
 - Popup renders are coalesced per frame, keyed and incremental: a

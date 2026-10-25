@@ -133,6 +133,47 @@ Each long-lived concern is its own task. Tasks talk through tokio `mpsc` channel
 
 Shutdown: a single `tokio::sync::Notify` is fired on SIGINT / SIGTERM (Unix) or Ctrl-C (Win). Every loop selects on `notify.notified()` and exits cleanly. No `unwrap()` in any task body.
 
+### 3b. The daemon driver (`fluxsyncd::driver`)
+
+The driver is the daemon's body: it owns the `App`, the transport, the
+stores and every long-lived task. It is a module tree, one concern per
+file, all under `crates/fluxsyncd/src/driver/`:
+
+| Module        | Concern |
+|---------------|---------|
+| `mod.rs`      | `run()`: builds the stores and the `Shared` context, spawns the tasks, runs the event loop that owns `App` |
+| `shared.rs`   | `Shared`, the shared types (`Inflight`, `Reassembly`, `PeerMeta`, `RecentWrites`, …) and their helpers (`publishable_state`, `greet_new_sessions`, `tear_down_links`, `track_inflight`, …) |
+| `actions.rs`  | Executing the core's `Action`s: outbound gating, send / write / emit |
+| `commands.rs` | IPC commands (`CmdOp` → effects on the app, transport and stores) |
+| `inbound.rs`  | Receive loop: handshake routing, frame dispatch, reassembly, NAKs, retransmits |
+| `frames.rs`   | Building, forwarding and acking item frames (always one datagram each) |
+| `liveness.rs` | Heartbeats, ghost timeout, primary failover, rekey watchdog |
+| `pairing.rs`  | mDNS discovery dispatch, initiator handshakes, PIN adverts, pair URIs |
+| `clipboard.rs`| OS clipboard watcher, the serial clipboard writer, image codec limits |
+| `vault.rs`, `peers.rs`, `resync.rs`, `ipc_server.rs` | FluxVault persister, `peers.json`, resync-on-reconnect, the IPC server |
+
+Every handle the tasks share — identity, transport, trust and pairing
+state, mesh bookkeeping, outbox, channels — lives once in an
+`Arc<Shared>` built in `run()`. Spawned loops take `Arc<Shared>`,
+synchronous helpers take `&Shared`; nothing threads twenty arguments.
+
+Invariants worth knowing before changing it:
+
+- **Sync off means no link.** While `State.on` is false the daemon
+  neither dials nor answers handshakes; toggling off says `Bye` to every
+  linked peer, and unpair revokes every linked peer.
+- **Every session gets our `Hello`**, once per session generation,
+  whichever path brought it up (`Shared::greet_new_sessions`).
+- **A msg1 answers once** (`Transport::answered_inits`); a msg2 is only
+  accepted from the dialed port at the exact size.
+- **Clipboard echoes are bounded in time**: a repeat is an echo only if
+  it is the newest content or was seen within `ECHO_WINDOW_MS`; anything
+  older is the user copying it again and syncs.
+- **Blocking work stays off the async workers**: keystore I/O goes
+  through `off_thread`, OS clipboard writes through the single
+  `ClipboardWriter` thread, saves through `fsutil::write_atomic` (tmp,
+  fsync, rename, directory fsync).
+
 ---
 
 ## 4. State surface (matches the frontend)
@@ -196,8 +237,10 @@ No HTTP, no port. Permissions on the socket are `0600`.
 
 ## 6. Storage
 
-- **In RAM**: history ring (50), peers, last battery samples, Lamport clock, current FSM phase.
-- **On disk**: nothing of substance.
+- **In RAM**: history, peers, last battery samples, Lamport clock, current FSM phase.
+- **On disk** (keystore dir, mode 0600, every write atomic and fsynced):
+  `peers.json` (trusted devices + last address), the FluxVault encrypted
+  history, firewall policy, device name, the sequence horizon.
 - **In OS keychain** (`keyring` crate): the long-term identity private key and the peer revocation set. Mapping: macOS Keychain, Windows DPAPI/Credential Manager, Linux Secret Service, Android Keystore via the FFI host.
 
 No SQLite. No config file is needed for v0.1; defaults are baked in and CLI commands persist threshold / overrides via `fluxctl set-*` which calls into the daemon.
@@ -215,7 +258,7 @@ No SQLite. No config file is needed for v0.1; defaults are baked in and CLI comm
 
 ## 8. What this architecture deliberately does not do
 
-- No mesh > 2 devices (v0.2).
+- No routing beyond FluxMesh's relay through directly linked devices (no internet relay, no DHT).
 - No HTTP / REST endpoint (v0.2 maybe, only if a real outside-LAN consumer appears).
 - No QUIC (UDP custom is enough for one peer).
 - No SQLite (RAM ring is enough for 50 items).
