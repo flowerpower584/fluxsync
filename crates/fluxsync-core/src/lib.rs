@@ -25,7 +25,7 @@ pub mod state;
 pub use app::App;
 pub use classify::{canon_text, is_sensitive, kind_of};
 pub use clock::{Clock, LamportClock, StubWallClock, WallClock};
-pub use dedup::{ContentHash, DedupRing, SeenSet, DEDUP_CAPACITY, SEEN_CAPACITY};
+pub use dedup::{ContentHash, DedupRing, SeenSet, DEDUP_CAPACITY, ECHO_WINDOW_MS, SEEN_CAPACITY};
 pub use error::CoreError;
 pub use events::{Action, Event, LogEntry, LogLevel};
 pub use fsm::{transition, Phase};

@@ -639,8 +639,11 @@ impl App {
                 // SE-14: `hash` here was computed locally by the daemon
                 // from the OS clipboard payload, so wrapping in
                 // `ContentHash::from_blake3` is sound.
-                if !self.dedup.observe(ContentHash::from_blake3(*hash)) {
-                    suppress_action = true; // saw it from peer already, don't echo
+                if !self
+                    .dedup
+                    .observe_clipboard(ContentHash::from_blake3(*hash), wall.unix_millis())
+                {
+                    suppress_action = true; // an echo of what we just saw, don't bounce it
                 } else if !sensitive {
                     self.push_history(HistoryItem {
                         kind: *kind,
@@ -702,12 +705,14 @@ impl App {
                     }
                 };
 
-                // Dedup by content hash. `observe` returns false when this
-                // hash was already seen — that covers three cases at once:
-                // an echo of our own local copy, a duplicate retransmit, and
-                // a malicious peer reusing a hash to poison history. In every
-                // case we drop the frame and only send an Ack.
-                if !self.dedup.observe(computed) {
+                // Dedup by content hash: an echo of what was just copied or
+                // received here (the newest content, or anything seen within
+                // the echo window) is dropped and only acked. Exact
+                // retransmits never get this far — the daemon drops a
+                // repeated `EventId` first — and content seen longer ago is
+                // a genuine re-copy on the peer, applied again (see
+                // `DedupRing::observe_clipboard`).
+                if !self.dedup.observe_clipboard(computed, wall.unix_millis()) {
                     suppress_action = true;
                 } else if !sensitive {
                     // Record only items the firewall ADMITS. A Block or Defer
@@ -1079,6 +1084,18 @@ impl App {
         // so it silently ignored new copies.
         // By inserting at index 0 and NOT sorting by Lamport, we guarantee the
         // newest item is always at the top of the history.
+        // Copying something again moves its row to the top instead of
+        // duplicating it; a pin survives the move. Matched on kind and
+        // preview too: a remote row's `hash` is the sender's wire field, so
+        // a forged hash alone must never replace another item's row (SE-14).
+        let mut item = item;
+        if let Some(pos) =
+            self.state.history.iter().position(|h| {
+                h.hash == item.hash && h.kind == item.kind && h.preview == item.preview
+            })
+        {
+            item.favorite |= self.state.history.remove(pos).favorite;
+        }
         self.state.history.insert(0, item);
 
         if self.state.history.len() > HISTORY_SOFT_CAP {
@@ -1555,6 +1572,74 @@ mod tests {
         assert!(!app.state.on);
         assert_eq!(app.state.peer_id, [0u8; 32]);
         assert_eq!(app.state.trusted_peer_name, None);
+    }
+
+    /// C2: copying A, then B, then A again syncs A the second time too —
+    /// in both directions — and history shows A once, on top.
+    #[test]
+    fn recopying_older_content_syncs_again() {
+        let mut app = boot();
+        app.handle(Event::ToggleOn, &wall());
+        app.handle(
+            Event::PeerSeen {
+                peer_id: [7; 32],
+                name: "Phone".into(),
+            },
+            &wall(),
+        );
+        app.handle(Event::HandshakeOk, &wall());
+        let at = |ms: u64| StubWallClock::new("12:00", ms);
+        let local = |text: &str| Event::LocalClipboardChange {
+            hash: *DedupRing::hash(text.as_bytes()).as_bytes(),
+            kind: Kind::Text,
+            payload: text.as_bytes().to_vec(),
+            preview: text.into(),
+            sensitive: false,
+            lamport: 1,
+        };
+        let sends = |acts: &[Action]| acts.iter().any(|a| matches!(a, Action::SendItem { .. }));
+
+        assert!(sends(&app.handle(local("alpha"), &at(1_000))));
+        assert!(sends(&app.handle(local("beta"), &at(2_000))));
+        assert!(
+            sends(&app.handle(local("alpha"), &at(60_000))),
+            "a re-copy of older content must be sent"
+        );
+        assert!(
+            !sends(&app.handle(local("alpha"), &at(60_300))),
+            "its immediate read-back is still an echo"
+        );
+        let previews: Vec<_> = app
+            .state
+            .history
+            .iter()
+            .map(|h| h.preview.as_str())
+            .collect();
+        assert_eq!(
+            previews,
+            ["alpha", "beta"],
+            "moved to the top, not duplicated"
+        );
+
+        let remote = |text: &str| Event::FrameReceivedClipboard {
+            peer_id: [7; 32],
+            hash: *DedupRing::hash(text.as_bytes()).as_bytes(),
+            kind: Kind::Text,
+            payload: text.as_bytes().to_vec(),
+            preview: text.into(),
+            lamport: 2,
+            sensitive: false,
+            resync: false,
+        };
+        let writes = |acts: &[Action]| {
+            acts.iter()
+                .any(|a| matches!(a, Action::WriteClipboard { .. }))
+        };
+        assert!(writes(&app.handle(remote("gamma"), &at(70_000))));
+        assert!(
+            writes(&app.handle(remote("beta"), &at(130_000))),
+            "the peer re-copying older content must land here too"
+        );
     }
 
     /// C6: revoking the device the projection shows forgets it (no

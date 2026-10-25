@@ -50,10 +50,24 @@ impl ContentHash {
     }
 }
 
+/// How long after content was last seen a repeat of it still counts as an
+/// echo — the clipboard watcher reading back a write, or a peer bouncing an
+/// item we just sent. Real echoes land within a second or two; anything
+/// later is the user copying that content again.
+pub const ECHO_WINDOW_MS: u64 = 5_000;
+
+#[derive(Debug, Clone, Copy)]
+struct Entry {
+    hash: ContentHash,
+    /// Wall-clock ms of the last sighting; `None` for entries seeded from
+    /// persisted history (no live sighting yet).
+    seen_at_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DedupRing {
     capacity: usize,
-    inner: VecDeque<ContentHash>,
+    inner: VecDeque<Entry>,
 }
 
 impl Default for DedupRing {
@@ -80,19 +94,50 @@ impl DedupRing {
     /// Accepts only [`ContentHash`] (SE-14) so a caller cannot smuggle a
     /// peer-controlled `[u8; 32]` (e.g. `ClipboardItem.hash`) in here.
     pub fn observe(&mut self, hash: ContentHash) -> bool {
-        if self.inner.contains(&hash) {
+        if self.contains(&hash) {
             return false;
         }
+        self.push(Entry {
+            hash,
+            seen_at_ms: None,
+        });
+        true
+    }
+
+    /// Clipboard-content variant of [`Self::observe`]: `false` (an echo or a
+    /// duplicate) only when `hash` is the newest content seen, or was seen
+    /// less than [`ECHO_WINDOW_MS`] before `now_ms`. Content seen longer ago
+    /// is fresh again — copying A, then B, then A must sync A the second
+    /// time too, which a plain "seen in the last 50" check silently
+    /// swallowed. A fresh repeat moves to the newest slot.
+    pub fn observe_clipboard(&mut self, hash: ContentHash, now_ms: u64) -> bool {
+        if let Some(pos) = self.inner.iter().position(|e| e.hash == hash) {
+            let newest = pos + 1 == self.inner.len();
+            let recent = self.inner[pos]
+                .seen_at_ms
+                .is_some_and(|t| now_ms.saturating_sub(t) < ECHO_WINDOW_MS);
+            if newest || recent {
+                return false;
+            }
+            self.inner.remove(pos);
+        }
+        self.push(Entry {
+            hash,
+            seen_at_ms: Some(now_ms),
+        });
+        true
+    }
+
+    fn push(&mut self, entry: Entry) {
         if self.inner.len() == self.capacity {
             self.inner.pop_front();
         }
-        self.inner.push_back(hash);
-        true
+        self.inner.push_back(entry);
     }
 
     #[must_use]
     pub fn contains(&self, hash: &ContentHash) -> bool {
-        self.inner.contains(hash)
+        self.inner.iter().any(|e| e.hash == *hash)
     }
 
     #[must_use]
@@ -239,6 +284,37 @@ mod tests {
         r.observe(h(2));
         r.observe(h(3)); // evicts h(1)
         assert!(r.observe(h(1))); // h(1) is fresh again — that's the design
+    }
+
+    #[test]
+    fn clipboard_repeat_after_echo_window_is_fresh() {
+        let mut r = DedupRing::new(50);
+        assert!(r.observe_clipboard(h(1), 0)); // copy A
+        assert!(r.observe_clipboard(h(2), 1_000)); // copy B
+                                                   // A again a minute later: a real re-copy, not an echo.
+        assert!(r.observe_clipboard(h(1), 61_000));
+        // …and it is now the newest, so its immediate read-back is an echo.
+        assert!(!r.observe_clipboard(h(1), 61_500));
+        assert!(!r.observe_clipboard(h(1), 600_000), "newest stays an echo");
+    }
+
+    #[test]
+    fn clipboard_repeat_inside_echo_window_is_an_echo() {
+        let mut r = DedupRing::new(50);
+        assert!(r.observe_clipboard(h(1), 0));
+        assert!(r.observe_clipboard(h(2), 300));
+        // A bounced back while B was already newest: still an echo.
+        assert!(!r.observe_clipboard(h(1), ECHO_WINDOW_MS - 1));
+        assert!(r.observe_clipboard(h(1), ECHO_WINDOW_MS));
+    }
+
+    #[test]
+    fn clipboard_seeded_entry_is_fresh_unless_newest() {
+        let mut r = DedupRing::new(50);
+        assert!(r.observe(h(1)));
+        assert!(r.observe(h(2)));
+        assert!(!r.observe_clipboard(h(2), 10), "newest restored item");
+        assert!(r.observe_clipboard(h(1), 10), "older restored item");
     }
 
     #[test]

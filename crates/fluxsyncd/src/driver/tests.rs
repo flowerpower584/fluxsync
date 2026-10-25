@@ -27,7 +27,7 @@ async fn dispatch(
     state_watch_tx: &tokio::sync::watch::Sender<super::State>,
     logs_bcast_tx: &tokio::sync::broadcast::Sender<super::LogEntry>,
     log_tail: &std::sync::Arc<super::LogTail>,
-    last_written_hashes: &std::sync::Arc<tokio::sync::Mutex<std::collections::VecDeque<[u8; 32]>>>,
+    last_written_hashes: &std::sync::Arc<tokio::sync::Mutex<super::RecentWrites>>,
     metrics: &std::sync::Arc<tokio::sync::Mutex<super::MetricsTracker>>,
     inflight: &super::InflightMap,
     peer_meta: &super::PeerMetaMap,
@@ -827,7 +827,7 @@ async fn write_clipboard_populates_desktop_image_cache_gated_by_sensitivity_and_
     use crate::transport::Transport;
     use fluxsync_core::{Action, App, Config, Event, StubWallClock};
     use fluxsync_proto::Kind;
-    use std::collections::{BTreeMap, HashMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
     use tokio::sync::{broadcast, watch, Mutex};
 
@@ -845,7 +845,7 @@ async fn write_clipboard_populates_desktop_image_cache_gated_by_sensitivity_and_
         watch::channel(fluxsync_core::State::initial(&Config::default()));
     let (logs_bcast_tx, _logs_rx) = broadcast::channel(16);
     let log_tail = Arc::new(super::LogTail::new());
-    let last_written_hashes = Arc::new(Mutex::new(VecDeque::new()));
+    let last_written_hashes = Arc::new(Mutex::new(super::RecentWrites::default()));
     let metrics = Arc::new(Mutex::new(crate::metrics::MetricsTracker::new()));
     let inflight = Arc::new(Mutex::new(HashMap::new()));
     let peer_meta: super::PeerMetaMap = Arc::new(Mutex::new(BTreeMap::new()));
@@ -2623,7 +2623,7 @@ async fn send_item_fan_out_excludes_pending_secondary_peer() {
     use fluxsync_core::{Action, App, Config};
     use fluxsync_crypto::{test_util::pair_for_test, Identity};
     use fluxsync_proto::Kind;
-    use std::collections::{BTreeMap, HashMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
     use tokio::sync::{broadcast, watch, Mutex};
 
@@ -2664,7 +2664,7 @@ async fn send_item_fan_out_excludes_pending_secondary_peer() {
         watch::channel(fluxsync_core::State::initial(&Config::default()));
     let (logs_bcast_tx, _logs_rx) = broadcast::channel(16);
     let log_tail = Arc::new(super::LogTail::new());
-    let last_written_hashes = Arc::new(Mutex::new(VecDeque::new()));
+    let last_written_hashes = Arc::new(Mutex::new(super::RecentWrites::default()));
     let metrics = Arc::new(Mutex::new(crate::metrics::MetricsTracker::new()));
     let inflight = Arc::new(Mutex::new(HashMap::new()));
     let peer_meta: super::PeerMetaMap = Arc::new(Mutex::new(BTreeMap::new()));
@@ -3435,7 +3435,7 @@ async fn send_item_merges_inflight_pending_peers_instead_of_replacing() {
     use fluxsync_core::{Action, App, Config};
     use fluxsync_crypto::{test_util::pair_for_test, Identity};
     use fluxsync_proto::Kind;
-    use std::collections::{BTreeMap, HashMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
     use std::time::Instant;
     use tokio::sync::{broadcast, watch, Mutex};
@@ -3474,7 +3474,7 @@ async fn send_item_merges_inflight_pending_peers_instead_of_replacing() {
         watch::channel(fluxsync_core::State::initial(&Config::default()));
     let (logs_bcast_tx, _logs_rx) = broadcast::channel(16);
     let log_tail = Arc::new(super::LogTail::new());
-    let last_written_hashes = Arc::new(Mutex::new(VecDeque::new()));
+    let last_written_hashes = Arc::new(Mutex::new(super::RecentWrites::default()));
     let metrics = Arc::new(Mutex::new(crate::metrics::MetricsTracker::new()));
     let peer_meta: super::PeerMetaMap = Arc::new(Mutex::new(BTreeMap::new()));
     let outbox = Arc::new(Mutex::new(Outbox::new()));
@@ -4283,4 +4283,26 @@ async fn resync_offer_flood_keeps_pending_pulls_bounded() {
         "{tracked} pending pulls tracked for one peer"
     );
     assert!(tracked > 0, "the first offers must still be pulled");
+}
+
+/// C2 (daemon side): the watcher treats a clipboard read as the echo of our
+/// own write only shortly after that write — not for as long as it sits in
+/// the last ten writes, which kept a re-copy of received content from ever
+/// being sent.
+#[test]
+fn recent_writes_echo_is_time_bounded() {
+    let mut w = super::RecentWrites::default();
+    w.record([1; 32]);
+    assert!(w.is_echo(&[1; 32]), "an immediate read-back is an echo");
+    assert!(!w.is_echo(&[2; 32]));
+    let past = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_millis(
+            fluxsync_core::ECHO_WINDOW_MS + 1,
+        ))
+        .expect("monotonic clock far enough from its origin");
+    w.0[0].1 = past;
+    assert!(
+        !w.is_echo(&[1; 32]),
+        "re-copying it later is the user, not an echo"
+    );
 }

@@ -189,6 +189,36 @@ pub(super) struct Inflight {
     pub(super) pending_peers: HashSet<[u8; 32]>,
 }
 
+/// Clipboard content this daemon itself wrote to the OS clipboard lately
+/// (canonical hash + when), so the watcher can tell the read-back of its own
+/// write — an echo, never to be sent back — from the user copying that
+/// content again later, which must sync like any other copy.
+#[derive(Debug, Default)]
+pub(super) struct RecentWrites(pub(super) VecDeque<([u8; 32], Instant)>);
+
+impl RecentWrites {
+    const CAP: usize = 10;
+    const ECHO_WINDOW: Duration = Duration::from_millis(fluxsync_core::ECHO_WINDOW_MS);
+
+    pub(super) fn record(&mut self, hash: [u8; 32]) {
+        self.0.push_back((hash, Instant::now()));
+        if self.0.len() > Self::CAP {
+            self.0.pop_front();
+        }
+    }
+
+    /// `hash`, just read off the clipboard, is one of our own writes coming
+    /// back. Bounded in time: it used to match any of the last ten writes,
+    /// so re-copying something received a while ago was never sent. A
+    /// read-back that is somehow later than the window still stops in the
+    /// core, where the newest content is always an echo.
+    pub(super) fn is_echo(&self, hash: &[u8; 32]) -> bool {
+        self.0
+            .iter()
+            .any(|(h, at)| h == hash && at.elapsed() < Self::ECHO_WINDOW)
+    }
+}
+
 /// Map of clipboard items sent but not yet acked, keyed by item hash.
 pub(super) type InflightMap = Arc<Mutex<HashMap<[u8; 32], Inflight>>>;
 
@@ -487,7 +517,7 @@ pub(super) struct Shared {
     pub(super) reassembly: ReassemblyMap,
     pub(super) mesh_seen: MeshSeen,
     pub(super) echo_ack_sent: EchoAckSent,
-    pub(super) last_written_hashes: Arc<Mutex<VecDeque<[u8; 32]>>>,
+    pub(super) last_written_hashes: Arc<Mutex<RecentWrites>>,
 
     // ── Resync and history bookkeeping ───────────────────────────
     pub(super) outbox: SharedOutbox,
@@ -638,7 +668,7 @@ impl Shared {
             reassembly: Arc::new(Mutex::new(HashMap::new())),
             mesh_seen: Arc::new(Mutex::new(SeenSet::default())),
             echo_ack_sent: Arc::new(Mutex::new(HashSet::new())),
-            last_written_hashes: Arc::new(Mutex::new(VecDeque::new())),
+            last_written_hashes: Arc::new(Mutex::new(RecentWrites::default())),
             outbox: Arc::new(Mutex::new(Outbox::new())),
             outbox_stage: Arc::new(Mutex::new(HashMap::new())),
             pending_pulls: Arc::new(Mutex::new(HashMap::new())),

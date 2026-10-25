@@ -387,8 +387,8 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // from the peer). The clipboard watcher dedups against this so it
     // doesn't immediately read its own write back, fire LocalClipboardChange,
     // and ping-pong the same item back to the peer.
-    let last_written_hashes: Arc<Mutex<VecDeque<[u8; 32]>>> =
-        Arc::new(Mutex::new(VecDeque::with_capacity(10)));
+    let last_written_hashes: Arc<Mutex<RecentWrites>> =
+        Arc::new(Mutex::new(RecentWrites::default()));
 
     // Outbound items awaiting acks. Shared between the action dispatch
     // (inserts on SendItem), the inbound frame handler (removes on Ack),

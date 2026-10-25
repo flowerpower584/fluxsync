@@ -412,13 +412,7 @@ pub(super) async fn dispatch(
                     #[cfg(not(target_os = "android"))]
                     if let Some((w, h, rgba)) = decode_png_to_rgba(&payload) {
                         let hash = image_rgba_hash(w, h, &rgba);
-                        {
-                            let mut g = last_written_hashes.lock().await;
-                            g.push_back(hash);
-                            if g.len() > 10 {
-                                g.pop_front();
-                            }
-                        }
+                        last_written_hashes.lock().await.record(hash);
                         // DIR-P3-02(b): stash the bytes under their hex hash so
                         // the tray's `fetch_item` IPC op (history thumbnails +
                         // image re-copy) can serve them on demand — the same
@@ -486,13 +480,7 @@ pub(super) async fn dispatch(
                 } else {
                     let text = String::from_utf8_lossy(&payload).to_string();
                     let hash = clipboard_dedup_hash(&text);
-                    {
-                        let mut g = last_written_hashes.lock().await;
-                        g.push_back(hash);
-                        if g.len() > 10 {
-                            g.pop_front();
-                        }
-                    }
+                    last_written_hashes.lock().await.record(hash);
                     #[cfg(not(target_os = "android"))]
                     tokio::task::spawn_blocking(move || match arboard::Clipboard::new() {
                         Ok(mut cb) => {

@@ -207,7 +207,7 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
                     let rgba = img.bytes.into_owned();
                     let hash = image_rgba_hash(w, h, &rgba);
                     if last_seen_hash != Some(hash) {
-                        let already = last_written_hashes.lock().await.contains(&hash);
+                        let already = last_written_hashes.lock().await.is_echo(&hash);
                         last_seen_hash = Some(hash);
                         if !already {
                             match encode_png(w, h, rgba) {
@@ -248,7 +248,7 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
                         let hash = clipboard_dedup_hash(&raw_text);
                         if last_seen_hash != Some(hash) {
                             let already =
-                                last_written_hashes.lock().await.contains(&hash);
+                                last_written_hashes.lock().await.is_echo(&hash);
                             last_seen_hash = Some(hash);
                             if !already {
                                 if text.len() > MAX_PAYLOAD {
