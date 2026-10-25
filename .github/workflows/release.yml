@@ -66,6 +66,23 @@ jobs:
             git push origin "refs/tags/$TAG"
           fi
 
+      # Created once, here, so the build jobs only upload to it and never
+      # race each other to create it.
+      - name: Create the release (if missing)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+            exit 0
+          fi
+          flag=
+          case "$TAG" in *-*) flag=--prerelease ;; esac
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "FluxSync $TAG" $flag \
+            --notes "Building: the downloads and release notes appear here once every build is done."
+
   desktop:
     name: ${{ matrix.label }}
     needs: tag
@@ -277,13 +294,14 @@ jobs:
           cp "$src" "FluxSync-${{ env.TAG }}-arm64-v8a.apk"
           ls -la FluxSync-*.apk
 
+      # Upload only: updating the release from here is refused once its
+      # tag and the workflow's commit differ.
       - name: Attach APK to release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TAG }}
-          draft: false
-          prerelease: ${{ contains(env.TAG, '-') }}
-          files: FluxSync-${{ env.TAG }}-arm64-v8a.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$TAG" "FluxSync-${TAG}-arm64-v8a.apk" \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
   checksums:
     name: Checksums + release notes
