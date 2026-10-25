@@ -143,9 +143,7 @@ async fn rekey_watchdog(
     identity: super::Identity,
     transport: std::sync::Arc<super::Transport>,
     trusted: super::TrustedSet,
-    pending_initiator_tx: std::sync::Arc<
-        tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
-    >,
+    pending_initiator_tx: super::PendingInitiator,
     event_tx: tokio::sync::mpsc::Sender<super::Event>,
     backoff: super::BackoffMap,
     max_age_ms: u64,
@@ -3986,8 +3984,7 @@ async fn rekey_watchdog_rekeys_a_secondary_session() {
     let generation_a_before = transport.session_generation_for(peer_id_a).await.unwrap();
     let generation_b_before = transport.session_generation_for(peer_id_b).await.unwrap();
 
-    let pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>> =
-        Arc::new(Mutex::new(None));
+    let pending_initiator_tx: super::PendingInitiator = Arc::new(Mutex::new(None));
     let (event_tx, mut event_rx) = mpsc::channel::<Event>(16);
     let backoff: BackoffMap = Arc::new(Mutex::new(HashMap::new()));
     let shutdown = CancellationToken::new();
@@ -4024,7 +4021,8 @@ async fn rekey_watchdog_rekeys_a_secondary_session() {
         .await
         .clone()
         .expect("watchdog must have registered the single-flight sender for B's rekey");
-    tx.send(msg2).expect("deliver msg2 to the rekey initiator");
+    tx.send((bare_b.local_addr().unwrap(), msg2))
+        .expect("deliver msg2 to the rekey initiator");
 
     let mut rekeyed = false;
     for _ in 0..100 {

@@ -27,7 +27,7 @@
 
 use anyhow::{anyhow, Result};
 use fluxsync_crypto::Session;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -156,6 +156,47 @@ pub struct Transport {
     /// (Fixes the F-001 race surfaced by the 2026-05-24 differential
     /// review of VULN-001 fixes.)
     pub(crate) peers_disk_lock: Arc<Mutex<()>>,
+    /// Initiator ephemerals of every HandshakeInit already answered — see
+    /// [`AnsweredInits`].
+    pub answered_inits: Mutex<AnsweredInits>,
+}
+
+/// Noise IK msg1s this daemon has already answered, keyed by the initiator's
+/// ephemeral public key (the first 32 bytes, fresh for every handshake).
+///
+/// A trusted peer's msg1 crosses the network in the clear, and nothing in
+/// IK stops it completing a second time: replayed, it would replace that
+/// peer's live session with one the real peer holds no keys for, and repin
+/// the peer's address to whoever replayed it — a link anyone on the LAN
+/// could cut every few seconds. Remembering recent ephemerals makes each
+/// msg1 single-use. Bounded (oldest forgotten first); a genuine reconnect or
+/// rekey always brings a fresh ephemeral.
+#[derive(Debug, Default)]
+pub struct AnsweredInits {
+    seen: HashSet<[u8; 32]>,
+    order: VecDeque<[u8; 32]>,
+}
+
+impl AnsweredInits {
+    const CAP: usize = 4096;
+
+    /// Record `msg1`'s ephemeral; `false` if it was answered before (a
+    /// replay) or is too short to carry one.
+    pub fn first_answer(&mut self, msg1: &[u8]) -> bool {
+        let Some(e) = msg1.get(..32).and_then(|e| <[u8; 32]>::try_from(e).ok()) else {
+            return false;
+        };
+        if !self.seen.insert(e) {
+            return false;
+        }
+        self.order.push_back(e);
+        if self.order.len() > Self::CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+        true
+    }
 }
 
 #[must_use]
@@ -232,6 +273,7 @@ impl Transport {
                 metrics: Arc::new(Mutex::new(crate::metrics::MetricsTracker::new())),
                 session_notify: Arc::new(Notify::new()),
                 peers_disk_lock: Arc::new(Mutex::new(())),
+                answered_inits: Mutex::new(AnsweredInits::default()),
             },
             actual_port,
         ))

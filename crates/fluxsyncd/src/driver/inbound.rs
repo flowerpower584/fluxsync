@@ -219,10 +219,10 @@ pub(super) async fn transport_recv_loop(sh: Arc<Shared>) -> Result<()> {
                             }
                         });
                     }
-                    RecvFrame::HandshakeResp { msg, .. } => {
+                    RecvFrame::HandshakeResp { from, msg } => {
                         let g = pending_initiator_tx.lock().await;
                         if let Some(tx) = g.as_ref() {
-                            let _ = tx.send(msg);
+                            let _ = tx.send((from, msg));
                             // On a fast/loopback link the peer's post-handshake
                             // traffic (its own `Msg::Hello`, sent the instant
                             // ITS side reaches Linked) can already be sitting

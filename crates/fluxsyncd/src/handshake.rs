@@ -108,6 +108,32 @@ pub const MAX_TOFU_TRUSTED_PEERS: usize = 256;
 /// which gates unconfirmed TOFU auto-trust inserts. Keep the two distinct.
 pub const MAX_PERSISTED_PEERS: usize = 64;
 
+/// Wait up to 5 s for the reply to the msg1 just sent to `peer_addr`.
+///
+/// The initiator state is single-use: handing it any datagram that merely
+/// carries the HandshakeResp type byte would fail the handshake. So a reply
+/// is only accepted from the peer's daemon port and at the exact msg2 size;
+/// anything else (a stray packet, a late reply to an earlier attempt, junk)
+/// is skipped and the wait goes on. The source IP is deliberately not
+/// compared: a multi-homed peer (Wi-Fi + Ethernet) may answer from another
+/// of its addresses.
+async fn await_msg2(
+    incoming: &mut mpsc::UnboundedReceiver<(SocketAddr, Vec<u8>)>,
+    peer_addr: SocketAddr,
+) -> Result<Vec<u8>> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let (from, msg) = tokio::time::timeout_at(deadline, incoming.recv())
+            .await
+            .map_err(|_| anyhow!("timeout (no resp in 5s)"))?
+            .ok_or_else(|| anyhow!("channel closed"))?;
+        if from.port() == peer_addr.port() && msg.len() == fluxsync_crypto::IK_MSG2_LEN {
+            return Ok(msg);
+        }
+        tracing::debug!(%from, len = msg.len(), "ignoring a HandshakeResp that cannot be our reply");
+    }
+}
+
 /// Run the initiator side. Sends msg1, then awaits one msg2 on the
 /// `incoming` channel. Times out after 5 s.
 #[allow(clippy::too_many_arguments)]
@@ -116,7 +142,7 @@ pub async fn run_initiator(
     peer_static_pub: [u8; 32],
     peer_addr: SocketAddr,
     transport: Arc<Transport>,
-    mut incoming: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut incoming: mpsc::UnboundedReceiver<(SocketAddr, Vec<u8>)>,
     event_tx: mpsc::Sender<Event>,
     peer_id: [u8; 32],
     peer_name: String,
@@ -135,10 +161,9 @@ pub async fn run_initiator(
         .send_typed(TYPE_HANDSHAKE_INIT, &msg1, peer_addr)
         .await?;
 
-    let msg2 = tokio::time::timeout(std::time::Duration::from_secs(5), incoming.recv())
+    let msg2 = await_msg2(&mut incoming, peer_addr)
         .await
-        .map_err(|_| anyhow!("handshake timeout (no resp in 5s)"))?
-        .ok_or_else(|| anyhow!("handshake channel closed"))?;
+        .map_err(|e| anyhow!("handshake: {e}"))?;
 
     let session = initiator.finish(&msg2)?;
     // H3 fix: a revoke/unpair/wipe that lands while this redial was already
@@ -243,7 +268,7 @@ pub async fn run_rekey_initiator(
     peer_static_pub: [u8; 32],
     peer_addr: SocketAddr,
     transport: Arc<Transport>,
-    mut incoming: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut incoming: mpsc::UnboundedReceiver<(SocketAddr, Vec<u8>)>,
     event_tx: mpsc::Sender<Event>,
     peer_id: [u8; 32],
     expected_generation: u64,
@@ -257,10 +282,9 @@ pub async fn run_rekey_initiator(
         .send_typed(TYPE_HANDSHAKE_INIT, &msg1, peer_addr)
         .await?;
 
-    let msg2 = tokio::time::timeout(std::time::Duration::from_secs(5), incoming.recv())
+    let msg2 = await_msg2(&mut incoming, peer_addr)
         .await
-        .map_err(|_| anyhow!("rekey handshake timeout (no resp in 5s)"))?
-        .ok_or_else(|| anyhow!("rekey handshake channel closed"))?;
+        .map_err(|e| anyhow!("rekey handshake: {e}"))?;
 
     let session = initiator.finish(&msg2)?;
     // H3 fix: same re-check as `run_initiator` — a revoke/unpair/wipe that
@@ -368,6 +392,25 @@ pub async fn run_responder(
     } else {
         None
     };
+
+    // T1: each msg1 answers once — a replay of a trusted peer's earlier msg1
+    // must not replace its live session (see `AnsweredInits`). Recorded only
+    // for a msg1 that could be accepted (a trusted peer, or the pairing
+    // window is open), so strangers' handshakes can't churn the cache.
+    let could_accept = trusted.lock().await.contains_key(&peer_id)
+        || pairing_window
+            .lock()
+            .await
+            .is_some_and(|deadline| Instant::now() < deadline);
+    if could_accept
+        && !transport
+            .answered_inits
+            .lock()
+            .await
+            .first_answer(&init_msg)
+    {
+        anyhow::bail!("replayed HandshakeInit from {from}; refusing");
+    }
 
     let mut newly_tofu = false;
     let entry = {
@@ -755,6 +798,72 @@ mod tests {
         );
     }
 
+    /// T3: a stray HandshakeResp — junk, or a reply-shaped datagram from
+    /// another port — must not cost the dial. The single-use initiator state
+    /// used to be spent on whatever 0x02 datagram arrived first, failing the
+    /// handshake.
+    #[tokio::test]
+    async fn stray_handshake_resp_does_not_abort_the_dial() {
+        use super::{peer_id_for, run_initiator, TrustedPeer, TrustedSet};
+        use crate::transport::{Transport, TYPE_HANDSHAKE_INIT};
+        use fluxsync_core::Event;
+        use fluxsync_crypto::{Identity, Responder, IK_MSG2_LEN};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::net::UdpSocket;
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _port) = Transport::bind("127.0.0.1", 0).await.expect("bind");
+        let transport = Arc::new(transport);
+        let my_identity = Identity::generate();
+        let peer_identity = Identity::generate();
+        let peer_static = peer_identity.public_key();
+        let peer_id = peer_id_for(&peer_static);
+        let peer_sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind peer");
+        let peer_addr = peer_sock.local_addr().expect("peer addr");
+        let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
+        trusted.lock().await.insert(
+            peer_id,
+            TrustedPeer {
+                static_pub: peer_static,
+                name: "peer".into(),
+            },
+        );
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(16);
+        let (msg2_tx, msg2_rx) = mpsc::unbounded_channel::<(std::net::SocketAddr, Vec<u8>)>();
+        let handle = tokio::spawn(run_initiator(
+            my_identity,
+            peer_static,
+            peer_addr,
+            transport.clone(),
+            msg2_rx,
+            event_tx,
+            peer_id,
+            "peer".into(),
+            None,
+            trusted,
+            None,
+        ));
+
+        let mut buf = [0u8; 2048];
+        let (n, _) = peer_sock.recv_from(&mut buf).await.expect("recv msg1");
+        assert_eq!(buf[0], TYPE_HANDSHAKE_INIT);
+        let (_peer_session, msg2, _) =
+            Responder::step(&peer_identity, &buf[1..n]).expect("responder step");
+
+        let elsewhere: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+        msg2_tx.send((peer_addr, vec![0xAB; 7])).unwrap(); // junk size
+        msg2_tx.send((elsewhere, vec![0xCD; IK_MSG2_LEN])).unwrap(); // other port
+        msg2_tx.send((peer_addr, msg2)).unwrap(); // the real reply
+
+        let result = handle.await.expect("run_initiator panicked");
+        assert!(result.is_ok(), "dial failed: {result:?}");
+        assert!(
+            transport.has_session_for(peer_id).await,
+            "no session installed"
+        );
+    }
+
     /// H3: a reconnect redial (`run_initiator`) that completes its Noise
     /// handshake AFTER the peer was removed from `trusted` (simulating a
     /// revoke/unpair/wipe racing an in-flight redial) must abort the
@@ -802,7 +911,7 @@ mod tests {
         );
 
         let (event_tx, _event_rx) = mpsc::channel::<Event>(16);
-        let (msg2_tx, msg2_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (msg2_tx, msg2_rx) = mpsc::unbounded_channel::<(std::net::SocketAddr, Vec<u8>)>();
 
         let handle = tokio::spawn(run_initiator(
             my_identity,
@@ -830,7 +939,7 @@ mod tests {
         // closes.
         trusted.lock().await.remove(&peer_id);
 
-        msg2_tx.send(msg2).expect("deliver msg2");
+        msg2_tx.send((peer_addr, msg2)).expect("deliver msg2");
 
         let result = handle.await.expect("run_initiator task panicked");
         assert!(
@@ -841,6 +950,81 @@ mod tests {
             !transport.has_session_for(peer_id).await,
             "H3: a peer revoked mid-reconnect must never end up with an installed session"
         );
+    }
+
+    /// T1: a trusted peer's msg1, captured off the LAN and replayed, must not
+    /// replace its live session (one the real peer holds no keys for) nor
+    /// repin its address to the replayer. Each msg1 answers once.
+    #[tokio::test]
+    async fn replayed_handshake_init_cannot_replace_a_live_session() {
+        use super::{
+            peer_id_for, run_responder, PairingWindow, PendingSet, TrustedPeer, TrustedSet,
+        };
+        use fluxsync_core::Event;
+        use fluxsync_crypto::{Identity, Initiator};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::net::UdpSocket;
+        use tokio::sync::{mpsc, Mutex};
+
+        let (transport, _) = crate::transport::Transport::bind("127.0.0.1", 0)
+            .await
+            .unwrap();
+        let transport = Arc::new(transport);
+        let me = Identity::generate();
+        let peer = Identity::generate();
+        let peer_id = peer_id_for(&peer.public_key());
+        let trusted: TrustedSet = Arc::new(Mutex::new(HashMap::new()));
+        trusted.lock().await.insert(
+            peer_id,
+            TrustedPeer {
+                static_pub: peer.public_key(),
+                name: "peer".into(),
+            },
+        );
+        let pending: PendingSet = Arc::new(Mutex::new(HashMap::new()));
+        let window: PairingWindow = Arc::new(Mutex::new(None));
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(16);
+        let real = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let attacker = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let (_init, msg1) = Initiator::start(&peer, &me.public_key()).unwrap();
+        let respond = |msg: Vec<u8>, from: std::net::SocketAddr| {
+            run_responder(
+                me.clone(),
+                msg,
+                from,
+                transport.clone(),
+                trusted.clone(),
+                window.clone(),
+                event_tx.clone(),
+                None,
+                pending.clone(),
+            )
+        };
+        respond(msg1.clone(), real.local_addr().unwrap())
+            .await
+            .expect("the genuine msg1 links");
+        let generation = transport.session_generation_for(peer_id).await;
+
+        // The same bytes again, from the attacker's address.
+        assert!(respond(msg1, attacker.local_addr().unwrap()).await.is_err());
+        assert_eq!(
+            transport.session_generation_for(peer_id).await,
+            generation,
+            "a replay must not replace the live session"
+        );
+        assert_eq!(
+            transport.peer_addr_for(peer_id).await,
+            Some(real.local_addr().unwrap()),
+            "a replay must not repin the peer's address"
+        );
+
+        // A fresh msg1 from the real peer (a genuine reconnect/rekey) still works.
+        let (_init, fresh) = Initiator::start(&peer, &me.public_key()).unwrap();
+        respond(fresh, real.local_addr().unwrap())
+            .await
+            .expect("a fresh msg1 still links");
     }
 
     /// FluxMesh bug fix (Bug #10b): a SECONDARY peer reconnecting after its

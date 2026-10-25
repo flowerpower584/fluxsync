@@ -304,7 +304,7 @@ pub(super) async fn rekey_watchdog(sh: Arc<Shared>, max_age_ms: u64, max_bytes: 
                     // across every peer, so once taken no other due peer can
                     // start either; stop scanning rather than looping
                     // through the rest for nothing.
-                    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                    let (tx, rx) = mpsc::unbounded_channel::<(SocketAddr, Vec<u8>)>();
                     {
                         let mut g = pending_initiator_tx.lock().await;
                         if g.is_some() {

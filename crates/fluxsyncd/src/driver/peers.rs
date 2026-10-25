@@ -103,11 +103,15 @@ pub(super) async fn save_current_peers(
     trusted: &TrustedSet,
     _transport: &Transport,
 ) -> Result<()> {
-    let existing_addrs: HashMap<String, Option<String>> = crate::keystore::load_peers(dir)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|p| (p.peer_id_hex, p.last_addr))
-        .collect();
+    let existing_addrs: HashMap<String, Option<String>> = {
+        let dir = dir.to_path_buf();
+        off_thread(move || crate::keystore::load_peers(&dir))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| (p.peer_id_hex, p.last_addr))
+            .collect()
+    };
     let stored: Vec<crate::keystore::StoredPeer> = {
         let g = trusted.lock().await;
         g.iter()
@@ -123,7 +127,8 @@ pub(super) async fn save_current_peers(
             })
             .collect()
     };
-    crate::keystore::save_peers(dir, &stored)
+    let dir = dir.to_path_buf();
+    off_thread(move || crate::keystore::save_peers(&dir, &stored)).await
 }
 
 /// FS-052 / VULN-001 fix: persist `trusted` to `peers.json` with up to
@@ -183,16 +188,21 @@ pub(crate) async fn upsert_peer_persist(
     entry: crate::keystore::StoredPeer,
 ) -> Result<()> {
     let _disk_guard = transport.peers_disk_lock.lock().await;
-    let mut stored = crate::keystore::load_peers(dir).with_context(|| {
-        format!(
-            "read {}/peers.json before upsert; refusing to overwrite a corrupt file",
-            dir.display()
-        )
-    })?;
+    let owned_dir = dir.to_path_buf();
+    let mut stored = off_thread(move || crate::keystore::load_peers(&owned_dir))
+        .await
+        .with_context(|| {
+            format!(
+                "read {}/peers.json before upsert; refusing to overwrite a corrupt file",
+                dir.display()
+            )
+        })?;
     crate::keystore::upsert_peer(&mut stored, entry);
+    let stored = Arc::new(stored);
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..PEERS_PERSIST_ATTEMPTS {
-        match crate::keystore::save_peers(dir, &stored) {
+        let (dir, stored) = (dir.to_path_buf(), Arc::clone(&stored));
+        match off_thread(move || crate::keystore::save_peers(&dir, &stored)).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 tracing::warn!(attempt, error = %e, "upsert_peer_persist save failed; retrying");

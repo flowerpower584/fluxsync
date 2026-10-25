@@ -94,7 +94,10 @@ pub(super) async fn handle_driver_cmd(
             // Persist so the policy survives a daemon restart (best-effort: a
             // write failure logs but never fails the command).
             if let Some(dir) = keystore_dir {
-                if let Err(e) = crate::keystore::save_firewall(dir, app.firewall()) {
+                let (dir, policy) = (dir.clone(), app.firewall().clone());
+                if let Err(e) =
+                    off_thread(move || crate::keystore::save_firewall(&dir, &policy)).await
+                {
                     tracing::warn!(error = %e, "failed to persist firewall policy");
                 }
             }
@@ -285,7 +288,10 @@ pub(super) async fn handle_driver_cmd(
                 // ship in the next `Msg::Hello`) even if the disk write
                 // doesn't survive a restart.
                 if let Some(dir) = keystore_dir {
-                    if let Err(e) = crate::keystore::save_device_name(dir, &resolved) {
+                    let (dir, name) = (dir.clone(), resolved.clone());
+                    if let Err(e) =
+                        off_thread(move || crate::keystore::save_device_name(&dir, &name)).await
+                    {
                         tracing::warn!(error = %e, "failed to persist device name");
                     }
                 }

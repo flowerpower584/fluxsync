@@ -219,6 +219,10 @@ impl RecentWrites {
     }
 }
 
+/// Single-flight slot of the in-flight initiator handshake: where the
+/// receive loop routes each HandshakeResp, tagged with its source address.
+pub(super) type PendingInitiator = Arc<Mutex<Option<mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>>>>;
+
 /// Map of clipboard items sent but not yet acked, keyed by item hash.
 pub(super) type InflightMap = Arc<Mutex<HashMap<[u8; 32], Inflight>>>;
 
@@ -444,6 +448,17 @@ pub(super) async fn build_paired(
     out
 }
 
+/// Run a blocking keystore read or write (file I/O plus fsyncs — tens of
+/// milliseconds, far more on a slow or busy disk) on the blocking pool
+/// instead of stalling an async worker that also drives the network.
+pub(super) async fn off_thread<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| anyhow!("keystore task failed: {e}"))?
+}
+
 /// Wait this long for an ack before re-sending an inflight item.
 pub(super) const RETRANSMIT_INTERVAL: Duration = Duration::from_secs(2);
 /// Drop the item after this many re-sends with no ack.
@@ -504,7 +519,7 @@ pub(super) struct Shared {
     pub(super) trusted: TrustedSet,
     pub(super) pairing_window: PairingWindow,
     pub(super) pending_pairs: PendingSet,
-    pub(super) pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
+    pub(super) pending_initiator_tx: PendingInitiator,
     pub(super) deferred_sas_confirm: DeferredSasConfirm,
     pub(super) pin_advert: PinAdvertisement,
     pub(super) disc_cache: DiscoveryCache,

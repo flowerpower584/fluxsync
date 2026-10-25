@@ -65,6 +65,11 @@ impl Initiator {
     }
 }
 
+/// Size of the responder's reply (`msg2`): its ephemeral key plus the AEAD
+/// tag over an empty payload. Lets a caller discard a datagram that cannot
+/// be a reply before spending the single-use initiator state on it.
+pub const IK_MSG2_LEN: usize = 32 + 16;
+
 /// Responder side of the Noise IK handshake.
 pub struct Responder;
 
@@ -113,5 +118,17 @@ impl Responder {
             .map_err(|e| CryptoError::Transport(e.to_string()))?;
 
         Ok((Session::new(transport, hash), buf, remote_static))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn msg2_has_the_documented_length() {
+        let a = crate::Identity::generate();
+        let b = crate::Identity::generate();
+        let (_init, msg1) = super::Initiator::start(&a, &b.public_key()).unwrap();
+        let (_session, msg2, _) = super::Responder::step(&b, &msg1).unwrap();
+        assert_eq!(msg2.len(), super::IK_MSG2_LEN);
     }
 }

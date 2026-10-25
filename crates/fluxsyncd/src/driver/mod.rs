@@ -279,8 +279,7 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
 
     // Pending initiator coordination: at most one handshake in flight
     // (single peer in v0.1.1). transport_recv routes msg2 here.
-    let pending_initiator_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>> =
-        Arc::new(Mutex::new(None));
+    let pending_initiator_tx: PendingInitiator = Arc::new(Mutex::new(None));
 
     // Pairing window for TOFU on the responder side. Set by `PairShow`
     // to `now + 5 min`; outside the window the responder enforces strict

@@ -360,7 +360,7 @@ pub(super) async fn start_initiator(
             tracing::debug!("initiator already pending; skipping");
             return;
         }
-        let (placeholder, _) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (placeholder, _) = mpsc::unbounded_channel::<(SocketAddr, Vec<u8>)>();
         *g = Some(placeholder);
     }
     let sh = Arc::clone(sh);
@@ -381,7 +381,7 @@ pub(super) async fn start_initiator(
         // refresh the channel + pending slot and try the next. One QR with
         // `a=lan,tailnet` thus works on the LAN and across a tailnet.
         for (i, addr) in addrs.iter().enumerate() {
-            let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            let (tx, rx) = mpsc::unbounded_channel::<(SocketAddr, Vec<u8>)>();
             *pending_initiator_tx.lock().await = Some(tx);
             // No address pinning here: `run_initiator` records `addr` via
             // `set_peer_info` on the slot the session actually lands in.
