@@ -91,6 +91,11 @@ pub struct State {
     /// kept. Applies to the list on screen and to the on-disk vault alike.
     #[serde(default = "default_history_retention")]
     pub history_retention_secs: u64,
+    /// Which devices acknowledged each history item: hex content hash →
+    /// device names, in ack order. Drives the "✓ delivered" mark in the
+    /// UIs. Only items still in `history` are kept.
+    #[serde(default)]
+    pub delivered: std::collections::BTreeMap<String, Vec<String>>,
     /// DIR-P3-10 (`fluxctl doctor`): mirrors `DaemonConfig::disable_mdns`
     /// (negated), so a client can tell "no live peer, mDNS is off" apart
     /// from "no live peer, still searching" without a new IPC round trip.
@@ -393,6 +398,7 @@ impl State {
             pending: Vec::new(),
             vault_wipe_gen: 0,
             history_retention_secs: DEFAULT_HISTORY_RETENTION_SECS,
+            delivered: std::collections::BTreeMap::new(),
             mdns_enabled: config.mdns_enabled,
             sas_phase: default_sas_phase(),
             sas_peer: None,

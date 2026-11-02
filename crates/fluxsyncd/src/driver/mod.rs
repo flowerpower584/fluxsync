@@ -904,6 +904,19 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
             }
             Some(driver_cmd) = cmd_rx.recv() => {
                 match driver_cmd {
+                    DriverCmd::Delivered { hash, peer_id } => {
+                        let snap = app.snapshot();
+                        let name = snap
+                            .paired
+                            .iter()
+                            .find(|d| d.peer_id == peer_id)
+                            .map(|d| d.name.clone())
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or_else(|| "another device".to_string());
+                        if app.mark_delivered(&hash, &name) {
+                            dispatch(vec![Action::EmitState], &mut app, &mut seq_store, &shared).await;
+                        }
+                    }
                     DriverCmd::PushImage { hash, png, preview } => {
                         use fluxsync_core::Clock;
                         let lamport = app.clock.tick();
@@ -972,6 +985,9 @@ pub(super) enum DriverCmd {
         png: Vec<u8>,
         preview: String,
     },
+    /// `peer_id` acknowledged the item with content hash `hash`: shown as
+    /// "delivered" in the UIs. Fire-and-forget.
+    Delivered { hash: [u8; 32], peer_id: [u8; 32] },
 }
 
 // ─────────────────────────────────────────────────────────────────

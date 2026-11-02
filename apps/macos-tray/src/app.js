@@ -403,6 +403,7 @@ const PREVIEW_DOM_CHARS = 220;
 
 let historyItems = [];          // newest-first, as sent by the daemon
 let historySig = null;          // cheap identity of `historyItems` (null = never rendered)
+let deliveredTo = {};           // hex hash → names of the devices that acknowledged it
 let renderedSig = null;         // historySig + filters at last DOM sync
 let searchQuery = '';
 let kindFilter = 'all';
@@ -430,9 +431,10 @@ function setHistory(s) {
     if (primaryHex && s.peer_name && !peerNames.has(primaryHex)) peerNames.set(primaryHex, s.peer_name);
     peerNames.set('', primaryName(s) || 'peer');
   }
-  // Rows only change on add/remove/pin/peer rename — never on heartbeats.
+  deliveredTo = (s && s.delivered) || {};
+  // Rows only change on add/remove/pin/peer rename/delivery — never on heartbeats.
   let sig = '';
-  for (const h of items) sig += itemKey(h) + (h.favorite ? '*' : '') + (h.sensitive ? '!' : '') + originLabel(h) + '\n';
+  for (const h of items) sig += itemKey(h) + (h.favorite ? '*' : '') + (h.sensitive ? '!' : '') + originLabel(h) + (deliveredTo[h.hash] || []).join(',') + '\n';
   if (sig === historySig) return;
   historySig = sig;
   historyItems = items;
@@ -588,7 +590,8 @@ function patchRow(entry, h, index) {
   const kind = itemKind(h);
   const from = originLabel(h);
   const remote = h.source === 'remote';
-  const sig = [kind, h.favorite, h.sensitive, h.time, from, remote].join('|');
+  const got = remote ? [] : (deliveredTo[h.hash] || []);
+  const sig = [kind, h.favorite, h.sensitive, h.time, from, remote, got.join(',')].join('|');
   if (entry.sig !== sig) {
     entry.sig = sig;
     if (entry.kindName !== kind) {
@@ -614,6 +617,13 @@ function patchRow(entry, h, index) {
       sens.innerHTML = ICON.lock;
       sens.append(document.createTextNode('Sensitive'));
       parts.push(sens);
+    }
+    // Delivery: the devices that acknowledged a copy made here.
+    if (got.length) {
+      const ok = make('span', 'got');
+      ok.textContent = got.length > 2 ? `✓ ${got.length} devices` : `✓ ${got.join(', ')}`;
+      ok.title = `Arrived on ${got.join(', ')}`;
+      parts.push(ok);
     }
     entry.origin.replaceChildren(...parts);
     entry.time.textContent = h.time || '—';

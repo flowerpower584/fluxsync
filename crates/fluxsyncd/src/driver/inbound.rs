@@ -797,7 +797,12 @@ pub(super) async fn dispatch_inbound_frame(frame: Frame, peer_id: [u8; 32], sh: 
                 // the item is removed only once every targeted peer has acked.
                 let mut map = inflight.lock().await;
                 if let Some(item) = map.get_mut(&ack.hash) {
-                    item.pending_peers.remove(&peer_id);
+                    if item.pending_peers.remove(&peer_id) {
+                        let _ = sh.cmd_tx.send(DriverCmd::Delivered {
+                            hash: ack.hash,
+                            peer_id,
+                        });
+                    }
                     if item.pending_peers.is_empty() {
                         map.remove(&ack.hash);
                         tracing::debug!(item = ?&ack.hash[..6], "item fully acked; retransmit cleared");

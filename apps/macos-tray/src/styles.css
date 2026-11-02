@@ -229,6 +229,7 @@ html, body { height: 100%; overflow: hidden; }
 .origin .dir.in { color: var(--flux-ink); }
 .origin .dir svg { flex-shrink: 0; }
 .origin .sens { color: var(--wait); display: inline-flex; align-items: center; gap: 3px; }
+.origin .got { color: var(--live-ink); white-space: nowrap; }
 .row-side { display: flex; align-items: center; gap: 5px; padding-right: 10px; flex-shrink: 0; }
 .row-side .pinned { display: none; color: var(--flux-ink); }
 .row.pinned .row-side .pinned { display: inline-flex; }

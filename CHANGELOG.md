@@ -23,6 +23,9 @@ Versions follow [SemVer](https://semver.org/).
   app (`.deb`/`.AppImage`) covers Linux, systray included.
 
 ### Added
+- **Delivery marks.** Each copy made on a device shows which devices
+  acknowledged it — "✓ Pixel", "✓ Pixel, Mac" or "✓ 3 devices" — in the
+  desktop and Android history.
 - **Android: three ways to send without the Accessibility capture** — a
   "Send clipboard" button on the FluxSync notification, a quick-settings
   tile, and "Share → FluxSync" for text and images. Android only lets the

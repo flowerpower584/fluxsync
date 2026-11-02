@@ -262,6 +262,27 @@ impl App {
         self.state.history.len() != before
     }
 
+    /// Record that `device` acknowledged the history item with content hash
+    /// `hash`. Returns whether anything changed (an unknown item or a
+    /// repeated ack is ignored). Entries for items no longer in the history
+    /// are dropped on the way.
+    pub fn mark_delivered(&mut self, hash: &[u8; 32], device: &str) -> bool {
+        let key = hex32(hash);
+        let history = &self.state.history;
+        if !history.iter().any(|h| h.hash == key) {
+            return false;
+        }
+        self.state
+            .delivered
+            .retain(|k, _| history.iter().any(|h| &h.hash == k));
+        let devices = self.state.delivered.entry(key).or_default();
+        if devices.iter().any(|d| d == device) {
+            return false;
+        }
+        devices.push(device.to_string());
+        true
+    }
+
     /// Current firewall policy (for the state projection / IPC readback).
     #[must_use]
     pub fn firewall(&self) -> &FirewallPolicy {
@@ -1466,6 +1487,31 @@ mod tests {
         app.set_history_retention(0, u64::MAX).unwrap();
         assert!(!app.expire_history(u64::MAX), "forever never expires");
         assert!(app.set_history_retention(42, 0).is_err());
+    }
+
+    #[test]
+    fn delivery_marks_follow_the_history() {
+        let mut app = boot();
+        app.handle(
+            Event::LocalClipboardChange {
+                kind: Kind::Text,
+                hash: [5; 32],
+                payload: b"hello".to_vec(),
+                preview: "hello".into(),
+                sensitive: false,
+                lamport: 1,
+            },
+            &wall(),
+        );
+        let key = hex32(&[5; 32]);
+        assert!(app.mark_delivered(&[5; 32], "Pixel"));
+        assert!(
+            !app.mark_delivered(&[5; 32], "Pixel"),
+            "a repeated ack changes nothing"
+        );
+        assert!(app.mark_delivered(&[5; 32], "Mac"));
+        assert_eq!(app.state.delivered[&key], ["Pixel", "Mac"]);
+        assert!(!app.mark_delivered(&[6; 32], "Pixel"), "not in the history");
     }
 
     #[test]

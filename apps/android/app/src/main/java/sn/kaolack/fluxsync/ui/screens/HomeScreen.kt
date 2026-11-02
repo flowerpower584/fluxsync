@@ -415,6 +415,17 @@ private fun RecentRow(h: HistoryItem, onToggleFavorite: () -> Unit) {
             Text("Copy", color = FsDarkMuted, fontFamily = FsSans, fontSize = 9.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.width(8.dp))
         }
+        if (h.source != "remote" && h.deliveredTo.isNotEmpty()) {
+            val names = h.deliveredTo
+            Text(
+                if (names.size > 2) "✓ ${names.size}" else "✓ ${names.joinToString(", ")}",
+                color = FsAccent,
+                fontFamily = FsSans,
+                fontSize = 9.sp,
+                maxLines = 1,
+            )
+            Spacer(Modifier.width(8.dp))
+        }
         Text(h.time.ifEmpty { "—" }, color = FsDarkSubtle, fontFamily = FsMono, fontSize = 10.sp)
     }
 }

@@ -74,7 +74,7 @@ data class DaemonState(
                 selfBattery = o.optInt("battery_level", 0),
                 selfCharging = o.optBoolean("charging", false),
                 linkLatencyMs = o.optInt("link_latency_ms", 0),
-                history = parseHistory(o.optJSONArray("history")),
+                history = parseHistory(o.optJSONArray("history"), o.optJSONObject("delivered")),
                 version = o.optString("version", ""),
                 cipher = o.optString("cipher", ""),
                 deviceName = o.optString("device_name", ""),
@@ -144,7 +144,7 @@ data class DaemonState(
             return out
         }
 
-        private fun parseHistory(arr: JSONArray?): List<HistoryItem> {
+        private fun parseHistory(arr: JSONArray?, delivered: JSONObject? = null): List<HistoryItem> {
             if (arr == null) return emptyList()
             val out = mutableListOf<HistoryItem>()
             for (i in 0 until arr.length()) {
@@ -159,6 +159,9 @@ data class DaemonState(
                     lamport = o.optLong("lamport", 0L),
                     favorite = o.optBoolean("favorite", false),
                     resync = o.optBoolean("resync", false),
+                    deliveredTo = delivered?.optJSONArray(o.optString("hash", ""))?.let { names ->
+                        (0 until names.length()).map { names.optString(it) }
+                    } ?: emptyList(),
                 )
             }
             return out
@@ -278,6 +281,8 @@ data class HistoryItem(
     // not be applied to the system clipboard. Defaults to false so parsing
     // tolerates an older daemon that omits the field entirely.
     val resync: Boolean = false,
+    /** Names of the devices that acknowledged this item ("✓ delivered"). */
+    val deliveredTo: List<String> = emptyList(),
 )
 
 /**
