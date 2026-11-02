@@ -28,6 +28,10 @@ fn received_label(kind: fluxsync_proto::Kind, payload: &[u8], preview: &str) -> 
             let kib = payload.len().div_ceil(1024);
             format!("Clipboard updated — image, {kib} KB from peer.")
         }
+        fluxsync_proto::Kind::File => {
+            let kib = payload.len().div_ceil(1024);
+            format!("File received — {kib} KB from peer.")
+        }
         _ => format!(
             "Clipboard updated — {} chars from peer.",
             preview.chars().count()

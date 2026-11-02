@@ -376,8 +376,8 @@ private fun RecentRow(h: HistoryItem, onToggleFavorite: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     // Text rows carry their full payload in `preview`; tapping copies it back.
-    // Image previews are just a size label, so those rows aren't copyable.
-    val copyable = h.kind.lowercase() != "image" && h.preview.isNotEmpty()
+    // Image and file previews are just labels, so those rows aren't copyable.
+    val copyable = h.kind.lowercase() !in setOf("image", "file") && h.preview.isNotEmpty()
     Row(
         modifier = Modifier
             .fillMaxWidth()

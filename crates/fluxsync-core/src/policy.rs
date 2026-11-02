@@ -164,7 +164,8 @@ impl FirewallPolicy {
             Kind::Text => self.text,
             Kind::Url => self.url,
             Kind::Code => self.code,
-            Kind::Image => self.image,
+            // Files follow the binary-content rule ("Images & files").
+            Kind::Image | Kind::File => self.image,
         }
     }
 

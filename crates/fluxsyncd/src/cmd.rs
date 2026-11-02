@@ -65,6 +65,12 @@ pub enum CmdOp {
         #[serde(default)]
         sensitive: bool,
     },
+    /// Send a file (`data` = base64 of its bytes) under `name`, to the peers
+    /// that accept files. Used by the Android share sheet and `fluxctl`.
+    PushFile {
+        name: String,
+        data: String,
+    },
     /// Fetch a clipboard item's raw bytes by its hex content hash. Used
     /// by the Android client to pull an inbound image's PNG on demand —
     /// the state JSON only carries the hash + a label, never the bytes.

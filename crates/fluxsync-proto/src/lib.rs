@@ -10,6 +10,7 @@
 mod cbor_bytes;
 mod codec;
 mod error;
+pub mod file;
 mod types;
 
 pub use codec::{decode, encode};
@@ -115,8 +116,18 @@ pub fn validate_resync_hashes(hashes: &[String]) -> bool {
 /// `docs/PROTOCOL.md`), `sas-confirm` (wire-level mutual SAS confirmation
 /// via `Msg::PairConfirm`), and `verify-restart` (symmetric SAS re-verify
 /// announcement via `Msg::PairVerifyStarted` when one side re-pairs while
-/// the other silently reconnects as already-trusted).
-pub const SUPPORTED_CAPS: &[&str] = &["core-1", "resync-1", "sas-confirm", "verify-restart"];
+/// the other silently reconnects as already-trusted), and [`CAP_FILE`].
+pub const SUPPORTED_CAPS: &[&str] = &[
+    "core-1",
+    "resync-1",
+    "sas-confirm",
+    "verify-restart",
+    CAP_FILE,
+];
+
+/// Capability: the peer accepts [`Kind::File`] items. Without it a peer
+/// (any version before 0.8.0-beta.2) is never sent one.
+pub const CAP_FILE: &str = "file-1";
 
 /// Negotiate the working capability set with a peer: the intersection of
 /// what they sent in `Hello.caps` and what this build understands

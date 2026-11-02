@@ -231,6 +231,38 @@ pub(super) async fn handle_driver_cmd(
                 Err(e) => CmdResponse::err(req_id, format!("push_image: base64: {e}")),
             }
         }
+        CmdOp::PushFile { name, data } => {
+            use fluxsync_core::Clock;
+            match B64.decode(data.as_bytes()) {
+                Ok(bytes) if bytes.len() > MAX_PAYLOAD - 2 - fluxsync_proto::file::MAX_NAME => {
+                    CmdResponse::err(
+                        req_id,
+                        format!("push_file: file too large ({} bytes)", bytes.len()),
+                    )
+                }
+                Ok(bytes) => {
+                    let payload = fluxsync_proto::file::encode(&name, &bytes);
+                    let hash = DedupRing::hash(&payload).into_bytes();
+                    let preview = preview_label(Kind::File, &payload);
+                    let lamport = app.clock.tick();
+                    let actions = app.handle(
+                        Event::LocalClipboardChange {
+                            hash,
+                            kind: Kind::File,
+                            payload,
+                            preview,
+                            sensitive: false,
+                            lamport,
+                        },
+                        &**wall,
+                    );
+                    let actions = gate_outbound(actions, transport, pending_pairs).await;
+                    dispatch(actions, app, seq_store, sh).await;
+                    CmdResponse::ok(req_id, None)
+                }
+                Err(e) => CmdResponse::err(req_id, format!("push_file: base64: {e}")),
+            }
+        }
         CmdOp::FetchItem { hash } => match lookup_cached_image(&hash) {
             Some(png) => CmdResponse::ok(
                 req_id,

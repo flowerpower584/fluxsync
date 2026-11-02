@@ -406,7 +406,9 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                                 // #7: mark the hash seen ONLY after the write
                                 // actually lands. A thrown setPrimaryClip used
                                 // to mark-then-lose the item with no retry.
-                                val ok = if (item.kind == "image") {
+                                val ok = if (item.kind == "file") {
+                                    saveReceivedFile(item.hash)
+                                } else if (item.kind == "image") {
                                     syncImageToSystemClipboard(item.hash)
                                 } else {
                                     syncToSystemClipboard(item.preview, item.sensitive)
@@ -512,6 +514,48 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                 false
             }
         }
+
+    /**
+     * Save a received file in Downloads/FluxSync. The daemon caches the
+     * framed payload (u16 name length · name · bytes) under its hash.
+     * Returns true once it is on disk.
+     */
+    private suspend fun saveReceivedFile(hash: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val payload = FluxsyncManager.withHandle { it.fetchItem(hash) } ?: return@withContext false
+            if (payload.size < 2) return@withContext false
+            val nameLen = ((payload[0].toInt() and 0xff) shl 8) or (payload[1].toInt() and 0xff)
+            if (payload.size < 2 + nameLen) return@withContext false
+            val name = String(payload, 2, nameLen, Charsets.UTF_8)
+                .substringAfterLast('/').substringAfterLast('\\').trimStart('.').ifBlank { "file" }
+            val bytes = payload.copyOfRange(2 + nameLen, payload.size)
+            if (Build.VERSION.SDK_INT >= 29) {
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Download/FluxSync")
+                }
+                val uri = contentResolver.insert(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values,
+                ) ?: return@withContext false
+                contentResolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return@withContext false
+            } else {
+                val dir = File(getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS), "FluxSync")
+                    .apply { mkdirs() }
+                File(dir, name).writeBytes(bytes)
+            }
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(
+                    this@FluxsyncAccessibilityService,
+                    "Received $name — in Downloads/FluxSync",
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
+            true
+        } catch (e: Exception) {
+            android.util.Log.e("FluxSync", "Failed to save received file: ${e.message}")
+            false
+        }
+    }
 
     /** Clear [text] from the clipboard after a minute if it is still there. */
     private fun expireSecretLater(text: String) {

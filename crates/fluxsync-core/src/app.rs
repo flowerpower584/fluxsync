@@ -741,7 +741,7 @@ impl App {
                 // bytes instead whenever the payload isn't valid UTF-8, so
                 // distinct invalid payloads can never collide; valid UTF-8
                 // text still canonicalizes exactly as before.
-                let computed = if matches!(kind, Kind::Image) {
+                let computed = if matches!(kind, Kind::Image | Kind::File) {
                     DedupRing::hash(payload)
                 } else {
                     match std::str::from_utf8(payload) {

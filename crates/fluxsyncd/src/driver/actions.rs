@@ -324,10 +324,12 @@ pub(super) async fn dispatch(
                         // here, per-target.
                         let send_targets: Vec<[u8; 32]> = {
                             let pending = pending_pairs.lock().await;
+                            let meta = sh.peer_meta.lock().await;
                             targets
                                 .iter()
                                 .copied()
                                 .filter(|p| !pending.contains_key(p))
+                                .filter(|p| accepts_kind(&meta, p, kind))
                                 .collect()
                         };
                         if send_targets.len() != targets.len() {
@@ -418,7 +420,53 @@ pub(super) async fn dispatch(
                 // UTF-8 for text, RGBA pixels for images) so it matches
                 // what the watcher computes on read-back — a re-encoded
                 // PNG would hash differently.
-                if matches!(kind, Kind::Image) {
+                if matches!(kind, Kind::File) {
+                    // Cached by hash (like images) so a client — the Android
+                    // app, which saves it itself — can `fetch_item` it.
+                    let hash = DedupRing::hash(&payload).into_bytes();
+                    if !sensitive {
+                        cache_image(hex::encode(hash), payload.clone());
+                    }
+                    // Saved only where there's a clipboard to put it on (not
+                    // in a headless or test daemon); `fetch_item` serves it
+                    // otherwise.
+                    #[cfg(not(target_os = "android"))]
+                    if sh.clipboard_writer.is_none() {
+                        tracing::info!("file received; no clipboard here, not saved");
+                    } else if let Some((name, bytes)) = fluxsync_proto::file::decode(&payload) {
+                        let bytes = bytes.to_vec();
+                        let saved = off_thread(move || {
+                            save_received_file(&name, &bytes)
+                                .map(|path| (path, bytes))
+                                .map_err(anyhow::Error::from)
+                        })
+                        .await;
+                        match saved {
+                            Ok((path, bytes)) => {
+                                // The watcher reads the file back off the
+                                // clipboard under its saved name: mark both
+                                // forms as our own write.
+                                let mut written = last_written_hashes.lock().await;
+                                written.record(hash);
+                                if let Some(saved_name) = path.file_name() {
+                                    let reread = fluxsync_proto::file::encode(
+                                        &saved_name.to_string_lossy(),
+                                        &bytes,
+                                    );
+                                    written.record(DedupRing::hash(&reread).into_bytes());
+                                }
+                                drop(written);
+                                tracing::info!(path = %path.display(), "received file saved");
+                                if let Some(writer) = &sh.clipboard_writer {
+                                    writer.write(ClipWrite::Files(vec![path]));
+                                }
+                            }
+                            Err(e) => tracing::warn!(error = %e, "could not save received file"),
+                        }
+                    } else {
+                        tracing::warn!("WriteClipboard: malformed file payload");
+                    }
+                } else if matches!(kind, Kind::Image) {
                     #[cfg(not(target_os = "android"))]
                     if let Some((w, h, rgba)) = decode_png_to_rgba(&payload) {
                         let hash = image_rgba_hash(w, h, &rgba);

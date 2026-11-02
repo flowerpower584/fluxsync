@@ -454,6 +454,18 @@ impl FluxsyncHandle {
             .map_err(|e| FluxError::Ipc(e.to_string()))
     }
 
+    /// Send a file under `name` to the paired devices that accept files.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn push_file(&self, name: String, bytes: Vec<u8>) -> Result<(), FluxError> {
+        self.runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({"id": 1, "op": "push_file", "name": name, "data": B64.encode(&bytes)}),
+            ))
+            .map(|_| ())
+            .map_err(|e| FluxError::Ipc(e.to_string()))
+    }
+
     /// How long non-favorite history is kept, in seconds: 3600, 86400,
     /// 604800, or 0 for forever. Anything else is rejected daemon-side.
     pub fn set_history_retention(&self, secs: u64) -> Result<(), FluxError> {

@@ -23,6 +23,13 @@ Versions follow [SemVer](https://semver.org/).
   app (`.deb`/`.AppImage`) covers Linux, systray included.
 
 ### Added
+- **Files, up to 16 MB.** Copy a file on a computer and it arrives in
+  `Downloads/FluxSync` on the other one, already on its clipboard (paste
+  it in a folder); on Android it lands in Downloads/FluxSync. From
+  Android, share any file to FluxSync. Only between devices that both run
+  this version (new capability `file-1`); an older device is never sent
+  one, and files aren't relayed through a third device. File names can't
+  escape the downloads folder, and an existing file is never overwritten.
 - **Delivery marks.** Each copy made on a device shows which devices
   acknowledged it — "✓ Pixel", "✓ Pixel, Mac" or "✓ 3 devices" — in the
   desktop and Android history.

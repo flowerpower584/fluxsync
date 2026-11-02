@@ -415,6 +415,20 @@ impl PeerMeta {
 
 pub(super) type PeerMetaMap = Arc<Mutex<BTreeMap<[u8; 32], PeerMeta>>>;
 
+/// Whether `peer` can take an item of `kind`: a `File` only goes to a peer
+/// that negotiated [`fluxsync_proto::CAP_FILE`] (older versions can't
+/// decode it); every other kind goes to anyone.
+pub(super) fn accepts_kind(
+    meta: &BTreeMap<[u8; 32], PeerMeta>,
+    peer: &[u8; 32],
+    kind: Kind,
+) -> bool {
+    kind != Kind::File
+        || meta
+            .get(peer)
+            .is_some_and(|m| m.caps.iter().any(|c| c == fluxsync_proto::CAP_FILE))
+}
+
 /// Build the `State.peers` list from the live session set joined with the
 /// captured per-peer metadata. Only peers with a live session appear, so a
 /// torn-down link never lingers as a ghost. `primary` flags the peer the

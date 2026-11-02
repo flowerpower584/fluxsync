@@ -656,6 +656,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_poll_state(
     ): Short
+    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_file(
+    ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_item(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_text(
@@ -726,6 +728,8 @@ external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_poll_logs(`ptr`
 ): RustBuffer.ByValue
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_poll_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_file(`ptr`: Long,`name`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_item(`ptr`: Long,`kind`: RustBuffer.ByValue,`bytes`: RustBuffer.ByValue,`sensitive`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_text(`ptr`: Long,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -897,6 +901,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_poll_state() != 63397.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_file() != 54637.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_push_item() != 17752.toShort()) {
@@ -1446,6 +1453,11 @@ public interface FluxsyncHandleInterface {
     fun `pollState`(): kotlin.String
     
     /**
+     * Send a file under `name` to the paired devices that accept files.
+     */
+    fun `pushFile`(`name`: kotlin.String, `bytes`: kotlin.ByteArray)
+    
+    /**
      * Inject a typed clipboard item. `kind` is `"text"` or `"image"`;
      * `bytes` is the raw payload (UTF-8 for text, PNG for image). Image
      * bytes ride to the daemon as base64 since the IPC channel is NDJSON.
@@ -1832,6 +1844,22 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
     }
     )
     }
+    
+
+    
+    /**
+     * Send a file under `name` to the paired devices that accept files.
+     */
+    @Throws(FluxException::class)override fun `pushFile`(`name`: kotlin.String, `bytes`: kotlin.ByteArray)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_push_file(
+        it,
+        FfiConverterString.lower(`name`),FfiConverterByteArray.lower(`bytes`),_status)
+}
+    }
+    
     
 
     

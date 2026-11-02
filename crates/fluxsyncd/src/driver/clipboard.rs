@@ -18,8 +18,77 @@ pub(super) fn clipboard_dedup_hash(text: &str) -> [u8; 32] {
 pub(super) fn preview_label(kind: Kind, payload: &[u8]) -> String {
     match kind {
         Kind::Image => format!("Image, {} KB", payload.len().div_ceil(1024)),
+        Kind::File => match fluxsync_proto::file::decode(payload) {
+            Some((name, bytes)) => file_label(&name, bytes.len()),
+            None => "File".to_string(),
+        },
         _ => String::from_utf8_lossy(payload).to_string(),
     }
+}
+
+/// History label for a file: "📎 report.pdf · 2.4 MB".
+pub(super) fn file_label(name: &str, len: usize) -> String {
+    #[allow(clippy::cast_precision_loss)] // display only
+    let size = if len >= 1024 * 1024 {
+        format!("{:.1} MB", len as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{} KB", len.div_ceil(1024))
+    };
+    format!("📎 {name} · {size}")
+}
+
+/// Largest file the watcher sends: the payload cap minus the name framing.
+const MAX_FILE_BYTES: usize = MAX_PAYLOAD - 2 - fluxsync_proto::file::MAX_NAME;
+
+/// Identity of a copied file on disk, so the watcher doesn't re-read the
+/// same file on every 200 ms tick.
+type FileKey = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
+
+/// The single regular file on the clipboard, if that's what it holds.
+/// `Some(None)`: the clipboard holds files, but not one we send (several,
+/// a folder, too big) — the caller must not fall through to text, which
+/// would send the paths.
+#[cfg(not(target_os = "android"))]
+fn copied_file() -> Option<Option<(FileKey, std::path::PathBuf)>> {
+    let paths = arboard::Clipboard::new()
+        .and_then(|mut cb| cb.get().file_list())
+        .ok()?;
+    if paths.is_empty() {
+        return None;
+    }
+    let [path] = paths.as_slice() else {
+        return Some(None);
+    };
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_FILE_BYTES as u64 {
+        return Some(None);
+    }
+    let key = (path.clone(), meta.len(), meta.modified().ok());
+    Some(Some((key, path.clone())))
+}
+
+/// Save a received file under `Downloads/FluxSync`, never overwriting:
+/// "name (1).ext" when "name.ext" exists. Returns where it landed.
+#[cfg(not(target_os = "android"))]
+pub(super) fn save_received_file(name: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    let dir = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| std::io::Error::other("no downloads folder"))?
+        .join("FluxSync");
+    std::fs::create_dir_all(&dir)?;
+    let name = fluxsync_proto::file::sanitize(name);
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.clone(), String::new()),
+    };
+    let mut path = dir.join(&name);
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    std::fs::write(&path, bytes)?;
+    Ok(path)
 }
 
 /// Dedup hash over an image's raw RGBA pixels (prefixed with its
@@ -156,6 +225,7 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
         ..
     } = &*sh;
     let mut last_seen_hash: Option<[u8; 32]> = None;
+    let mut last_file: Option<FileKey> = None;
     let mut interval = tokio::time::interval(Duration::from_millis(200));
     let mut last_session_est = 0u64;
     loop {
@@ -185,6 +255,10 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
                 // with the current OS clipboard to avoid blasting disconnected-state copies to the peer.
                 if est != last_session_est {
                     last_session_est = est;
+                    // A file copied while unlinked isn't sent either.
+                    if let Ok(Some(Some((key, _)))) = tokio::task::spawn_blocking(copied_file).await {
+                        last_file = Some(key);
+                    }
                     // Image-first, mirroring the poll below: a clipboard
                     // holding image/png means an image was copied, even
                     // when text/html is attached alongside.
@@ -210,7 +284,46 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
                         }
                     }
                 }
-                // ── Image (takes priority) ───────────────────────────
+                // ── File (a single copied file, ≤ 16 MiB) ────────────
+                // Checked first: copying a file in Finder/Explorer also puts
+                // its icon (an image) and its path (text) on the clipboard.
+                match tokio::task::spawn_blocking(copied_file).await {
+                    Ok(Some(None)) => continue,
+                    Ok(Some(Some((key, path)))) => {
+                        if last_file.as_ref() != Some(&key) {
+                            last_file = Some(key);
+                            let read = tokio::task::spawn_blocking(move || {
+                                let bytes = std::fs::read(&path).ok()?;
+                                let name = path.file_name()?.to_string_lossy().into_owned();
+                                Some((name, bytes))
+                            })
+                            .await;
+                            if let Ok(Some((name, bytes))) = read {
+                                let preview = file_label(&name, bytes.len());
+                                let payload = fluxsync_proto::file::encode(&name, &bytes);
+                                let hash = DedupRing::hash(&payload).into_bytes();
+                                let already = last_written_hashes.lock().await.is_echo(&hash);
+                                last_seen_hash = Some(hash);
+                                if !already
+                                    && cmd_tx
+                                        .send(DriverCmd::PushBinary {
+                                            kind: Kind::File,
+                                            hash,
+                                            payload,
+                                            preview,
+                                        })
+                                        .is_err()
+                                {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    _ => last_file = None,
+                }
+
+                // ── Image (takes priority over text) ─────────────────
                 // image/png on the clipboard means the user copied an
                 // image. Browsers attach text/html + text/x-moz-url
                 // alongside it; probing text first would let that URL
@@ -241,7 +354,12 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
                                         png.len().div_ceil(1024)
                                     );
                                     if cmd_tx
-                                        .send(DriverCmd::PushImage { hash, png, preview })
+                                        .send(DriverCmd::PushBinary {
+                                            kind: Kind::Image,
+                                            hash,
+                                            payload: png,
+                                            preview,
+                                        })
                                         .is_err()
                                     {
                                         tracing::error!("clipboard_watcher_loop: failed to send PushImage command");
@@ -321,6 +439,8 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
 /// One OS-clipboard write the daemon owes for an applied inbound item.
 pub(super) enum ClipWrite {
     Text(String),
+    /// Put these files on the clipboard (a received file, saved first).
+    Files(Vec<std::path::PathBuf>),
     /// Empty the clipboard if it still holds exactly this text — how a
     /// received secret expires (see [`SECRET_LIFETIME`]).
     ClearIfStill(String),
@@ -366,6 +486,7 @@ impl ClipboardWriter {
                     let Some(c) = cb.as_mut() else { return };
                     let res = match job {
                         ClipWrite::Text(text) => c.set_text(text),
+                        ClipWrite::Files(paths) => c.set().file_list(&paths),
                         ClipWrite::ClearIfStill(text) => match c.get_text() {
                             Ok(current) if current == text => c.clear(),
                             _ => Ok(()),

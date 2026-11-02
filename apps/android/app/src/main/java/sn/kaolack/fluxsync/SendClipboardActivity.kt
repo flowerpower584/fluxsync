@@ -55,6 +55,10 @@ class SendClipboardActivity : Activity() {
             sendImage(uri)
             return
         }
+        if (uri != null && uri.scheme == "content") {
+            sendFile(uri)
+            return
+        }
         val text = item.coerceToText(this)?.toString().orEmpty()
         if (text.isBlank()) {
             toast("Nothing to send")
@@ -75,7 +79,11 @@ class SendClipboardActivity : Activity() {
             @Suppress("DEPRECATION")
             intent.getParcelableExtra(Intent.EXTRA_STREAM)
         }
-        if (uri != null) sendImage(uri) else toast("Nothing to send")
+        when {
+            uri == null -> toast("Nothing to send")
+            intent.type?.startsWith("image/") == true -> sendImage(uri)
+            else -> sendFile(uri)
+        }
     }
 
     private fun sendText(text: String, sensitive: Boolean) {
@@ -104,6 +112,41 @@ class SendClipboardActivity : Activity() {
         }
     }
 
+    /** Any other file: sent as-is under its own name (up to 16 MB). */
+    private fun sendFile(uri: Uri) {
+        val app = applicationContext
+        thread(name = "fluxsync-send-file") {
+            val name = try {
+                app.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            } catch (e: Exception) {
+                null
+            } ?: uri.lastPathSegment ?: "file"
+            val bytes = try {
+                app.contentResolver.openInputStream(uri)?.use { input ->
+                    val out = ByteArrayOutputStream()
+                    val buf = ByteArray(64 * 1024)
+                    var total = 0
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > MAX_FILE_BYTES) return@use null
+                        out.write(buf, 0, n)
+                    }
+                    out.toByteArray()
+                }
+            } catch (e: Exception) {
+                null
+            }
+            if (bytes == null) {
+                toastFrom(app, "Couldn't send that file (16 MB at most)")
+            } else {
+                pushNow(app) { it.pushFile(name, bytes) }
+            }
+        }
+    }
+
     /** Run the FFI push off the main thread; the activity may already be gone. */
     private fun push(block: (FluxsyncHandle) -> Unit) {
         val app = applicationContext
@@ -113,6 +156,9 @@ class SendClipboardActivity : Activity() {
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
     companion object {
+        /** The daemon's 16 MiB item cap minus the name framing. */
+        private const val MAX_FILE_BYTES = 16 * 1024 * 1024 - 257
+
         private fun pushNow(app: Context, block: (FluxsyncHandle) -> Unit) {
             val sent = try {
                 FluxsyncManager.withHandle(block) != null

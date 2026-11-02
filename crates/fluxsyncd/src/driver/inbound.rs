@@ -420,6 +420,11 @@ pub(super) async fn complete_reassembled_item(sh: &Shared, item: CompleteItem) {
             }
         }
     }
+    // Files aren't relayed through the mesh: a hop may be a version that
+    // can't decode them. A device linked directly still gets them.
+    if kind == Kind::File {
+        block_relay = true;
+    }
     let frames = build_item_frames(lamport, hash, kind, &payload, sensitive, origin, event_seq);
     if !block_relay {
         forward_frames(
@@ -1230,6 +1235,9 @@ pub(super) async fn dispatch_inbound_frame(frame: Frame, peer_id: [u8; 32], sh: 
                         ?decision,
                         "resync-1: skipping cached entry — firewall no longer passes it"
                     );
+                    continue;
+                }
+                if !accepts_kind(&*sh.peer_meta.lock().await, &peer_id, entry.kind) {
                     continue;
                 }
                 // Lamport 0: `Entry` doesn't retain the original tick, and 0

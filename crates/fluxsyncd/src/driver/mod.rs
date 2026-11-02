@@ -917,14 +917,14 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
                             dispatch(vec![Action::EmitState], &mut app, &mut seq_store, &shared).await;
                         }
                     }
-                    DriverCmd::PushImage { hash, png, preview } => {
+                    DriverCmd::PushBinary { kind, hash, payload, preview } => {
                         use fluxsync_core::Clock;
                         let lamport = app.clock.tick();
                         let actions = app.handle(
                             Event::LocalClipboardChange {
                                 hash,
-                                kind: Kind::Image,
-                                payload: png,
+                                kind,
+                                payload,
                                 preview,
                                 // DIR-P2-05 boundary: an image copied to the OS
                                 // clipboard and picked up by this watcher (as
@@ -977,12 +977,14 @@ pub(super) enum DriverCmd {
         reply: oneshot::Sender<CmdResponse>,
         req_id: u64,
     },
-    /// Image copied to the local OS clipboard, forwarded by the clipboard
-    /// watcher. Carries the PNG-encoded payload, the RGBA-derived dedup
-    /// hash, and the history label. No IPC reply — fire-and-forget.
-    PushImage {
+    /// An image (PNG payload, RGBA-derived dedup hash) or a file
+    /// (`fluxsync_proto::file` framing, raw-payload hash) copied to the
+    /// local OS clipboard, forwarded by the clipboard watcher with its
+    /// history label. No IPC reply — fire-and-forget.
+    PushBinary {
+        kind: Kind,
         hash: [u8; 32],
-        png: Vec<u8>,
+        payload: Vec<u8>,
         preview: String,
     },
     /// `peer_id` acknowledged the item with content hash `hash`: shown as

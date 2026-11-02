@@ -13,7 +13,7 @@
 ## What it does
 
 - You copy something on your phone, and it's ready to paste on your computer, and the other way round.
-- It works with text, links, code and images, between any mix of Android, Mac, Windows and Linux.
+- It works with text, links, code, images and files (up to 16 MB), between any mix of Android, Mac, Windows and Linux. A copied file arrives in **Downloads/FluxSync** on the other device.
 - Everything goes **straight from one device to the other** on your network. Nothing passes through a server, and there's no account to create.
 
 **What you need:** two devices **on the same Wi-Fi** (or the same network), and about five minutes.

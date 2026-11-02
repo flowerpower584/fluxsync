@@ -3,7 +3,8 @@ use std::net::SocketAddr;
 
 /// Clipboard payload kind, matching the frontend's history items.
 ///
-/// Serialized as the lower-case strings `"text"`, `"url"`, `"code"`, `"image"`.
+/// Serialized as the lower-case strings `"text"`, `"url"`, `"code"`,
+/// `"image"`, `"file"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
@@ -12,6 +13,10 @@ pub enum Kind {
     Code,
     /// Binary image payload — PNG bytes (phase 1 is PNG-only).
     Image,
+    /// A copied file: [`crate::file::encode`] framing (name + bytes). Only
+    /// ever sent to a peer that negotiated [`crate::CAP_FILE`]; an older
+    /// peer can't decode this variant.
+    File,
 }
 
 /// Top-level wire envelope. Every UDP datagram, after decryption, decodes to

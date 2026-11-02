@@ -199,6 +199,8 @@ pub(super) fn verify_content_hash(kind: Kind, payload: &[u8], claimed: [u8; 32])
             Some((w, h, rgba)) => image_rgba_hash(w, h, &rgba),
             None => return false,
         },
+        // Files hash their raw framed payload, like every file sender.
+        Kind::File => DedupRing::hash(payload).into_bytes(),
         _ => match std::str::from_utf8(payload) {
             Ok(text) => DedupRing::hash(fluxsync_core::canon_text(text).as_bytes()).into_bytes(),
             Err(_) => DedupRing::hash(payload).into_bytes(),

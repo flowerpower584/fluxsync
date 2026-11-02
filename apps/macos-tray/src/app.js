@@ -83,6 +83,7 @@ const ICON = {
   url: svg(13, 13, '0 0 24 24', '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>', 'stroke-width="2"'),
   code: svg(14, 14, '0 0 24 24', '<path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/>', 'stroke-width="2"'),
   image: svg(13, 13, '0 0 24 24', '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/>', 'stroke-width="2"'),
+  file: svg(13, 13, '0 0 24 24', '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/>', 'stroke-width="2"'),
   inArrow: svg(10, 10, '0 0 10 10', '<path d="M8.5 1.5L2 8M2 3.5V8h4.5"/>', 'stroke-width="1.5"'),
   outArrow: svg(10, 10, '0 0 10 10', '<path d="M1.5 8.5L8 2M3.5 2H8v4.5"/>', 'stroke-width="1.5"'),
   star: svg(14, 14, '0 0 24 24', '<path d="M12 2.8l2.8 5.7 6.3.9-4.55 4.43 1.07 6.27L12 17.13 6.38 20.1l1.07-6.27L2.9 9.4l6.3-.9z"/>', 'stroke-width="1.8"'),
@@ -416,7 +417,7 @@ function itemKey(h) {
 }
 function itemKind(h) {
   const k = (h.kind || 'text').toLowerCase();
-  return ['text', 'url', 'code', 'image'].includes(k) ? k : 'text';
+  return ['text', 'url', 'code', 'image', 'file'].includes(k) ? k : 'text';
 }
 
 function setHistory(s) {
@@ -630,7 +631,9 @@ function patchRow(entry, h, index) {
 
     // Text rows carry their full payload in `preview`, so clicking copies
     // it straight back. Image rows fetch bytes on demand (DIR-P3-02(c)).
-    const copyable = kind === 'image' ? !!h.hash : !!h.preview;
+    // A received file is already in Downloads/FluxSync (and was put on the
+    // clipboard on arrival); its row is a record, not something to re-copy.
+    const copyable = kind === 'file' ? false : kind === 'image' ? !!h.hash : !!h.preview;
     entry.main.disabled = !copyable;
     entry.main.title = copyable ? 'Copy to clipboard' : '';
     const what = h.sensitive ? 'Sensitive item' : (kind === 'image' ? (h.preview || 'Image') : displayText(h).slice(0, 80));
