@@ -107,6 +107,8 @@ pub(super) async fn forward_frames(
     transport: &Arc<Transport>,
     inflight: &InflightMap,
     pending_pairs: &PendingSet,
+    peer_meta: &PeerMetaMap,
+    kind: Kind,
     source: [u8; 32],
     origin: [u8; 32],
     hash: [u8; 32],
@@ -119,9 +121,12 @@ pub(super) async fn forward_frames(
     let all_targets = transport.linked_peer_ids().await;
     let targets: Vec<[u8; 32]> = {
         let pending = pending_pairs.lock().await;
+        // A file only goes on to a peer that can decode it (`file-1`).
+        let meta = peer_meta.lock().await;
         all_targets
             .into_iter()
             .filter(|d| *d != source && *d != origin && !pending.contains_key(d))
+            .filter(|d| accepts_kind(&meta, d, kind))
             .collect()
     };
     if targets.is_empty() || frames.is_empty() {
@@ -145,6 +150,8 @@ pub(super) async fn forward_item(
     transport: &Arc<Transport>,
     inflight: &InflightMap,
     pending_pairs: &PendingSet,
+    peer_meta: &PeerMetaMap,
+    kind: Kind,
     source: [u8; 32],
     origin: [u8; 32],
     hash: [u8; 32],
@@ -154,6 +161,8 @@ pub(super) async fn forward_item(
         transport,
         inflight,
         pending_pairs,
+        peer_meta,
+        kind,
         source,
         origin,
         hash,

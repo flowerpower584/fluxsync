@@ -5,6 +5,19 @@ Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.8.0-beta.3] — 2026-11-02
+
+### Added
+- Files are relayed through the mesh like other items, to each hop that
+  negotiated `file-1` (both relay paths filter per peer).
+- Desktop: "Show in folder" on a received file's history row.
+- Linux X11: password-manager copies (`x-kde-passwordManagerHint` in the
+  clipboard owner's TARGETS) sync as secrets, like Wayland/macOS/Windows.
+
+### Fixed
+- A single-frame (≲ 1 KB) file was relayed to every peer, including one
+  that can't decode `Kind::File`.
+
 ## [v0.8.0-beta.2] — 2026-11-02
 
 > **Beta.** Passes the automated suite on Linux, macOS, Windows and Android;

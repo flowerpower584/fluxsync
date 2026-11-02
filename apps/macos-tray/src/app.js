@@ -640,7 +640,11 @@ function patchRow(entry, h, index) {
     entry.main.setAttribute('aria-label',
       `${copyable ? 'Copy: ' : ''}${what}. ${remote ? 'Received from' : 'Copied on'} ${from}, ${h.time || ''}`);
 
-    entry.open.hidden = !isWebUrl(h);
+    // Links open in the browser; a received file opens its folder.
+    const showFolder = kind === 'file' && remote;
+    entry.open.hidden = !isWebUrl(h) && !showFolder;
+    entry.open.title = showFolder ? 'Show in Downloads/FluxSync' : 'Open link';
+    entry.open.setAttribute('aria-label', showFolder ? 'Show the file in Downloads/FluxSync' : 'Open link in browser');
     entry.el.classList.toggle('pinned', !!h.favorite);
     // FluxVault: pinned items survive the vault TTL + cap.
     entry.pin.setAttribute('aria-pressed', String(!!h.favorite));
@@ -846,7 +850,10 @@ el.recent.addEventListener('click', (e) => {
   const entry = rowCache.get(row.dataset.key);
   if (!entry) return;
   if (e.target.closest('.pin')) toggleFavorite(entry);
-  else if (e.target.closest('.open')) invoke('fluxsync_open_url', { url: (entry.h.preview || '').trim() });
+  else if (e.target.closest('.open')) {
+    if (itemKind(entry.h) === 'file') invoke('fluxsync_open_received_folder');
+    else invoke('fluxsync_open_url', { url: (entry.h.preview || '').trim() });
+  }
   else if (e.target.closest('.row-main')) copyEntry(entry);
 });
 

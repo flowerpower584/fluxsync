@@ -1956,7 +1956,7 @@ async fn complete_reassembled_item_gates_outbox_on_sensitivity() {
         [2u8; 32],
         1,
         sensitive_hash,
-        Kind::Text,
+        fluxsync_proto::Kind::Text,
         true,
         0,
         b"secret".to_vec(),
@@ -1982,7 +1982,7 @@ async fn complete_reassembled_item_gates_outbox_on_sensitivity() {
         [2u8; 32],
         2,
         plain_hash,
-        Kind::Text,
+        fluxsync_proto::Kind::Text,
         false,
         0,
         b"hello".to_vec(),
@@ -2160,7 +2160,7 @@ async fn revoke_purges_only_that_peers_staged_outbox_entry() {
         PEER_A,
         1,
         hash_a,
-        Kind::Text,
+        fluxsync_proto::Kind::Text,
         false,
         0,
         b"secret-a".to_vec(),
@@ -2180,7 +2180,7 @@ async fn revoke_purges_only_that_peers_staged_outbox_entry() {
         PEER_B,
         1,
         hash_b,
-        Kind::Text,
+        fluxsync_proto::Kind::Text,
         false,
         0,
         b"secret-b".to_vec(),
@@ -2317,7 +2317,7 @@ async fn complete_reassembled_item_does_not_relay_a_firewall_blocked_item() {
         SOURCE,
         1,
         hash_blocked,
-        Kind::Text,
+        fluxsync_proto::Kind::Text,
         false,
         0,
         b"relay-blocked-text".to_vec(),
@@ -2353,7 +2353,7 @@ async fn complete_reassembled_item_does_not_relay_a_firewall_blocked_item() {
         SOURCE,
         2,
         hash_passed,
-        Kind::Text,
+        fluxsync_proto::Kind::Text,
         false,
         0,
         b"relay-passed-text".to_vec(),
@@ -2386,7 +2386,7 @@ async fn complete_reassembled_item_does_not_relay_a_firewall_blocked_item() {
         SOURCE,
         3,
         hash_sensitive,
-        Kind::Text,
+        fluxsync_proto::Kind::Text,
         true,
         0,
         b"relay-sensitive-secret".to_vec(),
@@ -3406,10 +3406,13 @@ async fn forward_frames_merges_inflight_pending_peers_instead_of_replacing() {
 
     let pending_pairs: crate::handshake::PendingSet = Arc::new(Mutex::new(HashMap::new()));
 
+    let peer_meta: super::PeerMetaMap = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
     forward_frames(
         &transport,
         &inflight,
         &pending_pairs,
+        &peer_meta,
+        fluxsync_proto::Kind::Text,
         source,
         origin,
         hash,
@@ -3752,7 +3755,7 @@ async fn outbox_stage_first_wins_matches_pending_payloads_on_same_hash_collision
         PEER_A,
         1,
         hash,
-        Kind::Text,
+        fluxsync_proto::Kind::Text,
         false,
         0,
         payload.clone(),
@@ -3774,7 +3777,7 @@ async fn outbox_stage_first_wins_matches_pending_payloads_on_same_hash_collision
         PEER_B,
         1,
         hash,
-        Kind::Text,
+        fluxsync_proto::Kind::Text,
         false,
         0,
         payload.clone(),
@@ -4608,4 +4611,28 @@ async fn persister_wipe_with_kept_rows_rewrites_the_vault() {
         .map(|e| e.item.preview)
         .collect();
     assert_eq!(on_disk, ["pinned"]);
+}
+
+/// A file only goes to (or through) a peer that negotiated `file-1`: an
+/// older peer can't decode `Kind::File`. Every other kind goes to anyone.
+#[test]
+fn files_only_go_to_peers_that_accept_them() {
+    use super::{accepts_kind, PeerMeta};
+    let mut meta = std::collections::BTreeMap::new();
+    let mut new_peer = PeerMeta::new();
+    new_peer.caps = vec!["core-1".into(), fluxsync_proto::CAP_FILE.into()];
+    let mut old_peer = PeerMeta::new();
+    old_peer.caps = vec!["core-1".into()];
+    meta.insert([1; 32], new_peer);
+    meta.insert([2; 32], old_peer);
+
+    assert!(accepts_kind(&meta, &[1; 32], fluxsync_proto::Kind::File));
+    assert!(!accepts_kind(&meta, &[2; 32], fluxsync_proto::Kind::File));
+    assert!(
+        !accepts_kind(&meta, &[3; 32], fluxsync_proto::Kind::File),
+        "unknown caps: not sent"
+    );
+    for peer in [[1; 32], [2; 32], [3; 32]] {
+        assert!(accepts_kind(&meta, &peer, fluxsync_proto::Kind::Image));
+    }
 }

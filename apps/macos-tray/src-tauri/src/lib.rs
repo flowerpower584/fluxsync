@@ -170,6 +170,25 @@ fn fluxsync_open_url(url: String) {
     let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
 }
 
+/// Open the folder received files land in (Downloads/FluxSync — the
+/// daemon's `save_received_file`). Fixed path: nothing from the page.
+#[tauri::command]
+fn fluxsync_open_received_folder() {
+    let Some(dir) = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .map(|d| d.join("FluxSync"))
+    else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(&dir).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+}
+
 #[tauri::command]
 async fn fluxsync_pair_show() -> Result<Value, String> {
     let resp = ipc::one_shot(json!({"id": 1, "op": "pair_show"})).await?;
@@ -324,6 +343,7 @@ pub fn run() {
             fluxsync_toggle,
             fluxsync_set_device_name,
             fluxsync_set_history_retention,
+            fluxsync_open_received_folder,
             fluxsync_pair_show,
             fluxsync_pair_from_uri,
             fluxsync_pair_from_pin,

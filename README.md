@@ -8,7 +8,7 @@
 [![CI](https://github.com/flowerpower584/fluxsync/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/flowerpower584/fluxsync/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-> 🧪 **The newest version, [v0.8.0-beta.2](https://github.com/flowerpower584/fluxsync/releases/tag/v0.8.0-beta.2), is a beta**: a redesigned desktop app and lots of fixes, still being tested on real devices. Want the proven version? Use [v0.7.0](https://github.com/flowerpower584/fluxsync/releases/tag/v0.7.0). [What changed](CHANGELOG.md)
+> 🧪 **The newest version, [v0.8.0-beta.3](https://github.com/flowerpower584/fluxsync/releases/tag/v0.8.0-beta.3), is a beta**: a redesigned desktop app and lots of fixes, still being tested on real devices. Want the proven version? Use [v0.7.0](https://github.com/flowerpower584/fluxsync/releases/tag/v0.7.0). [What changed](CHANGELOG.md)
 
 ## What it does
 
@@ -22,7 +22,7 @@
 
 ## 1. Install FluxSync on each device
 
-Open the [**release page**](https://github.com/flowerpower584/fluxsync/releases/tag/v0.8.0-beta.2), scroll down to **Assets**, and download the file for your device:
+Open the [**release page**](https://github.com/flowerpower584/fluxsync/releases/tag/v0.8.0-beta.3), scroll down to **Assets**, and download the file for your device:
 
 | Your device | File to download |
 |---|---|
@@ -166,7 +166,7 @@ Install the service and the command line with Rust (`rustup`):
 
 ```sh
 cargo install --git https://github.com/flowerpower584/fluxsync \
-              --tag v0.8.0-beta.2 fluxsyncd fluxctl    # or --tag v0.7.0 for the stable one
+              --tag v0.8.0-beta.3 fluxsyncd fluxctl    # or --tag v0.7.0 for the stable one
 ```
 
 Start it on login with a systemd user service at `~/.config/systemd/user/fluxsync.service`:
