@@ -49,30 +49,9 @@ loginctl enable-linger <username>
 
 Without lingering, systemd tears down the user's service manager (and everything in it) shortly after the last session for that user ends.
 
-## 3. Optional: native tray on a headless box with a lightweight desktop
+## 3. With a lightweight desktop
 
-If the box does run a minimal desktop (e.g. a status-bar-only window manager, or a lightweight DE like a tiling WM with a systray widget), `apps/linux-tray` ships a small native tray icon (binary `fluxsync-tray`, package `fluxsync-linux-tray`) using the ksni `StatusNotifierItem` protocol — no Tauri/WebView dependency, much lighter than the full GUI app. It's an IPC client only; it doesn't run the daemon itself, so it still needs `fluxsync.service` above (or an equivalent) running.
-
-```ini
-# ~/.config/systemd/user/fluxsync-tray.service
-[Unit]
-Description=FluxSync tray icon
-After=fluxsync.service graphical-session.target
-Requires=fluxsync.service
-
-[Service]
-ExecStart=%h/.cargo/bin/fluxsync-tray
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
-
-```sh
-systemctl --user enable --now fluxsync-tray.service
-```
-
-If there's no systray host at all (fully headless, no desktop), skip this — `fluxctl` covers everything the tray does for headless use, see below.
+If the box runs a minimal desktop (a tiling window manager with a systray, say), install the regular desktop app (the `.deb` or `.AppImage` from the release page): it shows FluxSync in the systray and talks to the same service. On a box with no desktop at all, `fluxctl` covers everything, see below.
 
 ## 4. Pairing without a GUI
 

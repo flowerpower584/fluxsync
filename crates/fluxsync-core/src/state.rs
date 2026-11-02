@@ -18,7 +18,6 @@ pub struct State {
     pub phase: String,
     pub on: bool,
     pub battery_level: u8,
-    pub battery_threshold: u8,
     pub charging: bool,
     pub peer_id: [u8; 32],
     pub peer_name: String,
@@ -65,7 +64,6 @@ pub struct State {
     pub link_latency_ms: u32,
     pub cipher: String,
     pub metrics: Option<ConnectionMetrics>,
-    pub charge_override: bool,
     /// Clipboard firewall policy (chantier A). Mirrors `Config.firewall` so
     /// clients can render + drive the per-content-type toggles. `#[serde(
     /// default)]` keeps older snapshots (pre-firewall) deserializing.
@@ -88,6 +86,11 @@ pub struct State {
     /// signal only, so the macOS/Android wire shape is unchanged.
     #[serde(skip)]
     pub vault_wipe_gen: u64,
+    /// How long non-favorite history items are kept, in seconds; one of
+    /// [`HISTORY_RETENTION_CHOICES`]. 0 = forever. Favorites are always
+    /// kept. Applies to the list on screen and to the on-disk vault alike.
+    #[serde(default = "default_history_retention")]
+    pub history_retention_secs: u64,
     /// DIR-P3-10 (`fluxctl doctor`): mirrors `DaemonConfig::disable_mdns`
     /// (negated), so a client can tell "no live peer, mDNS is off" apart
     /// from "no live peer, still searching" without a new IPC round trip.
@@ -121,6 +124,16 @@ fn default_mdns_enabled() -> bool {
 
 fn default_sas_phase() -> String {
     String::from("idle")
+}
+
+/// The retention periods a user can pick: 1 hour, 1 day, 7 days, forever (0).
+pub const HISTORY_RETENTION_CHOICES: [u64; 4] = [3_600, 86_400, 7 * 86_400, 0];
+
+/// Default history retention: one day.
+pub const DEFAULT_HISTORY_RETENTION_SECS: u64 = 86_400;
+
+fn default_history_retention() -> u64 {
+    DEFAULT_HISTORY_RETENTION_SECS
 }
 
 /// One clipboard item parked by the firewall's `Ask` rule, surfaced to the UI
@@ -294,6 +307,11 @@ pub struct HistoryItem {
     /// key ignore it.
     #[serde(default)]
     pub source_peer_id: Option<String>,
+    /// Wall-clock milliseconds since the epoch when the item entered the
+    /// history; drives `State.history_retention_secs`. 0 = unknown (older
+    /// state/vault JSON) — such an item is never expired by age.
+    #[serde(default)]
+    pub created_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,17 +328,13 @@ pub enum HistorySource {
 pub enum Status {
     Inactive,
     Syncing,
-    Paused,
-    Critical,
 }
 
 /// Static configuration baked into the running daemon. None of these change
-/// during normal operation; threshold mutates via a CLI command, peer name
-/// is set at install time.
+/// during normal operation; the peer name is set at install time.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub peer_name_self: String,
-    pub charge_override: bool,
     pub version: String,
     pub build_id: String,
     pub cipher: String,
@@ -336,7 +350,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             peer_name_self: String::from("this device"),
-            charge_override: true,
             version: String::from(env!("CARGO_PKG_VERSION")),
             build_id: String::from("unknown"),
             cipher: String::from("chacha20-poly1305"),
@@ -347,21 +360,17 @@ impl Default for Config {
 }
 
 impl State {
-    /// Initial state at process boot. Threshold defaults to 20% (matches
-    /// the macOS slider and Android UI default position).
+    /// Initial state at process boot.
     #[must_use]
     pub fn initial(config: &Config) -> Self {
         Self {
             phase: String::from("idle"),
             on: false,
             // 255 = "not read yet" sentinel → UI renders "—" instead of a
-            // fake 100%. Safe for policy: every `<= threshold` / `<= CRITICAL`
-            // check is false at 255, so an unread battery never forces a pause.
-            // The watcher (desktop) or set_self_battery (Android) overwrites it
-            // with a real 0-100 within a few seconds; a battery-less desktop
-            // keeps 255 and shows "—".
+            // fake 100%. The watcher (desktop) or set_self_battery (Android)
+            // overwrites it with a real 0-100 within a few seconds; a
+            // battery-less desktop keeps 255 and shows "—".
             battery_level: 255,
-            battery_threshold: 20,
             charging: false,
             peer_id: [0u8; 32],
             peer_name: String::new(),
@@ -380,24 +389,14 @@ impl State {
             link_latency_ms: 0,
             cipher: config.cipher.clone(),
             metrics: None,
-            charge_override: config.charge_override,
             firewall: config.firewall.clone(),
             pending: Vec::new(),
             vault_wipe_gen: 0,
+            history_retention_secs: DEFAULT_HISTORY_RETENTION_SECS,
             mdns_enabled: config.mdns_enabled,
             sas_phase: default_sas_phase(),
             sas_peer: None,
         }
-    }
-
-    /// Sets a new threshold, validating it lies in `5..=50` (matches the
-    /// frontend slider range).
-    pub fn set_threshold(&mut self, value: u8) -> Result<(), CoreError> {
-        if !(5..=50).contains(&value) {
-            return Err(CoreError::ThresholdOutOfRange(value));
-        }
-        self.battery_threshold = value;
-        Ok(())
     }
 
     /// Sets a battery level, validating it is `<= 100`.
@@ -420,35 +419,9 @@ mod tests {
         let cfg = Config::default();
         let s = State::initial(&cfg);
         assert!(!s.on);
-        assert_eq!(s.battery_threshold, 20);
         assert_eq!(s.status, Status::Inactive);
         assert_eq!(s.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(s.cipher, "chacha20-poly1305");
-    }
-
-    #[test]
-    fn set_threshold_accepts_inclusive_range() {
-        let mut s = State::initial(&Config::default());
-        assert!(s.set_threshold(5).is_ok());
-        assert!(s.set_threshold(50).is_ok());
-        assert!(s.set_threshold(20).is_ok());
-    }
-
-    #[test]
-    fn set_threshold_rejects_out_of_range() {
-        let mut s = State::initial(&Config::default());
-        assert!(matches!(
-            s.set_threshold(4),
-            Err(CoreError::ThresholdOutOfRange(4))
-        ));
-        assert!(matches!(
-            s.set_threshold(51),
-            Err(CoreError::ThresholdOutOfRange(51))
-        ));
-        assert!(matches!(
-            s.set_threshold(0),
-            Err(CoreError::ThresholdOutOfRange(0))
-        ));
     }
 
     #[test]
@@ -486,7 +459,6 @@ mod tests {
             "phase",
             "on",
             "battery_level",
-            "battery_threshold",
             "charging",
             "peer_id",
             "peer_name",
@@ -501,7 +473,6 @@ mod tests {
             "build_id",
             "link_latency_ms",
             "cipher",
-            "charge_override",
             "firewall",
             "pending",
             "mdns_enabled",

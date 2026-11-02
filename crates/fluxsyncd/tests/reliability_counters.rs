@@ -168,30 +168,6 @@ async fn counters_advance_on_send_receive_and_duplicate() {
 
     assert!(wait_until(Duration::from_secs(2), || async { ipc_a.exists() }).await);
     assert!(wait_until(Duration::from_secs(2), || async { ipc_b.exists() }).await);
-    // This is an in-process test daemon on a real machine: the battery
-    // watcher reads the REAL host battery (see `battery.rs`), and a
-    // laptop below the 20% default threshold would force the FSM's
-    // policy layer (`App::phase_for_policy_ext`) into `Paused`, which
-    // blocks `Action::SendItem` — unrelated to what this test is
-    // actually exercising. Floor the threshold so real ambient battery
-    // never gates this test.
-    ipc_send_recv(
-        &ipc_a,
-        CmdRequest {
-            id: 0,
-            op: CmdOp::SetThreshold { value: 5 },
-        },
-    )
-    .await;
-    ipc_send_recv(
-        &ipc_b,
-        CmdRequest {
-            id: 0,
-            op: CmdOp::SetThreshold { value: 5 },
-        },
-    )
-    .await;
-
     assert!(
         wait_until(Duration::from_secs(2), || async {
             status(&ipc_a).await.peer_name == "device-b"

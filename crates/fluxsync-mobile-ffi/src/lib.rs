@@ -393,8 +393,10 @@ impl FluxsyncHandle {
                 })
             }
             "text" => {
+                // A password manager marked it secret: synced as sensitive.
                 let text = String::from_utf8_lossy(&bytes).into_owned();
-                serde_json::json!({"id": 1, "op": "push", "text": text})
+                let op = if sensitive { "push_concealed" } else { "push" };
+                serde_json::json!({"id": 1, "op": op, "text": text})
             }
             other => return Err(FluxError::Invalid(format!("unknown kind {other}"))),
         };
@@ -425,39 +427,12 @@ impl FluxsyncHandle {
             .map_err(|e| FluxError::Ipc(format!("fetch_item base64: {e}")))
     }
 
-    /// Pause-below-X% battery threshold (5..=50).
-    pub fn set_battery_threshold(&self, value: u8) -> Result<(), FluxError> {
-        if !(5..=50).contains(&value) {
-            return Err(FluxError::Invalid(format!(
-                "threshold {value} out of range 5..=50"
-            )));
-        }
-        self.runtime
-            .block_on(send_cmd(
-                &self.ipc_path,
-                serde_json::json!({"id": 1, "op": "set_threshold", "value": value}),
-            ))
-            .map(|_| ())
-            .map_err(|e| FluxError::Ipc(e.to_string()))
-    }
-
     /// Wake / sleep the FSM. `true` = `Idle → Discovering`.
     pub fn toggle(&self, on: bool) -> Result<(), FluxError> {
         self.runtime
             .block_on(send_cmd(
                 &self.ipc_path,
                 serde_json::json!({"id": 1, "op": "toggle", "on": on}),
-            ))
-            .map(|_| ())
-            .map_err(|e| FluxError::Ipc(e.to_string()))
-    }
-
-    /// "Resume while charging" override.
-    pub fn set_charge_override(&self, value: bool) -> Result<(), FluxError> {
-        self.runtime
-            .block_on(send_cmd(
-                &self.ipc_path,
-                serde_json::json!({"id": 1, "op": "set_charge_override", "value": value}),
             ))
             .map(|_| ())
             .map_err(|e| FluxError::Ipc(e.to_string()))
@@ -474,6 +449,18 @@ impl FluxsyncHandle {
             .block_on(send_cmd(
                 &self.ipc_path,
                 serde_json::json!({"id": 1, "op": "set_device_name", "name": name}),
+            ))
+            .map(|_| ())
+            .map_err(|e| FluxError::Ipc(e.to_string()))
+    }
+
+    /// How long non-favorite history is kept, in seconds: 3600, 86400,
+    /// 604800, or 0 for forever. Anything else is rejected daemon-side.
+    pub fn set_history_retention(&self, secs: u64) -> Result<(), FluxError> {
+        self.runtime
+            .block_on(send_cmd(
+                &self.ipc_path,
+                serde_json::json!({"id": 1, "op": "set_history_retention", "secs": secs}),
             ))
             .map(|_| ())
             .map_err(|e| FluxError::Ipc(e.to_string()))

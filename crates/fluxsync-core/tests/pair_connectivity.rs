@@ -28,7 +28,6 @@ const PEER_ID_A: [u8; 32] = [0xAA; 32];
 fn make_app(name: &str) -> App {
     App::new(Config {
         peer_name_self: name.into(),
-        charge_override: true,
         version: "0.4.2-test".into(),
         build_id: "test".into(),
         cipher: "chacha20-poly1305".into(),
@@ -48,7 +47,7 @@ fn link_up(app: &mut App, peer_id: [u8; 32], peer_name: &str) {
         &wall(),
     );
     app.handle(Event::HandshakeOk, &wall());
-    // Set healthy batteries so we don't get Paused/Halted.
+    // Give both sides a battery reading, as a real link would.
     app.handle(
         Event::BatteryChangedSelf {
             level: 80,
@@ -426,92 +425,27 @@ fn test_14_rapid_toggle_10x() {
 }
 
 // =============================================================================
-// CATEGORY 4: BATTERY POLICY DURING CONNECTIVITY CHANGES
+// CATEGORY 4: BATTERY DURING CONNECTIVITY CHANGES
 // =============================================================================
 
-/// TEST 15: Peer battery drops to critical WHILE linked — should
-/// transition to Halted, not disconnect.
+/// TEST 18: a low battery never holds the link; PeerLost still goes back
+/// to Discovering.
 #[test]
-fn test_15_peer_battery_critical_while_linked() {
+fn test_18_peer_lost_while_battery_low() {
     let (mut a, _b) = link_pair();
 
-    a.handle(
-        Event::BatteryChangedPeer {
-            level: 4,
-            charging: false,
-        },
-        &wall(),
-    );
-    assert_eq!(a.phase, Phase::Halted);
-    assert_eq!(a.snapshot().status, Status::Critical);
-    // Important: NOT Discovering. We don't drop the link, we halt it.
-    assert_ne!(a.phase, Phase::Discovering);
-}
-
-/// TEST 16: Peer battery recovers from critical — should resume Linked.
-#[test]
-fn test_16_peer_battery_recovers_from_critical() {
-    let (mut a, _b) = link_pair();
-
-    // Drop to critical.
+    // A nearly flat peer battery is shown, never acted on.
     a.handle(
         Event::BatteryChangedPeer {
             level: 3,
-            charging: false,
-        },
-        &wall(),
-    );
-    assert_eq!(a.phase, Phase::Halted);
-
-    // Battery recovers.
-    a.handle(
-        Event::BatteryChangedPeer {
-            level: 50,
             charging: false,
         },
         &wall(),
     );
     assert_eq!(a.phase, Phase::Linked);
-    assert_eq!(a.snapshot().status, Status::Syncing);
-}
-
-/// TEST 17: Self battery drops below threshold while Linked — should Pause.
-#[test]
-fn test_17_self_battery_drops_below_threshold_pauses() {
-    let (mut a, _b) = link_pair();
-
-    a.handle(
-        Event::BatteryChangedSelf {
-            level: 10,
-            charging: false,
-        },
-        &wall(),
-    );
-    assert_eq!(a.phase, Phase::Paused);
-    assert_eq!(a.snapshot().status, Status::Paused);
-}
-
-/// TEST 18: PeerLost while battery is critical — should go to Discovering,
-/// NOT stay in Halted with a dead session.
-#[test]
-fn test_18_peer_lost_while_halted() {
-    let (mut a, _b) = link_pair();
-
-    // Battery critical → Halted.
-    a.handle(
-        Event::BatteryChangedPeer {
-            level: 3,
-            charging: false,
-        },
-        &wall(),
-    );
-    assert_eq!(a.phase, Phase::Halted);
 
     // Now the peer actually disconnects.
     let actions = a.handle(Event::PeerLost { peer_id: PEER_ID_B }, &wall());
-    // PeerLost resets peer_battery to 100, which should un-halt.
-    // FSM says (Linked|Paused|Halted → Discovering on PeerLost)
-    // But policy recalculates with peer_battery=100, so we should be Discovering.
     assert_eq!(a.phase, Phase::Discovering);
     assert!(has_action(&actions, |a| matches!(a, Action::CloseSession)));
 }

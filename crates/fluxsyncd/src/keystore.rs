@@ -58,6 +58,7 @@ const IDENTITY_FILE: &str = "identity.bin";
 const PEERS_FILE: &str = "peers.json";
 const FIREWALL_FILE: &str = "firewall.json";
 const DEVICE_NAME_FILE: &str = "device_name.json";
+const HISTORY_RETENTION_FILE: &str = "history_retention.json";
 
 /// Service name used for the keychain entry. Keep stable: changing it
 /// after the first release would orphan every existing user's identity.
@@ -540,7 +541,10 @@ pub fn load_firewall(dir: &Path) -> FirewallPolicy {
     let Ok(s) = fs::read_to_string(&path) else {
         return FirewallPolicy::default();
     };
-    serde_json::from_str(&s).unwrap_or_default()
+    // An "ask" rule saved by an older version acts as "never" now.
+    serde_json::from_str::<FirewallPolicy>(&s)
+        .unwrap_or_default()
+        .normalized()
 }
 
 /// Persist the clipboard firewall policy. Atomic via `*.tmp` + fsync +
@@ -589,6 +593,32 @@ pub fn save_device_name(dir: &Path, name: &str) -> Result<()> {
     let s = serde_json::to_string_pretty(&DeviceNameFile {
         name: name.to_string(),
     })?;
+    let tmp = path.with_extension("json.tmp");
+    crate::fsutil::write_atomic(&path, &tmp, s.as_bytes())?;
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct HistoryRetentionFile {
+    secs: u64,
+}
+
+/// Load the persisted history retention (seconds, 0 = forever). `None` when
+/// the file is missing or unparseable: the caller falls back to the default.
+#[must_use]
+pub fn load_history_retention(dir: &Path) -> Option<u64> {
+    let s = fs::read_to_string(dir.join(HISTORY_RETENTION_FILE)).ok()?;
+    serde_json::from_str::<HistoryRetentionFile>(&s)
+        .ok()
+        .map(|f| f.secs)
+}
+
+/// Persist the history retention so a `CmdOp::SetHistoryRetention` survives
+/// a restart. Atomic, same as `save_device_name`.
+pub fn save_history_retention(dir: &Path, secs: u64) -> Result<()> {
+    ensure_dir(dir)?;
+    let path = dir.join(HISTORY_RETENTION_FILE);
+    let s = serde_json::to_string(&HistoryRetentionFile { secs })?;
     let tmp = path.with_extension("json.tmp");
     crate::fsutil::write_atomic(&path, &tmp, s.as_bytes())?;
     Ok(())
@@ -964,11 +994,20 @@ mod tests {
         let policy = FirewallPolicy {
             enabled: true,
             text: Rule::Deny,
-            image: Rule::Ask,
+            image: Rule::Allow,
             ..FirewallPolicy::default()
         };
         save_firewall(dir.path(), &policy).expect("save_firewall must succeed");
         assert_eq!(load_firewall(dir.path()), policy);
+
+        // An "ask" rule from an older version loads as "never".
+        let old = FirewallPolicy {
+            enabled: true,
+            image: Rule::Ask,
+            ..FirewallPolicy::default()
+        };
+        save_firewall(dir.path(), &old).expect("save_firewall must succeed");
+        assert_eq!(load_firewall(dir.path()).image, Rule::Deny);
 
         let tmp = dir.path().join(FIREWALL_FILE).with_extension("json.tmp");
         assert!(!tmp.exists(), "the .tmp file must not survive the rename");

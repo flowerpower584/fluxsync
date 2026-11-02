@@ -138,14 +138,8 @@ struct HandshakeResp {
                                  │ Handshaking  │
                                  └─────┬────────┘
                           HandshakeOk  │
-                                 ┌─────▼────────┐                 ┌──────────────┐
-                                 │   Linked     │ ── battery ──▶ │   Paused     │
-                                 └─────┬────────┘   policy        └──────┬───────┘
-                                       │ ◀────────────────────────────────┘
-                            critical batt (≤5%)         charge_override or recovered
-                                       │
                                  ┌─────▼────────┐
-                                 │   Halted     │ ── ToggleOff ──▶ Idle
+                                 │   Linked     │ ── ToggleOff ──▶ Idle
                                  └──────────────┘
 ```
 
@@ -158,36 +152,22 @@ Transition table (events → next phase, side effect):
 | Discovering   | NetworkChanged                 | Discovering   | flush peers, restart mDNS       |
 | Handshaking   | FrameReceived(HandshakeResp)   | Linked        | open Session, EmitState         |
 | Handshaking   | timeout (5 s)                  | Discovering   | EmitLog WARN                    |
-| Linked        | BatteryChanged(self/peer)      | Linked/Paused | apply policy (§3)               |
+| Linked        | BatteryChanged(self/peer)      | Linked        | EmitState (shown, never acted on) |
 | Linked        | LocalClipboardChange           | Linked        | classify, dedup, Send ClipboardItem |
 | Linked        | FrameReceived(ClipboardItem)   | Linked        | dedup, write clipboard, Ack     |
 | Linked        | PeerLost                       | Discovering   | EmitState (status=inactive)     |
-| Linked        | self battery ≤ 5%              | Halted        | EmitState (status=critical)     |
-| Paused        | BatteryChanged → above thresh. | Linked        | EmitState (status=syncing)      |
-| Paused        | Reconnect after offline        | Linked        | **burst mode**: send last 5 items only |
-| Halted        | BatteryChanged → above 5%      | Linked        | EmitState                       |
+| Linked        | Reconnect after offline        | Linked        | **burst mode**: send last 5 items only |
 | any           | ToggleOff                      | Idle          | close Session, EmitState        |
 
 Unknown event in current phase = no-op + DEBUG log.
 
 ---
 
-## 3. Battery policy
+## 3. Status and battery
 
-`status_for(state)` lives in `fluxsync-core::policy` and is the single source of truth for the `status` field exposed to UIs.
+`status_for(state)` lives in `fluxsync-core::policy` and is the single source of truth for the `status` field exposed to UIs: `syncing` while sync is switched on, `inactive` otherwise.
 
-```text
-inactive  if !on
-critical  if peerBattery <= 5
-paused    if on && peerBattery <= threshold && !peerCharging
-syncing   otherwise
-```
-
-`charge_override` (default true) overrides `paused` whenever the *low* device is plugged in: a peer below threshold but `peerCharging == true` keeps the link `syncing`.
-
-Self-side mirrors the same rule for our device (`batteryLevel`/`charging`); the result is the **worse** of the two — if either side wants to pause, both pause. UIs distinguish with copy ("paused — peer below 15%" vs "paused — local low battery").
-
-Metered network (Android only in v0.1, exposed via the FFI host) forces `paused` regardless of battery.
+Battery levels (`BatteryStatus`, both sides) are shown in the UIs and never acted on: FluxSync only sends when something is copied, so pausing on a low battery saves nothing. Before v0.8.0 a battery threshold paused the link; a newer device still accepts `BatteryStatus` from an older one and just displays it.
 
 ---
 
@@ -233,8 +213,7 @@ Request:
 { "id": 9,  "op": "push", "text": "https://github.com" }
 { "id": 10, "op": "pull" }
 { "id": 11, "op": "tail", "n": 20 }
-{ "id": 12, "op": "set_threshold", "value": 30 }
-{ "id": 13, "op": "set_charge_override", "value": true }
+{ "id": 12, "op": "set_history_retention", "secs": 86400 }
 { "id": 14, "op": "pair_start" }
 { "id": 15, "op": "pair_confirm", "peer_id": "..." }
 { "id": 16, "op": "revoke", "peer_id": "..." }

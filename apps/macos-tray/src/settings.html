@@ -36,7 +36,7 @@
         </button>
         <button class="tab-btn" id="tab-network" data-tab="network" role="tab" aria-selected="false" aria-controls="pane-network" tabindex="-1">
           <span class="tab-i mono">03</span>
-          Network
+          Diagnostic
         </button>
         <button class="tab-btn" id="tab-about" data-tab="about" role="tab" aria-selected="false" aria-controls="pane-about" tabindex="-1">
           <span class="tab-i mono">04</span>
@@ -88,24 +88,19 @@
         </div>
 
         <div class="group">
-          <div class="group-title">Battery saver</div>
+          <div class="group-title">History</div>
           <div class="card">
             <div class="field-row">
               <div class="field-info">
-                <label class="label" for="threshold-slider">Pause below</label>
-                <div class="hint">Stop syncing when a device's battery drops under this level</div>
+                <div class="label" id="lbl-retention">Keep history</div>
+                <div class="hint">Older items are deleted on every device's own copy. Pinned items always stay.</div>
               </div>
-              <div class="slider-container">
-                <input type="range" class="range" id="threshold-slider" min="5" max="50" step="1" value="20" />
-                <span class="slider-value mono" id="threshold-display">20%</span>
+              <div class="seg" id="retention-seg" role="radiogroup" aria-labelledby="lbl-retention">
+                <button type="button" role="radio" data-secs="3600">1 hour</button>
+                <button type="button" role="radio" data-secs="86400">1 day</button>
+                <button type="button" role="radio" data-secs="604800">7 days</button>
+                <button type="button" role="radio" data-secs="0">Forever</button>
               </div>
-            </div>
-            <div class="field-row">
-              <div class="field-info">
-                <div class="label" id="lbl-charge">Resume on charge</div>
-                <div class="hint">Keep syncing below the threshold while plugged in</div>
-              </div>
-              <button class="toggle" id="opt-resume-on-charge" role="switch" aria-checked="false" aria-labelledby="lbl-charge"><span class="knob"></span></button>
             </div>
           </div>
         </div>
@@ -160,7 +155,7 @@
       <!-- Network -->
       <section id="pane-network" class="pane" role="tabpanel" aria-labelledby="tab-network" hidden>
         <header class="pane-header">
-          <span class="eyebrow mono">03 / Network</span>
+          <span class="eyebrow mono">03 / Diagnostic</span>
           <h1>The link, in numbers</h1>
           <p>Direct and local: your devices talk to each other, never to a server.</p>
         </header>

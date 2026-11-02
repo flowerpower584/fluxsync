@@ -664,15 +664,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_revoke(
     ): Short
-    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_battery_threshold(
-    ): Short
-    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_charge_override(
-    ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_device_name(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_favorite(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_firewall(
+    ): Short
+    external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_history_retention(
     ): Short
     external fun uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_self_battery(
     ): Short
@@ -736,15 +734,13 @@ external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_resolve_pending
 ): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_revoke(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_battery_threshold(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_charge_override(`ptr`: Long,`value`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_device_name(`ptr`: Long,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_favorite(`ptr`: Long,`hash`: RustBuffer.ByValue,`favorite`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_firewall(`ptr`: Long,`policyJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_history_retention(`ptr`: Long,`secs`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_self_battery(`ptr`: Long,`level`: Byte,`charging`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -915,12 +911,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_revoke() != 532.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_battery_threshold() != 65243.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_charge_override() != 22905.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_device_name() != 56288.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -928,6 +918,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_firewall() != 12791.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_history_retention() != 48087.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fluxsync_mobile_ffi_checksum_method_fluxsynchandle_set_self_battery() != 25465.toShort()) {
@@ -1489,16 +1482,6 @@ public interface FluxsyncHandleInterface {
     fun `revoke`(`peerId`: kotlin.String)
     
     /**
-     * Pause-below-X% battery threshold (5..=50).
-     */
-    fun `setBatteryThreshold`(`value`: kotlin.UByte)
-    
-    /**
-     * "Resume while charging" override.
-     */
-    fun `setChargeOverride`(`value`: kotlin.Boolean)
-    
-    /**
      * DIR-P3-01: rename this device. Validation (non-empty, wire-length
      * bound, printable) happens daemon-side in `App::set_device_name`; a
      * rejected name comes back as `FluxError::Ipc` with the daemon's
@@ -1521,6 +1504,12 @@ public interface FluxsyncHandleInterface {
      * malformed object from reaching the daemon as an opaque IPC error.
      */
     fun `setFirewall`(`policyJson`: kotlin.String)
+    
+    /**
+     * How long non-favorite history is kept, in seconds: 3600, 86400,
+     * 604800, or 0 for forever. Anything else is rejected daemon-side.
+     */
+    fun `setHistoryRetention`(`secs`: kotlin.ULong)
     
     /**
      * Push host-OS battery telemetry into the daemon. Called from the
@@ -1927,38 +1916,6 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
 
     
     /**
-     * Pause-below-X% battery threshold (5..=50).
-     */
-    @Throws(FluxException::class)override fun `setBatteryThreshold`(`value`: kotlin.UByte)
-        = 
-    callWithHandle {
-    uniffiRustCallWithError(FluxException) { _status ->
-    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_battery_threshold(
-        it,
-        FfiConverterUByte.lower(`value`),_status)
-}
-    }
-    
-    
-
-    
-    /**
-     * "Resume while charging" override.
-     */
-    @Throws(FluxException::class)override fun `setChargeOverride`(`value`: kotlin.Boolean)
-        = 
-    callWithHandle {
-    uniffiRustCallWithError(FluxException) { _status ->
-    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_charge_override(
-        it,
-        FfiConverterBoolean.lower(`value`),_status)
-}
-    }
-    
-    
-
-    
-    /**
      * DIR-P3-01: rename this device. Validation (non-empty, wire-length
      * bound, printable) happens daemon-side in `App::set_device_name`; a
      * rejected name comes back as `FluxError::Ipc` with the daemon's
@@ -2009,6 +1966,23 @@ open class FluxsyncHandle: Disposable, AutoCloseable, FluxsyncHandleInterface
     UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_firewall(
         it,
         FfiConverterString.lower(`policyJson`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * How long non-favorite history is kept, in seconds: 3600, 86400,
+     * 604800, or 0 for forever. Anything else is rejected daemon-side.
+     */
+    @Throws(FluxException::class)override fun `setHistoryRetention`(`secs`: kotlin.ULong)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FluxException) { _status ->
+    UniffiLib.uniffi_fluxsync_mobile_ffi_fn_method_fluxsynchandle_set_history_retention(
+        it,
+        FfiConverterULong.lower(`secs`),_status)
 }
     }
     

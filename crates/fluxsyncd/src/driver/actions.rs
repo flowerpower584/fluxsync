@@ -106,7 +106,7 @@ pub(super) async fn sync_security_wipe_if_needed(
                 &key,
                 &entries,
                 now,
-                history_store::DEFAULT_TTL_SECS,
+                history_store::ttl_secs(),
                 history_store::DEFAULT_DISK_CAP,
             )
         })
@@ -487,6 +487,15 @@ pub(super) async fn dispatch(
                     // (no writer there); the daemon just records the hash
                     // for dedup symmetry with desktop.
                     if let Some(writer) = &sh.clipboard_writer {
+                        // A received secret doesn't linger: gone from the
+                        // clipboard after a minute unless replaced first.
+                        if sensitive {
+                            let (writer, text) = (writer.clone(), text.clone());
+                            tokio::spawn(async move {
+                                tokio::time::sleep(SECRET_LIFETIME).await;
+                                writer.write(ClipWrite::ClearIfStill(text));
+                            });
+                        }
                         writer.write(ClipWrite::Text(text));
                     }
                 }

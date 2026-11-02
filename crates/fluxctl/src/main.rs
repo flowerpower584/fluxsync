@@ -63,10 +63,6 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 20)]
         n: usize,
     },
-    /// Set the battery threshold (5..=50).
-    SetThreshold { value: u8 },
-    /// Toggle the "resume while charging" override.
-    SetChargeOverride { value: bool },
     /// Rename this device. An already-linked peer sees the new name on the
     /// next session establishment, not immediately.
     SetName { name: String },
@@ -106,7 +102,7 @@ enum Cmd {
         #[command(subcommand)]
         sub: TrustSub,
     },
-    /// Clipboard firewall: per-content-type Always/Ask/Never policy.
+    /// Clipboard firewall: per-content-type Always/Never policy.
     Firewall {
         #[command(subcommand)]
         sub: FirewallSub,
@@ -133,7 +129,7 @@ enum FirewallSub {
     Set {
         /// Which content type (or `sensitive` for detected secrets).
         field: FwField,
-        /// always = sync silently, ask = hold for approval, never = drop.
+        /// always = sync silently, never = drop.
         rule: FwRule,
     },
     /// List items the Ask rule is currently holding.
@@ -168,7 +164,6 @@ impl FwField {
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum FwRule {
     Always,
-    Ask,
     Never,
 }
 
@@ -177,7 +172,6 @@ impl FwRule {
     fn wire(self) -> &'static str {
         match self {
             FwRule::Always => "allow",
-            FwRule::Ask => "ask",
             FwRule::Never => "deny",
         }
     }
@@ -192,6 +186,23 @@ enum HistorySub {
         #[arg(long)]
         all: bool,
     },
+    /// How long history is kept: 1h, 1d, 7d or forever. Favorites always
+    /// stay.
+    Keep {
+        #[arg(value_parser = parse_retention)]
+        duration: u64,
+    },
+}
+
+/// `1h` / `1d` / `7d` / `forever` → seconds (0 = forever).
+fn parse_retention(s: &str) -> Result<u64, String> {
+    match s {
+        "1h" => Ok(3_600),
+        "1d" => Ok(86_400),
+        "7d" => Ok(604_800),
+        "forever" => Ok(0),
+        other => Err(format!("expected 1h, 1d, 7d or forever, got {other:?}")),
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -324,22 +335,6 @@ async fn main() -> Result<()> {
             one_shot(&ipc_path, json!({"id": 1, "op": "tail", "n": n})).await?,
             Kind::Tail,
         ),
-        Cmd::SetThreshold { value } => (
-            one_shot(
-                &ipc_path,
-                json!({"id": 1, "op": "set_threshold", "value": value}),
-            )
-            .await?,
-            Kind::Ack("threshold updated"),
-        ),
-        Cmd::SetChargeOverride { value } => (
-            one_shot(
-                &ipc_path,
-                json!({"id": 1, "op": "set_charge_override", "value": value}),
-            )
-            .await?,
-            Kind::Ack("charge override updated"),
-        ),
         Cmd::SetName { name } => (
             one_shot(
                 &ipc_path,
@@ -470,6 +465,14 @@ async fn main() -> Result<()> {
                 )
                 .await?,
                 Kind::Ack("history cleared"),
+            ),
+            HistorySub::Keep { duration } => (
+                one_shot(
+                    &ipc_path,
+                    json!({"id": 1, "op": "set_history_retention", "secs": duration}),
+                )
+                .await?,
+                Kind::Ack("history retention updated"),
             ),
         },
         Cmd::Pair { sub } => match sub {
@@ -610,16 +613,16 @@ async fn fetch_firewall(ipc: &Path) -> Result<Value> {
             "url": "allow",
             "code": "allow",
             "image": "allow",
-            "sensitive": "ask",
+            "sensitive": "deny",
         }))
     }
 }
 
-/// Map a wire rule (`allow`/`ask`/`deny`) to the UI word.
+/// Map a wire rule to the UI word. An older daemon's `ask` is enforced as
+/// `never` by this version.
 fn rule_word(wire: &str) -> &str {
     match wire {
-        "ask" => "Ask",
-        "deny" => "Never",
+        "ask" | "deny" => "Never",
         _ => "Always",
     }
 }

@@ -31,7 +31,10 @@ pub use events::{Action, Event, LogEntry, LogLevel};
 pub use fsm::{transition, Phase};
 pub use id::{DeviceId, EventId};
 pub use policy::{status_for, Decision, Direction, FirewallPolicy, Rule};
-pub use state::{Config, HistoryItem, HistorySource, PairedDevice, PeerInfo, State, Status};
+pub use state::{
+    Config, HistoryItem, HistorySource, PairedDevice, PeerInfo, State, Status,
+    DEFAULT_HISTORY_RETENTION_SECS, HISTORY_RETENTION_CHOICES,
+};
 
 // Re-export Kind from proto so wire and IPC representations stay in sync.
 pub use fluxsync_proto::Kind;

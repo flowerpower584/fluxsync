@@ -20,7 +20,6 @@ import org.json.JSONObject
  *   "peer_charging": false,
  *   "battery_level": 0,
  *   "charging": false,
- *   "battery_threshold": 20,
  *   "link_latency_ms": 0,
  *   "history": [{"hash": "…", "kind": "text", "preview": "…", "time": "14:32", "sensitive": false, "lamport": 0}],
  *   "version": "0.5.0",
@@ -40,14 +39,14 @@ data class DaemonState(
     val peerCharging: Boolean,
     val selfBattery: Int,
     val selfCharging: Boolean,
-    val threshold: Int,
     val linkLatencyMs: Int,
-    val chargeOverride: Boolean,
     val history: List<HistoryItem>,
     val version: String,
     val cipher: String,
     /** DIR-P3-01: this device's own friendly name, editable via `setDeviceName`. */
     val deviceName: String,
+    /** Seconds non-favorite history is kept; 0 = forever. */
+    val historyRetentionSecs: Long,
     val trustedPeerName: String?,
     val metrics: ConnectionMetricsView?,
     val peers: List<MeshPeer>,
@@ -74,13 +73,12 @@ data class DaemonState(
                 peerCharging = o.optBoolean("peer_charging", false),
                 selfBattery = o.optInt("battery_level", 0),
                 selfCharging = o.optBoolean("charging", false),
-                threshold = o.optInt("battery_threshold", 20),
                 linkLatencyMs = o.optInt("link_latency_ms", 0),
-                chargeOverride = o.optBoolean("charge_override", true),
                 history = parseHistory(o.optJSONArray("history")),
                 version = o.optString("version", ""),
                 cipher = o.optString("cipher", ""),
                 deviceName = o.optString("device_name", ""),
+                historyRetentionSecs = o.optLong("history_retention_secs", 86_400L),
                 trustedPeerName = o.optString("trusted_peer_name", null),
                 metrics = ConnectionMetricsView.parse(o.optJSONObject("metrics")),
                 peers = parsePeers(o.optJSONArray("peers")),
@@ -237,13 +235,18 @@ data class FirewallPolicyView(
     }
 
     companion object {
+        // "ask" is no longer offered: an older daemon's "ask" shows as "deny",
+        // which is how this version enforces it.
+        private fun rule(o: JSONObject?, key: String, default: String): String =
+            (o?.optString(key, default) ?: default).let { if (it == "ask") "deny" else it }
+
         fun parse(o: JSONObject?): FirewallPolicyView = FirewallPolicyView(
             enabled = o?.optBoolean("enabled", false) ?: false,
-            text = o?.optString("text", "allow") ?: "allow",
-            url = o?.optString("url", "allow") ?: "allow",
-            code = o?.optString("code", "allow") ?: "allow",
-            image = o?.optString("image", "allow") ?: "allow",
-            sensitive = o?.optString("sensitive", "ask") ?: "ask",
+            text = rule(o, "text", "allow"),
+            url = rule(o, "url", "allow"),
+            code = rule(o, "code", "allow"),
+            image = rule(o, "image", "allow"),
+            sensitive = rule(o, "sensitive", "deny"),
         )
     }
 }

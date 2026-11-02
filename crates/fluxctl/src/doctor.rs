@@ -121,40 +121,6 @@ fn check_sync(data: Option<&Value>) -> Check {
 
 // ── 3. phase ───────────────────────────────────────────────────────────
 
-/// Mirrors `fluxsync_core::policy::status_for`'s battery gate. Duplicated
-/// here (fluxctl has no dependency on fluxsync-core) — if that policy ever
-/// changes, this explanation must be updated to match.
-fn paused_cause(data: &Value) -> String {
-    let battery_level = u64_field(data, "battery_level", 255);
-    let threshold = u64_field(data, "battery_threshold", 20);
-    let charging = bool_field(data, "charging", false);
-    let peer_battery = u64_field(data, "peer_battery", 255);
-    let peer_charging = bool_field(data, "peer_charging", false);
-    let charge_override = bool_field(data, "charge_override", true);
-
-    let self_below = battery_level <= threshold && !(charge_override && charging);
-    let peer_below = peer_battery <= threshold && !(charge_override && peer_charging);
-
-    match (self_below, peer_below) {
-        (true, true) => format!(
-            "paused — this device ({battery_level}%) and the peer ({peer_battery}%) are \
-             both <= the {threshold}% threshold and neither is charging"
-        ),
-        (true, false) => format!(
-            "paused — this device's battery is {battery_level}%, at or below the \
-             {threshold}% threshold, and it is not charging"
-        ),
-        (false, true) => format!(
-            "paused — the peer's battery is {peer_battery}%, at or below the \
-             {threshold}% threshold, and it is not charging"
-        ),
-        (false, false) => format!(
-            "paused — battery {battery_level}% / peer {peer_battery}% vs threshold \
-             {threshold}%; cause unclear (check charge_override)"
-        ),
-    }
-}
-
 fn check_phase(data: Option<&Value>) -> Check {
     let Some(data) = data else {
         return Check::new("phase", Level::Info, "skipped: no status data available");
@@ -169,12 +135,6 @@ fn check_phase(data: Option<&Value>) -> Check {
             "discovering — no peer found yet (mDNS / redial in progress)",
         ),
         "handshaking" => Check::new("phase", Level::Info, "handshake in progress"),
-        "paused" => Check::new("phase", Level::Warn, paused_cause(data)),
-        "halted" => Check::new(
-            "phase",
-            Level::Warn,
-            "halted — battery critical (<= 5%); the link resumes once charged",
-        ),
         other => Check::new(
             "phase",
             Level::Warn,
@@ -212,7 +172,7 @@ fn check_peer_liveness(data: Option<&Value>, trust_count: Option<usize>) -> Chec
         );
     };
     let phase = data.get("phase").and_then(Value::as_str).unwrap_or("");
-    if matches!(phase, "linked" | "paused" | "halted") {
+    if phase == "linked" {
         return Check::new("peer_liveness", Level::Ok, "a peer is currently connected");
     }
     match trust_count {
@@ -527,11 +487,9 @@ mod tests {
             "phase": "linked",
             "on": true,
             "battery_level": 80,
-            "battery_threshold": 20,
             "charging": false,
             "peer_battery": 55,
             "peer_charging": true,
-            "charge_override": true,
             "mdns_enabled": true,
             "version": "0.6.2",
             "metrics": {
@@ -586,65 +544,6 @@ mod tests {
     fn phase_handshaking_is_info_not_warn() {
         let d = json!({"phase": "handshaking"});
         assert_eq!(check_phase(Some(&d)).level, Level::Info);
-    }
-
-    #[test]
-    fn phase_paused_reports_self_battery_cause_with_numbers() {
-        let d = json!({
-            "phase": "paused",
-            "battery_level": 12,
-            "battery_threshold": 20,
-            "charging": false,
-            "peer_battery": 90,
-            "peer_charging": true,
-            "charge_override": true,
-        });
-        let c = check_phase(Some(&d));
-        assert_eq!(c.level, Level::Warn);
-        assert!(c.message.contains("12%"));
-        assert!(c.message.contains("20%"));
-        assert!(c.message.contains("this device"));
-    }
-
-    #[test]
-    fn phase_paused_reports_peer_battery_cause() {
-        let d = json!({
-            "phase": "paused",
-            "battery_level": 90,
-            "battery_threshold": 20,
-            "charging": true,
-            "peer_battery": 5,
-            "peer_charging": false,
-            "charge_override": true,
-        });
-        let c = check_phase(Some(&d));
-        assert!(c.message.contains("peer"));
-        assert!(c.message.contains("5%"));
-    }
-
-    #[test]
-    fn phase_paused_charge_override_off_ignores_charging() {
-        // charge_override=false: a below-threshold + charging device must
-        // still count as "below", matching policy::status_for exactly.
-        let d = json!({
-            "phase": "paused",
-            "battery_level": 10,
-            "battery_threshold": 20,
-            "charging": true,
-            "peer_battery": 90,
-            "peer_charging": true,
-            "charge_override": false,
-        });
-        let c = check_phase(Some(&d));
-        assert!(c.message.contains("this device"));
-    }
-
-    #[test]
-    fn phase_halted_warns_with_critical_battery_cause() {
-        let d = json!({"phase": "halted"});
-        let c = check_phase(Some(&d));
-        assert_eq!(c.level, Level::Warn);
-        assert!(c.message.contains("critical"));
     }
 
     #[test]

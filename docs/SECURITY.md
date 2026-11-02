@@ -51,7 +51,7 @@ If you hear nothing after 7 days, follow up — mail delivery and spam filters f
 - The wire protocol (`fluxsync-proto`, see [`PROTOCOL.md`](./PROTOCOL.md)) — framing, encoding, message handling.
 - The daemon (`fluxsyncd`) — discovery, pairing/TOFU, handshake, transport, IPC, keystore, clipboard capture/injection.
 - The CLI (`fluxctl`).
-- The client apps — macOS/Windows/Linux tray (`apps/macos-tray`), the native Linux ksni tray (`apps/linux-tray`), and Android (`apps/android`).
+- The client apps — the macOS/Windows/Linux desktop app (`apps/macos-tray`) and Android (`apps/android`).
 - The cryptography (`fluxsync-crypto`) — Noise IK usage, AEAD, identity-key handling, SAS/fingerprint derivation.
 - The supply chain pulled in by the above (see `docs/audits/RUST_DEPENDENCY_AUDIT_*.md` for the last pass).
 

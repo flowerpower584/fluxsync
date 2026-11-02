@@ -160,18 +160,6 @@ async fn ipc_up(ipc: &Path, dur: Duration) -> bool {
     .await
 }
 
-async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(
-        ipc,
-        CmdRequest {
-            id: 0,
-            op: CmdOp::SetThreshold { value },
-        },
-    )
-    .await;
-    assert!(r.ok, "set-threshold failed: {r:?}");
-}
-
 async fn push(ipc: &Path, text: &str) {
     let r = ipc_send_recv(
         ipc,
@@ -351,9 +339,7 @@ async fn pair_daemons(ipc_a: &Path, addr_a: SocketAddr, ipc_b: &Path) -> String 
     a_pub
 }
 
-/// Spawn `A` and `B`, pair them for real, floor the battery threshold on
-/// both (a real host below the default 20% would otherwise gate sync —
-/// unrelated to what these tests exercise), and prove a sanity item syncs.
+/// Spawn `A` and `B`, pair them for real, and prove a sanity item syncs.
 ///
 /// Returns everything a scenario needs to shut `B` down and restart it:
 /// `(ipc_a, shutdown_a, h_a, id_b, keystore_b, ipc_b, port_b, addr_a, a_pub)`.
@@ -406,9 +392,6 @@ async fn boot_and_link() -> (
         ipc_up(&ipc_b, Duration::from_secs(5)).await,
         "b: ipc not up"
     );
-
-    set_threshold(&ipc_a, 5).await;
-    set_threshold(&ipc_b, 5).await;
 
     let a_pub = pair_daemons(&ipc_a, addr_a, &ipc_b).await;
 
@@ -914,7 +897,6 @@ async fn item_copied_while_fully_unlinked_never_resyncs() {
         ipc_up(&ipc_a, Duration::from_secs(5)).await,
         "a: ipc not up"
     );
-    set_threshold(&ipc_a, 5).await;
 
     // a has no peer at all yet (never paired) — copy here, with zero linked
     // peers. This is the privacy-leak scenario: an old private copy made
@@ -932,7 +914,6 @@ async fn item_copied_while_fully_unlinked_never_resyncs() {
         ipc_up(&ipc_b, Duration::from_secs(5)).await,
         "b: ipc not up"
     );
-    set_threshold(&ipc_b, 5).await;
 
     pair_daemons(&ipc_a, addr_a, &ipc_b).await;
 

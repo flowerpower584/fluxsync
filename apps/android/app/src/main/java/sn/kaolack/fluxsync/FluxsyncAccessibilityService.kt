@@ -409,7 +409,7 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                                 val ok = if (item.kind == "image") {
                                     syncImageToSystemClipboard(item.hash)
                                 } else {
-                                    syncToSystemClipboard(item.preview)
+                                    syncToSystemClipboard(item.preview, item.sensitive)
                                 }
                                 if (ok) {
                                     markSeen(item.hash)
@@ -483,8 +483,12 @@ class FluxsyncAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** Returns true only if the write to the OS clipboard actually landed. */
-    private suspend fun syncToSystemClipboard(text: String): Boolean =
+    /**
+     * Returns true only if the write to the OS clipboard actually landed. A
+     * [sensitive] item (a password or key) is flagged so Android hides its
+     * preview, and is cleared after [SECRET_LIFETIME_MS] unless replaced.
+     */
+    private suspend fun syncToSystemClipboard(text: String, sensitive: Boolean = false): Boolean =
         withContext(Dispatchers.Main) {
             try {
                 // Mark as a peer item BEFORE writing so MainActivity's clip
@@ -493,7 +497,14 @@ class FluxsyncAccessibilityService : AccessibilityService() {
 
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 val clip = android.content.ClipData.newPlainText("FluxSync", text)
+                if (sensitive) {
+                    clip.description.extras = android.os.PersistableBundle().apply {
+                        // ClipDescription.EXTRA_IS_SENSITIVE (API 33), by value.
+                        putBoolean("android.content.extra.IS_SENSITIVE", true)
+                    }
+                }
                 clipboard.setPrimaryClip(clip)
+                if (sensitive) expireSecretLater(text)
                 android.util.Log.i("FluxSync", "✅ CLIPBOARD SYNCED: [${text.take(30)}...]")
                 true
             } catch (e: Exception) {
@@ -501,6 +512,34 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                 false
             }
         }
+
+    /** Clear [text] from the clipboard after a minute if it is still there. */
+    private fun expireSecretLater(text: String) {
+        scope.launch {
+            delay(SECRET_LIFETIME_MS)
+            withContext(Dispatchers.Main) {
+                try {
+                    val cb = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = cb.primaryClip
+                    val current = if (clip != null && clip.itemCount > 0) {
+                        clip.getItemAt(0).text?.toString()
+                    } else {
+                        null
+                    }
+                    // Unreadable (null) or replaced: leave it alone.
+                    if (current == text) {
+                        if (Build.VERSION.SDK_INT >= 28) {
+                            cb.clearPrimaryClip()
+                        } else {
+                            cb.setPrimaryClip(android.content.ClipData.newPlainText("", ""))
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("FluxSync", "Secret expiry failed: ${e.message}")
+                }
+            }
+        }
+    }
 
     /**
      * Write an inbound peer image to the OS clipboard. The daemon keeps
@@ -634,6 +673,9 @@ class FluxsyncAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
 
     companion object {
+        /** How long a received secret stays on the clipboard (desktop: 60 s too). */
+        private const val SECRET_LIFETIME_MS = 60_000L
+
         /** FS-022 / M-AND-01: SharedPreferences store for inbound dedup. */
         private const val PREFS_NAME = "fluxsync_prefs"
         private const val KEY_SEEN_HASHES = "seen_hashes"

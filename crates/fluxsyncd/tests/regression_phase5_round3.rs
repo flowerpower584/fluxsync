@@ -116,18 +116,6 @@ async fn peer_name(ipc: &PathBuf) -> Option<String> {
     }
 }
 
-async fn set_threshold(ipc: &PathBuf, value: u8) {
-    let r = ipc_send_recv(
-        ipc,
-        CmdRequest {
-            id: 3,
-            op: CmdOp::SetThreshold { value },
-        },
-    )
-    .await;
-    assert!(r.ok, "set-threshold failed: {r:?}");
-}
-
 fn base_cfg(identity: Identity, port: u16, ipc: PathBuf, name: &str) -> DaemonConfig {
     let mut cfg = DaemonConfig::new(identity, port, ipc);
     cfg.udp_bind = "127.0.0.1".into();
@@ -224,11 +212,6 @@ async fn pending_secondary_peer_excluded_from_send_item_fan_out() {
     })
     .await;
     assert!(up, "all three daemons did not reach Linked within 2s");
-
-    // Host-battery pause trap: floor the threshold before pushing.
-    set_threshold(&ipc_a, 5).await;
-    set_threshold(&ipc_b, 5).await;
-    set_threshold(&ipc_c, 5).await;
 
     // Push FROM B: fans out to both A (confirmed primary) and C (pending
     // secondary) at the transport level, but the FS-052 gate must exclude C.

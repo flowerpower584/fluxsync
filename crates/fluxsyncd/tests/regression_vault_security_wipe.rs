@@ -150,6 +150,7 @@ fn fav_history(hash: &str) -> Vec<HistoryItem> {
         favorite: true,
         resync: false,
         source_peer_id: None,
+        created_ms: 0,
     }]
 }
 
@@ -194,9 +195,9 @@ fn security_wipe_clears_history_and_bumps_vault_wipe_gen() {
         );
     }
 
-    // ── GhostTimeout while NOT Linked (fresh App is Idle): wipe that keeps
-    //    the favorites — a device that has been away is no security event,
-    //    and the user pinned those to keep them. ──
+    // ── GhostTimeout while NOT Linked (fresh App is Idle): no wipe at all —
+    //    a device that has been away is no security event; history ages
+    //    out on the retention setting instead. ──
     {
         let mut app = App::new(Config::default());
         let mut items = fav_history("h2");
@@ -218,13 +219,13 @@ fn security_wipe_clears_history_and_bumps_vault_wipe_gen() {
             .collect();
         assert_eq!(
             kept,
-            [SECRET],
-            "GhostTimeout (unlinked) must drop everything but the favorites"
+            [SECRET, "not pinned"],
+            "GhostTimeout (unlinked) must keep the history"
         );
         assert_eq!(
             app.snapshot().vault_wipe_gen,
-            gen0 + 1,
-            "GhostTimeout (unlinked) must bump vault_wipe_gen so disk follows"
+            gen0,
+            "GhostTimeout (unlinked) must not touch the vault"
         );
     }
 

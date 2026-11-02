@@ -406,7 +406,7 @@ fn test_11_battery_oscillation_dos() {
     );
     app.handle(Event::HandshakeOk, &wall);
 
-    // Simulate broken battery sensor oscillating between 4% and 6% (Critical/Paused)
+    // Simulate a broken battery sensor oscillating between 4% and 6%
     for i in 0..100 {
         let level = if i % 2 == 0 { 4 } else { 6 };
         app.handle(
@@ -418,8 +418,8 @@ fn test_11_battery_oscillation_dos() {
         );
     }
 
-    // Should end up in a valid phase
-    assert!(matches!(app.phase, Phase::Paused | Phase::Halted));
+    // Battery is never acted on: the link stays up.
+    assert_eq!(app.phase, Phase::Linked);
 }
 
 #[test]
@@ -448,8 +448,6 @@ fn test_14_manual_unpair_in_every_phase() {
         Phase::Discovering,
         Phase::Handshaking,
         Phase::Linked,
-        Phase::Paused,
-        Phase::Halted,
     ];
     for p in phases {
         let (mut app, wall) = setup();
@@ -692,8 +690,7 @@ fn test_19_extreme_battery_teleportation() {
         },
         &wall,
     );
-    // [FIX] Policy ensures Discovering stays Discovering even if critical (to allow reconnect)
-    assert_eq!(app.state.status, Status::Critical);
+    assert_eq!(app.state.status, Status::Syncing);
     assert_eq!(app.phase, Phase::Discovering);
 }
 

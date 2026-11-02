@@ -275,6 +275,11 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
                                 last_written_hashes.lock().await.is_echo(&hash);
                             last_seen_hash = Some(hash);
                             if !already {
+                                let concealed = tokio::task::spawn_blocking(
+                                    super::concealed::clipboard_marked_secret,
+                                )
+                                .await
+                                .unwrap_or(false);
                                 if text.len() > MAX_PAYLOAD {
                                     tracing::warn!(
                                         size = text.len(),
@@ -282,9 +287,14 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
                                     );
                                 } else {
                                     let (reply_tx, _reply_rx) = oneshot::channel();
+                                    let op = if concealed {
+                                        CmdOp::PushConcealed { text }
+                                    } else {
+                                        CmdOp::Push { text }
+                                    };
                                     if cmd_tx
                                         .send(DriverCmd::Run {
-                                            op: CmdOp::Push { text },
+                                            op,
                                             reply: reply_tx,
                                             req_id: 0,
                                         })
@@ -311,6 +321,9 @@ pub(super) async fn clipboard_watcher_loop(sh: Arc<Shared>) -> Result<()> {
 /// One OS-clipboard write the daemon owes for an applied inbound item.
 pub(super) enum ClipWrite {
     Text(String),
+    /// Empty the clipboard if it still holds exactly this text — how a
+    /// received secret expires (see [`SECRET_LIFETIME`]).
+    ClearIfStill(String),
     Image {
         width: u32,
         height: u32,
@@ -324,6 +337,10 @@ pub(super) enum ClipWrite {
 /// writes queue up only the newest is applied — the others would be
 /// overwritten at once anyway. The `arboard` handle is kept between writes
 /// (and rebuilt after an error) instead of reopened every time.
+/// How long a received secret stays on this device's clipboard.
+pub(super) const SECRET_LIFETIME: Duration = Duration::from_secs(60);
+
+#[derive(Clone)]
 pub(super) struct ClipboardWriter {
     tx: std::sync::mpsc::Sender<ClipWrite>,
 }
@@ -349,6 +366,10 @@ impl ClipboardWriter {
                     let Some(c) = cb.as_mut() else { return };
                     let res = match job {
                         ClipWrite::Text(text) => c.set_text(text),
+                        ClipWrite::ClearIfStill(text) => match c.get_text() {
+                            Ok(current) if current == text => c.clear(),
+                            _ => Ok(()),
+                        },
                         ClipWrite::Image {
                             width,
                             height,

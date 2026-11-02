@@ -194,11 +194,6 @@ impl App {
         self.state.link_latency_ms = ms;
     }
 
-    pub fn set_charge_override(&mut self, value: bool) {
-        self.config.charge_override = value;
-        self.state.charge_override = value;
-    }
-
     /// DIR-P3-01: rename this device. Validates non-empty (after trim),
     /// within the `Msg::Hello.name` wire bound, and printable — the same
     /// gate `fluxsync_proto::codec` enforces on the receiving end, checked
@@ -237,6 +232,34 @@ impl App {
     pub fn set_firewall(&mut self, policy: FirewallPolicy) {
         self.config.firewall = policy.clone();
         self.state.firewall = policy;
+    }
+
+    /// Set how long non-favorite history is kept (see
+    /// [`crate::state::HISTORY_RETENTION_CHOICES`]) and drop what is already
+    /// older than that.
+    pub fn set_history_retention(&mut self, secs: u64, now_ms: u64) -> Result<(), CoreError> {
+        if !crate::state::HISTORY_RETENTION_CHOICES.contains(&secs) {
+            return Err(CoreError::InvalidRetention(secs));
+        }
+        self.state.history_retention_secs = secs;
+        self.expire_history(now_ms);
+        Ok(())
+    }
+
+    /// Drop non-favorite history items older than the retention period.
+    /// Returns whether anything was removed. Items with an unknown age
+    /// (`created_ms == 0`) are kept.
+    pub fn expire_history(&mut self, now_ms: u64) -> bool {
+        let secs = self.state.history_retention_secs;
+        if secs == 0 {
+            return false;
+        }
+        let max_age_ms = secs.saturating_mul(1000);
+        let before = self.state.history.len();
+        self.state.history.retain(|h| {
+            h.favorite || h.created_ms == 0 || now_ms.saturating_sub(h.created_ms) <= max_age_ms
+        });
+        self.state.history.len() != before
     }
 
     /// Current firewall policy (for the state projection / IPC readback).
@@ -656,6 +679,7 @@ impl App {
                         favorite: false,
                         resync: false,
                         source_peer_id: None,
+                        created_ms: wall.unix_millis(),
                     });
                 }
             }
@@ -749,6 +773,7 @@ impl App {
                             // to the peer that actually sent it instead of
                             // always naming the legacy single-peer primary.
                             source_peer_id: Some(hex32(peer_id)),
+                            created_ms: wall.unix_millis(),
                         });
                     }
                 }
@@ -816,9 +841,7 @@ impl App {
                 self.state.sas_phase = "idle".to_string();
                 self.state.sas_peer = None;
             }
-            Event::GhostTimeout
-                if !matches!(self.phase, Phase::Linked | Phase::Paused | Phase::Halted) =>
-            {
+            Event::GhostTimeout if !matches!(self.phase, Phase::Linked) => {
                 let lost_peer_id = self.state.peer_id;
                 self.state.peer_name.clear();
                 self.state.peer_platform.clear();
@@ -826,21 +849,11 @@ impl App {
                 self.state.peer_id = [0u8; 32];
                 self.state.peer_battery = 255; // sentinel: unknown → UI shows "—"
                 self.state.peer_charging = false;
-                // Approved scoping (same rationale as the FS-046 swap above):
-                // a ghosted primary only needs its OWN secrets forgotten when
-                // a confirmed secondary is still linked; only a primary that
-                // was the sole linked peer earns the wipe. Favorites survive
-                // it: a device that has simply been away (out of range,
-                // switched off) is no security event, and the user pinned
-                // those to keep them. The other wipes (an untrusted key, a
-                // different device pairing) still take everything.
-                if self.other_peers_linked() {
-                    pending_dropped = self.drop_pending_for(lost_peer_id);
-                } else {
-                    self.state.history.retain(|h| h.favorite);
-                    self.drop_pending_all();
-                    self.state.vault_wipe_gen += 1; // also rewrite the on-disk vault
-                }
+                // A device that has simply been away (out of range, switched
+                // off) is no security event: history stays, and ages out on
+                // the user's retention setting instead. Only the items that
+                // were waiting on this peer go.
+                pending_dropped = self.drop_pending_for(lost_peer_id);
                 self.state.sas_phase = "idle".to_string();
                 self.state.sas_peer = None;
             }
@@ -1014,12 +1027,7 @@ impl App {
             true
         });
 
-        // Battery-policy phase override (post-transition)
-        // [FIX] Force Halted/Paused even in Discovering/Handshaking if battery is bad.
-        self.phase = match next {
-            Phase::Idle => Phase::Idle,
-            _ => self.phase_for_policy_ext(next),
-        };
+        self.phase = next;
 
         // Sync phase name into the serializable State so Android/macOS
         // can read the actual FSM phase from the JSON.
@@ -1028,8 +1036,6 @@ impl App {
             Phase::Discovering => "discovering",
             Phase::Handshaking => "handshaking",
             Phase::Linked => "linked",
-            Phase::Paused => "paused",
-            Phase::Halted => "halted",
         }
         .to_string();
 
@@ -1145,39 +1151,6 @@ impl App {
         for item in self.state.history.iter().take(capacity).rev() {
             if let Some(bytes) = hex32_decode(&item.hash) {
                 self.dedup.observe(ContentHash::from_blake3(bytes));
-            }
-        }
-    }
-
-    fn phase_for_policy_ext(&self, fsm_next: Phase) -> Phase {
-        use crate::state::Status;
-        match status_for(&self.state) {
-            Status::Critical => {
-                // Critical battery: force Halted ONLY if we're in a
-                // connected phase. Never override Discovering/Handshaking
-                // — the FSM needs those to reconnect.
-                match fsm_next {
-                    Phase::Linked | Phase::Paused | Phase::Halted => Phase::Halted,
-                    other => other,
-                }
-            }
-            Status::Paused => {
-                // If FSM wants to be Linked/Paused/Halted, we obey battery.
-                // If it wants to be Discovering/Handshaking, we let it stay there
-                // unless it's Critical.
-                match fsm_next {
-                    Phase::Linked | Phase::Paused | Phase::Halted => Phase::Paused,
-                    other => other,
-                }
-            }
-            Status::Syncing | Status::Inactive => {
-                // Battery is healthy: upgrade Paused/Halted back to Linked.
-                // NEVER promote Discovering/Handshaking to Linked — that
-                // would trap the FSM with a dead session after PeerLost.
-                match fsm_next {
-                    Phase::Paused | Phase::Halted => Phase::Linked,
-                    other => other,
-                }
             }
         }
     }
@@ -1456,38 +1429,67 @@ mod tests {
     }
 
     #[test]
-    fn battery_drop_below_threshold_pauses_phase_and_status() {
+    fn history_retention_expires_old_items_but_keeps_favorites() {
         let mut app = boot();
-        app.handle(Event::ToggleOn, &wall());
-        app.handle(
-            Event::PeerSeen {
-                peer_id: [7; 32],
-                name: "Galaxy".into(),
-            },
-            &wall(),
-        );
-        app.handle(Event::HandshakeOk, &wall());
-        app.handle(
-            Event::BatteryChangedPeer {
-                level: 80,
-                charging: false,
-            },
-            &wall(),
-        );
-        // Now drop peer to below threshold.
-        app.handle(
-            Event::BatteryChangedPeer {
-                level: 10,
-                charging: false,
-            },
-            &wall(),
-        );
-        assert_eq!(app.state.status, Status::Paused);
-        assert_eq!(app.phase, Phase::Paused);
+        let item = |text: &str, created_ms: u64, favorite: bool| HistoryItem {
+            kind: Kind::Text,
+            preview: text.into(),
+            time: "12:00".into(),
+            source: crate::state::HistorySource::Local,
+            sensitive: false,
+            lamport: created_ms,
+            hash: format!("{created_ms:064x}"),
+            favorite,
+            resync: false,
+            source_peer_id: None,
+            created_ms,
+        };
+        let hour = 3_600_000;
+        app.restore_history(vec![
+            item("fresh", 10 * hour, false),
+            item("old", hour, false),
+            item("old but pinned", hour, true),
+            item("unknown age", 0, false),
+        ]);
+        assert_eq!(app.state.history_retention_secs, 86_400, "default: one day");
+        assert!(!app.expire_history(10 * hour), "nothing is a day old yet");
+
+        app.set_history_retention(3_600, 10 * hour).unwrap();
+        let kept: Vec<_> = app
+            .state
+            .history
+            .iter()
+            .map(|h| h.preview.as_str())
+            .collect();
+        assert_eq!(kept, ["fresh", "old but pinned", "unknown age"]);
+
+        app.set_history_retention(0, u64::MAX).unwrap();
+        assert!(!app.expire_history(u64::MAX), "forever never expires");
+        assert!(app.set_history_retention(42, 0).is_err());
     }
 
     #[test]
-    fn critical_battery_halts_phase_and_status() {
+    fn ghost_timeout_keeps_the_history() {
+        let mut app = boot();
+        app.handle(
+            Event::LocalClipboardChange {
+                kind: Kind::Text,
+                hash: [3; 32],
+                payload: b"kept".to_vec(),
+                preview: "kept".into(),
+                sensitive: false,
+                lamport: 1,
+            },
+            &wall(),
+        );
+        let gen = app.state.vault_wipe_gen;
+        app.handle(Event::GhostTimeout, &wall());
+        assert_eq!(app.state.history.len(), 1);
+        assert_eq!(app.state.vault_wipe_gen, gen);
+    }
+
+    #[test]
+    fn low_battery_on_either_side_never_pauses_the_link() {
         let mut app = boot();
         app.handle(Event::ToggleOn, &wall());
         app.handle(
@@ -1500,13 +1502,21 @@ mod tests {
         app.handle(Event::HandshakeOk, &wall());
         app.handle(
             Event::BatteryChangedPeer {
-                level: 4,
+                level: 3,
                 charging: false,
             },
             &wall(),
         );
-        assert_eq!(app.state.status, Status::Critical);
-        assert_eq!(app.phase, Phase::Halted);
+        app.handle(
+            Event::BatteryChangedSelf {
+                level: 2,
+                charging: false,
+            },
+            &wall(),
+        );
+        assert_eq!(app.phase, Phase::Linked);
+        assert_eq!(app.state.status, Status::Syncing);
+        assert_eq!(app.state.peer_battery, 3, "still shown");
     }
 
     #[test]
@@ -1668,6 +1678,7 @@ mod tests {
             favorite: false,
             resync: false,
             source_peer_id: None,
+            created_ms: 0,
         };
         let mut app = boot();
         app.restore_history(vec![item("newer"), item("held")]);

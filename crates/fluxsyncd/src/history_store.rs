@@ -41,6 +41,27 @@ pub const DEFAULT_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 /// Default max non-favorite entries retained on disk. Favorites are exempt.
 pub const DEFAULT_DISK_CAP: usize = 500;
 
+/// The user's history retention, mirrored here so every vault load/save
+/// prunes by it. 0 = forever. Set at boot and on every
+/// `CmdOp::SetHistoryRetention`.
+static RETENTION_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(fluxsync_core::DEFAULT_HISTORY_RETENTION_SECS);
+
+/// Mirror the user's history retention (seconds, 0 = forever).
+pub fn set_retention(secs: u64) {
+    RETENTION_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// TTL for vault load/save: the user's retention, or effectively no limit
+/// for "forever".
+#[must_use]
+pub fn ttl_secs() -> u64 {
+    match RETENTION_SECS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => u64::MAX / 1000,
+        secs => secs,
+    }
+}
+
 /// On-disk file format version. Bump only on an incompatible schema change;
 /// an older/newer file that fails to parse is treated as empty (history is
 /// best-effort, never load-fatal).
@@ -200,6 +221,7 @@ mod tests {
                 favorite,
                 resync: false,
                 source_peer_id: None,
+                created_ms,
             },
             created_ms,
         }

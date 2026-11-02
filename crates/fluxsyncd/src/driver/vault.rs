@@ -26,11 +26,14 @@ impl VaultCtx {
         let mut out: Vec<VaultEntry> = history
             .iter()
             .map(|item| {
-                let created_ms = self
-                    .entries
-                    .iter()
-                    .find(|e| stable(&e.item, item))
-                    .map_or(now, |prev| prev.created_ms);
+                let created_ms = if item.created_ms != 0 {
+                    item.created_ms
+                } else {
+                    self.entries
+                        .iter()
+                        .find(|e| stable(&e.item, item))
+                        .map_or(now, |prev| prev.created_ms)
+                };
                 VaultEntry {
                     item: item.clone(),
                     created_ms,
@@ -126,7 +129,7 @@ pub(super) async fn persist_history_change(
             &key,
             &to_save,
             now,
-            history_store::DEFAULT_TTL_SECS,
+            history_store::ttl_secs(),
             history_store::DEFAULT_DISK_CAP,
         )
     })

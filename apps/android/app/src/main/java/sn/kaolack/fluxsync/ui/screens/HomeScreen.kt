@@ -101,18 +101,6 @@ fun HomeScreen(vm: FluxsyncViewModel) {
             )
         }
         item { DeviceRow(s) }
-        item { SectionLabel(title = "Conditions") }
-        item {
-            ConditionsPanel(
-                s = s,
-                onThresholdChange = { v ->
-                    scope.launch { vm.setBatteryThreshold(v.toUByte()) }
-                },
-                onChargeOverrideChange = { v ->
-                    scope.launch { vm.setChargeOverride(v) }
-                },
-            )
-        }
         item {
             SectionLabel(
                 title = "Recent clipboard",
@@ -193,13 +181,6 @@ private fun HeroCard(
     onToggle: (Boolean) -> Unit,
 ) {
     val on = displayedOn
-    // 255 = battery not read yet → never "low"; only a real 0-100 trips it.
-    val known = s.selfBattery in 0..100
-    val below = known && s.selfBattery <= s.threshold
-    val critical = known && s.selfBattery <= 5
-    val charging = s.selfCharging
-    val syncPaused = on && below && !charging
-
     // Connection truth comes from the FSM phase, not the on-toggle: with sync
     // enabled but no live peer the hero must say "Searching", not "Active".
     val phase = s.phase.lowercase()
@@ -208,8 +189,6 @@ private fun HeroCard(
 
     val visuals = when {
         !on -> HeroVisuals(FsDarkBorder, FsDarkSubtle, "Off — tap the switch to start syncing.")
-        critical -> HeroVisuals(FsCrit.copy(alpha = 0.35f), FsCrit, "Halted — battery critical, all sync stopped.")
-        syncPaused -> HeroVisuals(FsWarn.copy(alpha = 0.35f), FsWarn, "On hold — battery below ${s.threshold}%.")
         linked -> HeroVisuals(FsHeroOkBorder, FsAccent, "Active — synchronizing")
         connecting -> HeroVisuals(FsWarn.copy(alpha = 0.35f), FsWarn, "Searching for your device…")
         else -> HeroVisuals(FsDarkBorder, FsDarkSubtle, "Standby — no device linked.")
@@ -238,7 +217,7 @@ private fun HeroCard(
                 )
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusDot(color = animatedDot, size = 7.dp, pulse = linked && !syncPaused && !critical)
+                    StatusDot(color = animatedDot, size = 7.dp, pulse = linked)
                     Spacer(Modifier.width(7.dp))
                     AnimatedContent(
                         targetState = if (isStalled) "Connecting…" else visuals.sub,
@@ -252,18 +231,14 @@ private fun HeroCard(
             FluxToggle(on = on, onChange = onToggle, size = FluxToggleSize.Md)
         }
         Spacer(Modifier.height(15.dp))
-        LinkDiagram(linked = linked, dimmed = syncPaused)
+        LinkDiagram(linked = linked)
     }
 }
 
 /** phone — beam — computer mini-diagram, `.ph-link` in the mockup. */
 @Composable
-private fun LinkDiagram(linked: Boolean, dimmed: Boolean) {
-    val beam = when {
-        linked && !dimmed -> FsAccent
-        linked -> FsWarn.copy(alpha = 0.6f)
-        else -> FsDarkBorderStrong
-    }
+private fun LinkDiagram(linked: Boolean) {
+    val beam = if (linked) FsAccent else FsDarkBorderStrong
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
         LinkNode { DeviceGlyph(phone = true, color = FsDarkMuted) }
         Box(
@@ -329,19 +304,17 @@ private fun DeviceRow(s: DaemonState) {
             ),
             level = s.selfBattery,
             charging = s.selfCharging,
-            threshold = s.threshold,
             modifier = Modifier.weight(1f),
             // 255 = not read yet (boot race) → "—", never a fake "255%".
             known = s.selfBattery in 0..100,
         )
-        val peerConnected = s.phase.lowercase() in setOf("linked", "paused", "halted")
+        val peerConnected = s.phase.lowercase() == "linked"
         DevicePill(
             label = sn.kaolack.fluxsync.vm.platformLabel(s.peerPlatform)
                 ?.let { "Peer · $it" } ?: "Peer",
             name = s.peerName.ifEmpty { "..." },
             level = s.peerBattery,
             charging = s.peerCharging,
-            threshold = s.threshold,
             modifier = Modifier.weight(1f),
             // Real % only when connected AND a reading has arrived (≤100).
             known = peerConnected && s.peerBattery in 0..100,
@@ -355,7 +328,6 @@ private fun DevicePill(
     name: String,
     level: Int,
     charging: Boolean,
-    threshold: Int,
     modifier: Modifier = Modifier,
     known: Boolean = true,
 ) {
@@ -387,54 +359,13 @@ private fun DevicePill(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             // Until linked + first BatteryStatus arrives, peerBattery holds the
             // 100% default — show a neutral "—" so the reading is never wrong.
-            BatteryGlyph(level = if (known) level else 0, charging = known && charging, threshold = threshold, width = 30.dp)
+            BatteryGlyph(level = if (known) level else 0, charging = known && charging, width = 30.dp)
             Text(
                 if (known) "$level%${if (charging) " ⚡" else ""}" else "—",
                 color = FsDarkMuted,
                 fontFamily = FsMono,
                 fontSize = 10.5.sp,
             )
-        }
-    }
-}
-
-@Composable
-private fun ConditionsPanel(s: DaemonState, onThresholdChange: (Int) -> Unit, onChargeOverrideChange: (Boolean) -> Unit) {
-    val below = s.selfBattery <= s.threshold
-    val delta = s.selfBattery - s.threshold
-
-    val shape = RoundedCornerShape(FsRadius.Item)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .border(width = 1.dp, color = FsDarkBorder, shape = shape)
-            .background(FsCard, shape)
-            .padding(14.dp),
-    ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Column {
-                Text("Pause sync below", color = FsDarkMuted, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 11.sp)
-                Text("${s.threshold}%", color = FsDarkFg, fontFamily = FsMono, fontWeight = FontWeight.SemiBold, fontSize = 20.sp)
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                Text("Status", color = FsDarkSubtle, fontFamily = FsSans, fontWeight = FontWeight.W600, fontSize = 10.5.sp)
-                Text(
-                    if (below) "${-delta}% below" else "$delta% above",
-                    color = if (below) FsWarn else FsAccent,
-                    fontFamily = FsMono,
-                    fontSize = 11.sp,
-                )
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-        ThresholdSlider(value = s.threshold, onChange = onThresholdChange, min = 5, max = 50)
-        Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Resume while charging", color = FsDarkFg, style = MaterialTheme.typography.bodySmall)
-                Text("Override threshold when plugged in", color = FsDarkMuted, style = MaterialTheme.typography.labelLarge)
-            }
-            FluxToggle(on = s.chargeOverride, onChange = onChargeOverrideChange, size = FluxToggleSize.Sm)
         }
     }
 }

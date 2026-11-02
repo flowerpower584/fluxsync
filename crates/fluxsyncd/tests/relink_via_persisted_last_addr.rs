@@ -151,18 +151,6 @@ async fn ipc_up(ipc: &Path, dur: Duration) -> bool {
     .await
 }
 
-async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(
-        ipc,
-        CmdRequest {
-            id: 0,
-            op: CmdOp::SetThreshold { value },
-        },
-    )
-    .await;
-    assert!(r.ok, "set-threshold failed: {r:?}");
-}
-
 async fn push(ipc: &Path, text: &str) {
     let r = ipc_send_recv(
         ipc,
@@ -339,11 +327,6 @@ async fn b_relinks_via_persisted_last_addr_with_no_mdns_and_no_pair_accept() {
         "b: ipc not up"
     );
 
-    // Host-battery gate: sync does not proceed until both sides lower the
-    // threshold below whatever the real host's battery reports.
-    set_threshold(&ipc_a, 5).await;
-    set_threshold(&ipc_b, 5).await;
-
     pair_daemons(&ipc_a, addr_a, &ipc_b).await;
 
     // Prove the link works before touching it: sync one item both ways.
@@ -385,12 +368,6 @@ async fn b_relinks_via_persisted_last_addr_with_no_mdns_and_no_pair_accept() {
         ipc_up(&ipc_b, Duration::from_secs(5)).await,
         "b2: ipc not up after restart"
     );
-
-    // The reload path uses `keystore_dir::load_peers`/`load_trusted_peers`
-    // for the trust set, but a fresh boot's in-memory battery threshold
-    // resets, and the battery gate must not be what blocks the relink
-    // under test — floor it exactly as at first boot.
-    set_threshold(&ipc_b, 5).await;
 
     let relinked_a = wait_until(RECONNECT_ENVELOPE, || async { phase_linked(&ipc_a).await }).await;
     let relinked_b = wait_until(RECONNECT_ENVELOPE, || async { phase_linked(&ipc_b).await }).await;

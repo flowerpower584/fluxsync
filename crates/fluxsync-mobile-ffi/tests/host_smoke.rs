@@ -49,28 +49,6 @@ fn ffi_roundtrip_push_text_observes_state() {
 }
 
 #[test]
-fn ffi_rejects_invalid_threshold() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let ipc = dir.path().join("ffi-thr.sock");
-    let port = pick_free_udp_port();
-
-    let handle = FluxsyncHandle::start(
-        "host-test".into(),
-        ipc.to_string_lossy().into_owned(),
-        port,
-        IdentitySource::Generate,
-    )
-    .expect("start");
-
-    assert!(handle.set_battery_threshold(4).is_err());
-    assert!(handle.set_battery_threshold(51).is_err());
-    assert!(handle.set_battery_threshold(15).is_ok());
-    assert!(handle.set_battery_threshold(50).is_ok());
-
-    handle.stop();
-}
-
-#[test]
 fn ffi_rejects_bad_identity_b64() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ipc = dir.path().join("ffi-id.sock");

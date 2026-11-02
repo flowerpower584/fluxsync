@@ -151,18 +151,6 @@ async fn history_has(ipc: &Path, preview: &str) -> bool {
         .any(|h| h.preview == preview)
 }
 
-async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(
-        ipc,
-        CmdRequest {
-            id: 2,
-            op: CmdOp::SetThreshold { value },
-        },
-    )
-    .await;
-    assert!(r.ok, "set-threshold failed: {r:?}");
-}
-
 async fn push(ipc: &Path, text: &str) {
     let r = ipc_send_recv(
         ipc,
@@ -373,10 +361,6 @@ async fn boot_paired_daemons(tag: &str) -> Booted {
     })
     .await;
     assert!(linked_b, "b did not link within 2s");
-
-    // Host-battery pause trap: floor the threshold on both before any push.
-    set_threshold(&ipc_a, 5).await;
-    set_threshold(&ipc_b, 5).await;
 
     Booted {
         ipc_a,

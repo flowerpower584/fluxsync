@@ -22,7 +22,6 @@ pub struct DaemonConfig {
     /// `peers.json`. `None` disables persistence (used by integration
     /// tests with `test_pair`).
     pub keystore_dir: Option<PathBuf>,
-    pub charge_override: bool,
     pub disable_clipboard: bool,
     pub wall_clock: Arc<dyn WallClock + Send + Sync>,
     /// Skip mDNS service register + browse. Default false. Tests on
@@ -99,7 +98,6 @@ impl DaemonConfig {
             ipc_path,
             trusted_peer_keys: Vec::new(),
             keystore_dir: None,
-            charge_override: true,
             disable_clipboard: false,
             wall_clock: Arc::new(ChronoWallClock),
             disable_mdns: false,

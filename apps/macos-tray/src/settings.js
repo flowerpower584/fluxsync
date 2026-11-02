@@ -56,15 +56,6 @@ function fmtUptime(secs) {
   return `${s}s`;
 }
 
-const slider = $('threshold-slider');
-let sliderDragging = false;
-function paintSlider(value) {
-  const min = Number(slider.min);
-  const max = Number(slider.max);
-  slider.style.setProperty('--fill', `${((value - min) / (max - min)) * 100}%`);
-  setText($('threshold-display'), `${value}%`);
-}
-
 function updateUI(s) {
   // Device name: skip while the field is focused so a state push doesn't
   // stomp what the user is mid-typing.
@@ -73,14 +64,7 @@ function updateUI(s) {
     nameInput.value = s.device_name || '';
   }
 
-  // Threshold: never yank the thumb out from under a drag.
-  const threshold = s.battery_threshold || 20;
-  if (!sliderDragging && Number(slider.value) !== threshold) {
-    slider.value = threshold;
-    paintSlider(threshold);
-  }
-
-  setToggleState($('opt-resume-on-charge'), !!s.charge_override);
+  paintRetention(s.history_retention_secs ?? 86400);
 
   if (s.version) {
     setText($('side-version'), `v${s.version}`);
@@ -291,7 +275,7 @@ function renderDevices(s) {
     platformKey: key,
     battery: s.peer_battery,
     charging: !!s.peer_charging,
-    connected: s.status === 'syncing' || s.status === 'paused',
+    connected: s.status === 'syncing',
     primary: false,
     onUnpair: async () => {
       if (!(await confirmUnpair(s.peer_name.trim()))) return;
@@ -358,22 +342,6 @@ window.addEventListener('storage', (e) => {
 try { consumeTabLink(localStorage.getItem(TAB_LINK_KEY)); } catch (_) {}
 
 // ── Controls ────────────────────────────────────────────────────
-slider.addEventListener('pointerdown', () => { sliderDragging = true; });
-window.addEventListener('pointerup', () => { sliderDragging = false; });
-slider.addEventListener('input', () => paintSlider(Number(slider.value)));
-slider.addEventListener('change', async () => {
-  sliderDragging = false;
-  const val = parseInt(slider.value, 10);
-  const prev = lastState ? (lastState.battery_threshold || 20) : 20;
-  try {
-    await invoke('fluxsync_set_threshold', { value: val });
-  } catch (err) {
-    slider.value = prev;
-    paintSlider(prev);
-    showToast(`Couldn't update threshold: ${err}`, 'err');
-  }
-});
-
 // DIR-P3-01: save on blur (native `change` semantics), Enter commits too.
 const nameInput = $('device-name-input');
 nameInput.addEventListener('keydown', (e) => {
@@ -413,8 +381,29 @@ async function flipSwitch(btn, command) {
     showToast(`Couldn't update preference: ${err}`, 'err');
   }
 }
-$('opt-resume-on-charge').addEventListener('click', (e) => flipSwitch(e.currentTarget, 'fluxsync_set_charge_override'));
 $('opt-launch-at-login').addEventListener('click', (e) => flipSwitch(e.currentTarget, 'fluxsync_set_launch_at_login'));
+
+// History retention — the daemon owns it; the segment mirrors state.
+const retentionSeg = $('retention-seg');
+function paintRetention(secs) {
+  for (const b of retentionSeg.querySelectorAll('button')) {
+    const on = Number(b.dataset.secs) === secs;
+    setAttr(b, 'aria-checked', String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+}
+retentionSeg.addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-secs]');
+  if (!b) return;
+  const secs = Number(b.dataset.secs);
+  paintRetention(secs);
+  try {
+    await invoke('fluxsync_set_history_retention', { secs });
+  } catch (err) {
+    if (lastState) paintRetention(lastState.history_retention_secs ?? 86400);
+    showToast(`Couldn't change history retention: ${err}`, 'err');
+  }
+});
 
 // Appearance — stored by theme.js, shared live with every window.
 const themeSeg = $('theme-seg');
@@ -485,7 +474,6 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ── Initialization ─────────────────────────────────────────────
-paintSlider(Number(slider.value));
 (async () => {
   await refreshState();
   // Launch at login reflects real OS autostart state, not a cached pref.

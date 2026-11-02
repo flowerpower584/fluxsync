@@ -86,7 +86,6 @@ html, body { height: 100%; overflow: hidden; }
   transition: background .3s;
 }
 .tray[data-link="on"] .wire .track { background: var(--live); }
-.tray[data-link="paused"] .wire .track { background: repeating-linear-gradient(90deg, var(--wait) 0 4px, transparent 4px 8px); }
 .tray[data-link="searching"] .wire .track { background: repeating-linear-gradient(90deg, var(--muted) 0 4px, transparent 4px 12px); animation: crawl .9s linear infinite; }
 .wire .seal {
   position: absolute; left: 50%; top: 0; transform: translateX(-50%);
@@ -289,7 +288,7 @@ html, body { height: 100%; overflow: hidden; }
 
 .matrix { margin: 0 14px; border-top: 1px solid var(--line); transition: opacity .2s; }
 .matrix.off { opacity: .4; }
-.mx-head, .mx-row { display: grid; grid-template-columns: 1fr 46px 46px 46px; align-items: center; }
+.mx-head, .mx-row { display: grid; grid-template-columns: 1fr 52px 52px; align-items: center; }
 .mx-head { height: 30px; color: var(--subtle); }
 .mx-head .c { text-align: center; font-size: 9.5px; }
 .mx-row { min-height: 40px; border-top: 1px solid var(--line); }

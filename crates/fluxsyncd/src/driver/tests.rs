@@ -449,6 +449,7 @@ async fn c2_persister_clears_disk_vault_and_favorites_on_wipe_gen_bump() {
         favorite: true,
         resync: false,
         source_peer_id: None,
+        created_ms: 0,
     };
 
     // Persister starts empty (ctx.last empty) so the baseline publish below
@@ -534,6 +535,7 @@ async fn c2_persister_clears_disk_vault_and_favorites_on_wipe_gen_bump() {
         favorite: false,
         resync: false,
         source_peer_id: None,
+        created_ms: 0,
     };
     let mut wiped = State::initial(&Config::default());
     wiped.history = vec![fresh.clone()];
@@ -610,6 +612,7 @@ async fn sync_security_wipe_if_needed_clears_outbox_and_disk_synchronously() {
             favorite: false,
             resync: false,
             source_peer_id: None,
+            created_ms: 0,
         },
         created_ms: 1_000,
     };
@@ -4462,12 +4465,11 @@ async fn close_session_spares_a_different_peer_now_in_the_primary_slot() {
     );
 }
 
-/// A ghost-timeout wipe keeps the favorites — in memory (core), and so on
-/// disk and in the image cache too: the vault is atomically rewritten with
-/// exactly the kept rows (never deleted then rewritten), and only a kept
-/// image keeps its bytes. Everything else the wipe dropped is gone.
+/// A device that has been away (ghost timeout) is no security event: the
+/// whole history stays — in memory, on disk and in the image cache — and
+/// ages out on the retention setting instead.
 #[tokio::test]
-async fn ghost_wipe_mirror_keeps_favorites_on_disk_and_in_image_cache() {
+async fn ghost_timeout_keeps_history_on_disk_and_in_image_cache() {
     use super::{image_cache, lookup_cached_image, sync_security_wipe_if_needed, Outbox};
     use crate::history_store::{self, VaultEntry};
     use fluxsync_core::{App, Config, Event, HistoryItem, HistorySource, Kind, StubWallClock};
@@ -4490,6 +4492,7 @@ async fn ghost_wipe_mirror_keeps_favorites_on_disk_and_in_image_cache() {
         favorite,
         resync: false,
         source_peer_id: None,
+        created_ms: 0,
     };
     let (pinned_img, plain_img) = ("aa".repeat(32), "bb".repeat(32));
     let history = vec![
@@ -4530,22 +4533,20 @@ async fn ghost_wipe_mirror_keeps_favorites_on_disk_and_in_image_cache() {
         Some((&dir_buf, &key)),
     )
     .await;
-    assert!(wiped);
+    assert!(!wiped, "a ghost timeout is not a security wipe");
+    assert_eq!(app.snapshot().history.len(), 4, "history stays in memory");
 
-    let on_disk: Vec<String> = history_store::load(&dir_buf, &key, super::now_ms(), 3_600)
+    let on_disk: Vec<String> = history_store::load(&dir_buf, &key, 1_000, 3_600)
         .expect("vault still readable")
         .into_iter()
         .map(|e| e.item.preview)
         .collect();
-    assert_eq!(on_disk, ["pinned text", "pinned image"]);
-    assert!(
-        lookup_cached_image(&pinned_img).is_some(),
-        "a kept image keeps its bytes"
+    assert_eq!(
+        on_disk,
+        ["pinned text", "plain text", "pinned image", "plain image"]
     );
-    assert!(
-        lookup_cached_image(&plain_img).is_none(),
-        "a wiped image's bytes are gone"
-    );
+    assert!(lookup_cached_image(&pinned_img).is_some());
+    assert!(lookup_cached_image(&plain_img).is_some());
     image_cache().lock().unwrap().clear();
 }
 
@@ -4573,6 +4574,7 @@ async fn persister_wipe_with_kept_rows_rewrites_the_vault() {
         favorite,
         resync: false,
         source_peer_id: None,
+        created_ms: 0,
     };
     let before = vec![
         row("pinned", &"11".repeat(32), true),

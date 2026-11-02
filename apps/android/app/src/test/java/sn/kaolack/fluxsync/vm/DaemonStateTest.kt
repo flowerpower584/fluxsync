@@ -21,9 +21,7 @@ class DaemonStateTest {
               "peer_charging": true,
               "battery_level": 64,
               "charging": false,
-              "battery_threshold": 25,
               "link_latency_ms": 12,
-              "charge_override": false,
               "history": [
                 {"hash":"abc","kind":"text","preview":"hello","time":"14:32","source":"peer","sensitive":false,"lamport":7}
               ],
@@ -44,9 +42,7 @@ class DaemonStateTest {
         assertTrue(s.peerCharging)
         assertEquals(64, s.selfBattery)
         assertFalse(s.selfCharging)
-        assertEquals(25, s.threshold)
         assertEquals(12, s.linkLatencyMs)
-        assertFalse(s.chargeOverride)
         assertEquals(1, s.history.size)
         assertEquals("hello", s.history[0].preview)
         assertEquals(7L, s.history[0].lamport)
@@ -66,9 +62,7 @@ class DaemonStateTest {
         assertEquals("", s.peerName)
         assertEquals(0, s.peerBattery)
         assertEquals(0, s.selfBattery)
-        assertEquals(20, s.threshold)
         assertEquals(0, s.linkLatencyMs)
-        assertTrue(s.chargeOverride)
         assertTrue(s.history.isEmpty())
         assertNull(s.metrics)
     }

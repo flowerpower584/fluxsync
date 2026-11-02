@@ -68,6 +68,8 @@ use tokio_util::sync::CancellationToken;
 mod actions;
 mod clipboard;
 mod commands;
+#[cfg(not(target_os = "android"))]
+mod concealed;
 mod frames;
 mod inbound;
 mod ipc_server;
@@ -129,7 +131,6 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         // alongside it once the wire-up lands.
         trusted_peer_keys: _,
         keystore_dir,
-        charge_override,
         wall_clock,
         disable_mdns,
         disable_clipboard,
@@ -166,7 +167,6 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     let mut app = App::new_with_device(
         CoreConfig {
             peer_name_self: peer_name_self.clone(),
-            charge_override,
             version: String::from(env!("CARGO_PKG_VERSION")),
             build_id: String::from(env!("FLUXSYNCD_BUILD_ID")),
             cipher: String::from("chacha20-poly1305"),
@@ -178,6 +178,15 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         // `EventId.origin` on every locally-copied item.
         fluxsync_core::DeviceId::from(identity.peer_id()),
     );
+
+    // History retention: the user's choice if one was saved, before the
+    // vault below is loaded (and pruned) with it.
+    let retention = keystore_dir
+        .as_ref()
+        .and_then(|dir| crate::keystore::load_history_retention(dir))
+        .filter(|secs| app.set_history_retention(*secs, now_ms()).is_ok())
+        .unwrap_or(fluxsync_core::DEFAULT_HISTORY_RETENTION_SECS);
+    history_store::set_retention(retention);
 
     // ── Restore the persisted outgoing event-seq horizon ──────────
     // `App.local_seq` (stamped as `EventId.seq` on every locally-originated
@@ -209,18 +218,28 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
         keystore_dir.as_ref()
     {
         let key = identity.derive_at_rest_key(history_store::AT_REST_CONTEXT);
-        let entries =
-            match history_store::load(dir, &key, now_ms(), history_store::DEFAULT_TTL_SECS) {
-                Ok(entries) => {
-                    app.restore_history(entries.iter().map(|e| e.item.clone()).collect());
-                    tracing::info!(count = entries.len(), "rehydrated history from vault");
+        let entries = match history_store::load(dir, &key, now_ms(), history_store::ttl_secs()) {
+            Ok(entries) => {
+                app.restore_history(
                     entries
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "vault load failed; starting with empty history");
-                    Vec::new()
-                }
-            };
+                        .iter()
+                        .map(|e| {
+                            let mut item = e.item.clone();
+                            if item.created_ms == 0 {
+                                item.created_ms = e.created_ms;
+                            }
+                            item
+                        })
+                        .collect(),
+                );
+                tracing::info!(count = entries.len(), "rehydrated history from vault");
+                entries
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "vault load failed; starting with empty history");
+                Vec::new()
+            }
+        };
         Some((dir.clone(), key, entries))
     } else {
         None
@@ -800,11 +819,20 @@ pub async fn run(cfg: DaemonConfig, shutdown: CancellationToken) -> Result<()> {
     // persister's own `initial_wipe_gen` above.
     let mut last_wipe_gen_sync: u64 = app.snapshot().vault_wipe_gen;
 
+    // Ages history out on the user's retention setting, once a minute.
+    let mut expiry_tick = tokio::time::interval(Duration::from_secs(60));
+    expiry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     // ── Main event loop ────────────────────────────────────────────
     loop {
         tokio::select! {
             biased;
             () = shutdown.cancelled() => break,
+            _ = expiry_tick.tick() => {
+                if app.expire_history(now_ms()) {
+                    dispatch(vec![Action::EmitState], &mut app, &mut seq_store, &shared).await;
+                }
+            }
             Some(event) = event_rx.recv() => {
                 if let Event::BatteryChangedSelf { level, charging } = &event {
                     shared.self_batt_level.store(*level, std::sync::atomic::Ordering::Relaxed);
@@ -977,10 +1005,7 @@ fn spawn_clipboard_writer(disable_clipboard: bool) -> Option<ClipboardWriter> {
     None
 }
 
-/// The primary link is up: linked, or battery-paused/halted over a live link.
+/// The primary link is up.
 fn link_is_up(app: &App) -> bool {
-    matches!(
-        app.snapshot().phase.as_str(),
-        "linked" | "paused" | "halted"
-    )
+    app.snapshot().phase == "linked"
 }

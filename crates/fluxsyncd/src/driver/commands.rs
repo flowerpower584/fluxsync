@@ -36,6 +36,10 @@ pub(super) async fn handle_driver_cmd(
     let DriverCmd::Run { op, reply, req_id } = cmd else {
         return;
     };
+    let (op, concealed) = match op {
+        CmdOp::PushConcealed { text } => (CmdOp::Push { text }, true),
+        op => (op, false),
+    };
     let resp = match op {
         CmdOp::Status => {
             let snap = sh.publishable_state(app).await;
@@ -140,6 +144,8 @@ pub(super) async fn handle_driver_cmd(
             dispatch(actions, app, seq_store, sh).await;
             CmdResponse::ok(req_id, None)
         }
+        // Rewritten to `Push` (with `concealed`) above.
+        CmdOp::PushConcealed { .. } => CmdResponse::err(req_id, "unreachable".to_string()),
         CmdOp::Push { text } => {
             use fluxsync_core::Clock;
             tracing::info!(len = text.len(), "IPC: push requested from local");
@@ -158,7 +164,7 @@ pub(super) async fn handle_driver_cmd(
                 )
             } else if !text.is_empty() {
                 let kind = kind_of(&text);
-                let sensitive = fluxsync_core::is_sensitive(&text);
+                let sensitive = concealed || fluxsync_core::is_sensitive(&text);
                 // Canon hash so CRLF/LF copies dedup (see clipboard_dedup_hash).
                 let hash = clipboard_dedup_hash(&text);
                 let lamport = app.clock.tick();
@@ -265,16 +271,19 @@ pub(super) async fn handle_driver_cmd(
                 .collect();
             CmdResponse::ok(req_id, Some(CmdData::TrustList(entries)))
         }
-        CmdOp::SetThreshold { value } => match app.state.set_threshold(value) {
+        CmdOp::SetHistoryRetention { secs } => match app.set_history_retention(secs, now_ms()) {
             Ok(()) => {
-                let actions = app.handle(
-                    Event::BatteryChangedSelf {
-                        level: app.snapshot().battery_level,
-                        charging: app.snapshot().charging,
-                    },
-                    &**wall,
-                );
-                dispatch(actions, app, seq_store, sh).await;
+                crate::history_store::set_retention(secs);
+                if let Some(dir) = keystore_dir {
+                    let dir = dir.clone();
+                    if let Err(e) =
+                        off_thread(move || crate::keystore::save_history_retention(&dir, secs))
+                            .await
+                    {
+                        tracing::warn!(error = %e, "failed to persist history retention");
+                    }
+                }
+                dispatch(vec![Action::EmitState], app, seq_store, sh).await;
                 CmdResponse::ok(req_id, None)
             }
             Err(e) => CmdResponse::err(req_id, e.to_string()),
@@ -303,21 +312,6 @@ pub(super) async fn handle_driver_cmd(
             }
             Err(e) => CmdResponse::err(req_id, e.to_string()),
         },
-        CmdOp::SetChargeOverride { value } => {
-            app.set_charge_override(value);
-            // Re-evaluate status with current battery so the new
-            // charge_override takes effect immediately (and the EmitState
-            // it triggers pushes the updated value to subscribers).
-            let actions = app.handle(
-                Event::BatteryChangedSelf {
-                    level: app.snapshot().battery_level,
-                    charging: app.snapshot().charging,
-                },
-                &**wall,
-            );
-            dispatch(actions, app, seq_store, sh).await;
-            CmdResponse::ok(req_id, None)
-        }
         // M-TRAY-03: actually terminate. The tray's `restart_stale_daemon`
         // sends `shutdown` then waits for the socket to close before it
         // respawns the up-to-date binary; a no-op left the stale daemon

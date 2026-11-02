@@ -37,8 +37,6 @@ const el = {
   peerMeta: $('peer-meta'),
   peerIcon: $('peer-device-icon'),
   packet: $('beam-pulse'),
-  pauseBanner: $('pause-banner'),
-  pauseText: $('pause-text'),
   offline: $('offline-state'),
   pairing: $('pairing-entry'),
   onboarding: $('onboarding-steps'),
@@ -143,7 +141,6 @@ function setView(view) {
   el.tabs.hidden = view !== 'paired';
   el.views.hidden = view !== 'paired';
   el.link.hidden = view !== 'paired';
-  if (view !== 'paired') el.pauseBanner.hidden = true;
   el.toggle.disabled = view === 'offline';
 }
 
@@ -260,21 +257,10 @@ function renderHero(s) {
   const peer = primaryName(s) || 'your device';
   if (!s.on) return setHero('off', 'Off', `Your clipboard stays on this ${HOST_WORD}`);
 
-  // 255 = battery not read yet (desktop / boot) → not "low"; only a real
-  // 0-100 reading can trip the low/critical hero states.
-  const threshold = s.battery_threshold ?? 20;
-  const known = batteryKnown(s.battery_level);
-  if (known && s.battery_level <= 5) return setHero('crit', 'Battery critical', 'Sync is paused to save power');
-  if (known && s.battery_level <= threshold && !s.charging) {
-    return setHero('warn', 'Paused', `Battery under ${threshold}% — resumes on charge`);
-  }
-
   // Connection truth comes from the FSM phase, never the on-toggle: with
   // sync enabled but no live peer the hero must NOT claim "Linked".
   switch (s.phase) {
     case 'linked':       return setHero('ok', 'Linked', `Syncing with ${peer}`);
-    case 'paused':
-    case 'halted':       return setHero('warn', 'Paused', `${peer}'s battery is low — resumes on charge`);
     case 'handshaking':  return setHero('warn', 'Connecting', `Securing the link with ${peer}`);
     case 'discovering':
     case 'reconnecting': return setHero('warn', 'Searching', `Looking for ${peer} on your network`);
@@ -284,9 +270,10 @@ function renderHero(s) {
 
 // ── The two ends of the link ─────────────────────────────────────
 // Battery tail for a meta line: "76%" (+ bolt when charging), coloured
-// when low. Desktops report 255 = no battery → nothing.
-function setMeta(target, label, level, charging, threshold) {
-  const key = `${label}|${level}|${charging}|${threshold}`;
+// when low. Shown only, never acted on. Desktops report 255 = no battery
+// → nothing.
+function setMeta(target, label, level, charging) {
+  const key = `${label}|${level}|${charging}`;
   if (target.dataset.key === key) return;
   target.dataset.key = key;
   target.replaceChildren(document.createTextNode(label));
@@ -294,14 +281,13 @@ function setMeta(target, label, level, charging, threshold) {
   const b = document.createElement('span');
   b.textContent = `${level}%`;
   if (level <= 5) b.className = 'crit';
-  else if (level <= threshold && !charging) b.className = 'low';
+  else if (level <= 20 && !charging) b.className = 'low';
   target.append(document.createTextNode(' · '), b);
   if (charging) b.insertAdjacentHTML('beforeend', ICON.bolt);
 }
 
 let lastPeerPlatform = null;
 function renderPeer(s) {
-  const threshold = s.battery_threshold ?? 20;
   const name = primaryName(s);
   setText(el.peerName, name || '—');
   el.peerName.title = name;
@@ -314,20 +300,15 @@ function renderPeer(s) {
   }
   const platform = PLATFORM_LABELS[p] || (p || 'Peer');
 
-  // Show the % whenever the peer is connected (linked OR battery-paused —
-  // the link is still up, the value is still live) AND a real reading has
+  // Show the % whenever the peer is connected AND a real reading has
   // arrived. 255 = not read yet → hidden, never a fake 100%.
-  const connected = s.phase === 'linked' || s.phase === 'paused' || s.phase === 'halted';
-  setMeta(el.peerMeta, platform, connected ? s.peer_battery : 255, !!s.peer_charging, threshold);
-
-  const peerLow = connected && batteryKnown(s.peer_battery) && s.peer_battery <= threshold && !s.peer_charging;
-  el.pauseBanner.hidden = !peerLow;
-  if (peerLow) setText(el.pauseText, `Paused — ${s.peer_name || 'the other device'} is under ${threshold}% battery. Resumes on charge.`);
+  const connected = s.phase === 'linked';
+  setMeta(el.peerMeta, platform, connected ? s.peer_battery : 255, !!s.peer_charging);
 }
 
 // Self side: desktops without a battery report 255 — just the OS then.
 function renderSelf(s) {
-  setMeta(el.selfMeta, OS_NAMES[HOST_OS] || 'This device', s.battery_level, !!s.charging, s.battery_threshold ?? 20);
+  setMeta(el.selfMeta, OS_NAMES[HOST_OS] || 'This device', s.battery_level, !!s.charging);
 }
 
 // RTT next to the gear; hidden until the daemon reports one.
@@ -338,7 +319,7 @@ function renderMetrics(s) {
 }
 
 // The wire between the two devices. `data-link` drives the CSS: on (solid
-// green), paused (amber dashes), searching (crawling dashes), off (inert).
+// green), searching (crawling dashes), off (inert).
 function renderLink(s, isPaired) {
   let link = 'off';
   if (s && s.on && isPaired) {
@@ -346,10 +327,7 @@ function renderLink(s, isPaired) {
     if (phase === 'discovering' || phase === 'handshaking' || phase === 'reconnecting') {
       link = 'searching';
     } else {
-      const threshold = s.battery_threshold ?? 20;
-      const selfLow = batteryKnown(s.battery_level) && s.battery_level <= threshold && !s.charging;
-      const peerLow = batteryKnown(s.peer_battery) && s.peer_battery <= threshold && !s.peer_charging;
-      link = (phase === 'paused' || phase === 'halted' || selfLow || peerLow) ? 'paused' : (phase === 'linked' ? 'on' : 'off');
+      link = phase === 'linked' ? 'on' : 'off';
     }
   }
   setAttr(el.tray, 'data-link', link);
@@ -981,9 +959,9 @@ function buildPendingCard(p) {
 }
 
 // ── FluxFirewall: rules matrix ───────────────────────────────────
-// Rows = content kinds, columns = Allow / Ask / Block. Built once and
-// updated in place, so a state push never steals keyboard focus.
-const FW_RULES = [['allow', 'Allow'], ['ask', 'Ask'], ['deny', 'Block']];
+// Rows = content kinds, columns = Allow / Block. Built once and updated in
+// place, so a state push never steals keyboard focus.
+const FW_RULES = [['allow', 'Allow'], ['deny', 'Block']];
 const FW_KINDS = [
   ['text', 'Text', 'Plain text'],
   ['url', 'Links', 'URLs'],
@@ -992,7 +970,7 @@ const FW_KINDS = [
   ['sensitive', 'Secrets', 'Detected keys & tokens'],
 ];
 function defaultFirewall() {
-  return { enabled: false, text: 'allow', url: 'allow', code: 'allow', image: 'allow', sensitive: 'ask' };
+  return { enabled: false, text: 'allow', url: 'allow', code: 'allow', image: 'allow', sensitive: 'deny' };
 }
 let fw = defaultFirewall();
 let fwSig = '';
@@ -1028,18 +1006,15 @@ function paintFirewall() {
   el.fwToggle.classList.toggle('on', !!fw.enabled);
   setAttr(el.fwToggle, 'aria-checked', String(!!fw.enabled));
   if (fw.enabled) {
-    const asks = FW_KINDS.filter(([f]) => fw[f] === 'ask').length;
-    const blocks = FW_KINDS.filter(([f]) => fw[f] === 'deny').length;
-    const bits = [];
-    if (blocks) bits.push(`${blocks} blocked`);
-    if (asks) bits.push(`${asks} ask first`);
-    setText(el.fwSub, bits.length ? `On — ${bits.join(' · ')}` : 'On — everything allowed');
+    const blocks = FW_KINDS.filter(([f]) => fw[f] !== 'allow').length;
+    setText(el.fwSub, blocks ? `On — ${blocks} blocked` : 'On — everything allowed');
   } else {
     setText(el.fwSub, 'Off — everything passes');
   }
   el.fwRules.classList.toggle('off', !fw.enabled);
   for (const c of el.fwRules.querySelectorAll('.cell')) {
-    const on = (fw[c.dataset.field] || 'allow') === c.dataset.rule;
+    const rule = fw[c.dataset.field] === 'allow' || !fw[c.dataset.field] ? 'allow' : 'deny';
+    const on = rule === c.dataset.rule;
     setAttr(c, 'aria-checked', String(on));
     c.tabIndex = on ? 0 : -1;
     c.disabled = !fw.enabled;

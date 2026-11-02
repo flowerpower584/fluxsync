@@ -184,7 +184,6 @@ Invariants worth knowing before changing it:
 {
   "on": true,
   "batteryLevel": 87,
-  "batteryThreshold": 15,
   "charging": false,
   "peerName": "Galaxy S21 Ultra",
   "peerBattery": 64,
@@ -192,7 +191,7 @@ Invariants worth knowing before changing it:
   "history": [
     { "kind": "url|text|code", "preview": "...", "time": "HH:MM" }
   ],
-  "status": "inactive|syncing|paused|critical",
+  "status": "inactive|syncing",
   "version": "0.4.2",
   "linkLatencyMs": 12,
   "cipher": "chacha20-poly1305"
@@ -202,11 +201,11 @@ Invariants worth knowing before changing it:
 `status` is **derived** in `fluxsync-core::policy::status_for(state)` and never set directly. Rule:
 
 ```
-if !on                                                       → "inactive"
-if peerBattery <= 5                                          → "critical"
-if on && peerBattery <= threshold && !peerCharging           → "paused"
-otherwise                                                    → "syncing"
+if !on       → "inactive"
+otherwise    → "syncing"
 ```
+
+Battery levels are displayed, never acted on.
 
 `history` is a 50-item ring buffer in RAM. The IPC layer slices `[..5]` before serialising (the UIs never need more).
 
@@ -243,7 +242,7 @@ No HTTP, no port. Permissions on the socket are `0600`.
   history, firewall policy, device name, the sequence horizon.
 - **In OS keychain** (`keyring` crate): the long-term identity private key and the peer revocation set. Mapping: macOS Keychain, Windows DPAPI/Credential Manager, Linux Secret Service, Android Keystore via the FFI host.
 
-No SQLite. No config file is needed for v0.1; defaults are baked in and CLI commands persist threshold / overrides via `fluxctl set-*` which calls into the daemon.
+No SQLite. Defaults are baked in; the few settings a user changes (device name, firewall, history retention) are small JSON files next to the identity, written by the daemon when the UI or `fluxctl` asks.
 
 ---
 

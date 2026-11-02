@@ -91,7 +91,6 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
             OwnDeviceCard(
                 battery = s.selfBattery,
                 charging = s.selfCharging,
-                threshold = s.threshold,
             )
         }
 
@@ -129,7 +128,6 @@ fun DevicesScreen(vm: FluxsyncViewModel, onAddDevice: () -> Unit) {
                     platform = d.platform,
                     batt = d.battery,
                     charging = d.charging,
-                    threshold = s.threshold,
                     // Only the primary link carries metrics + the Disable
                     // action. Unpair is peer-scoped for every card (daemon
                     // `revoke`) whenever a peer_id is available — it drops
@@ -197,7 +195,6 @@ private fun DeviceItem(
     platform: String,
     batt: Int,
     charging: Boolean,
-    threshold: Int,
     metrics: sn.kaolack.fluxsync.vm.ConnectionMetricsView?,
     primary: Boolean,
     peerId: String,
@@ -225,7 +222,7 @@ private fun DeviceItem(
                 Text(linkLabel, color = FsDarkSubtle, fontFamily = FsSans, fontSize = 10.5.sp, modifier = Modifier.padding(top = 4.dp))
             }
             Column(horizontalAlignment = Alignment.End) {
-                BatteryGlyph(level = batt, charging = charging, threshold = threshold, width = 30.dp)
+                BatteryGlyph(level = batt, charging = charging, width = 30.dp)
                 Text("$batt%", color = FsDarkMuted, fontFamily = FsMono, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
             }
         }
@@ -324,7 +321,7 @@ private fun DeviceItem(
 }
 
 @Composable
-private fun OwnDeviceCard(battery: Int, charging: Boolean, threshold: Int) {
+private fun OwnDeviceCard(battery: Int, charging: Boolean) {
     val shape = RoundedCornerShape(FsRadius.Item)
     Column(
         Modifier
@@ -351,7 +348,7 @@ private fun OwnDeviceCard(battery: Int, charging: Boolean, threshold: Int) {
                 Text("This device", color = FsDarkSubtle, fontFamily = FsSans, fontSize = 10.5.sp, modifier = Modifier.padding(top = 4.dp))
             }
             Column(horizontalAlignment = Alignment.End) {
-                BatteryGlyph(level = battery, charging = charging, threshold = threshold, width = 30.dp)
+                BatteryGlyph(level = battery, charging = charging, width = 30.dp)
                 Text("$battery%", color = FsDarkMuted, fontFamily = FsMono, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
             }
         }

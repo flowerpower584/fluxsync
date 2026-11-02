@@ -117,7 +117,10 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
 
     fun toggleSync(on: Boolean) = toggle(on) // Legacy alias
 
-    fun pushText(text: String) = ffi("Send clipboard") { it.pushText(text) }
+    /** [sensitive]: a password manager flagged the copy (synced as a secret). */
+    fun pushText(text: String, sensitive: Boolean = false) = ffi("Send clipboard") {
+        if (sensitive) it.pushItem("text", text.toByteArray(), true) else it.pushText(text)
+    }
 
     // DIR-P2-05: `sensitive` defaults to false so the existing share-sheet
     // call site (MainActivity) keeps compiling unchanged; there is no
@@ -127,13 +130,8 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
     fun pushImage(png: ByteArray, sensitive: Boolean = false) =
         ffi("Send image") { it.pushItem("image", png, sensitive) }
 
-    fun setBatteryThreshold(threshold: UByte) =
-        ffi("Set battery threshold") { it.setBatteryThreshold(threshold.toShort().toUByte()) }
-
     fun setSelfBattery(level: UByte, charging: Boolean) =
         ffi("Battery update") { it.setSelfBattery(level.toShort().toUByte(), charging) }
-
-    fun setChargeOverride(on: Boolean) = ffi("Set charge override") { it.setChargeOverride(on) }
 
     /**
      * DIR-P3-01: rename this device. Validation (non-empty, wire-length
@@ -142,6 +140,9 @@ class FluxsyncViewModel(app: Application) : AndroidViewModel(app) {
      * on the next session establishment, not immediately.
      */
     fun setDeviceName(name: String) = ffi("Rename device") { it.setDeviceName(name) }
+
+    fun setHistoryRetention(secs: Long) =
+        ffi("Keep history") { it.setHistoryRetention(secs.toULong()) }
 
     /** Global unpair: clears every trusted peer and resets pairing state.
      *  Only used by the Settings "Unpair all devices" action and as a

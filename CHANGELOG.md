@@ -5,6 +5,47 @@ Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+- **Battery saver.** The "pause below X% battery" threshold and "resume on
+  charge" are gone, on every platform and in `fluxctl`
+  (`set-threshold`, `set-charge-override`). FluxSync only sends when
+  something is copied, so pausing saved nothing and mostly caused "why did
+  it stop syncing?". Battery levels are still shown. The link no longer has
+  `paused`/`halted` phases; a v0.7.0 device still connects and its battery
+  is displayed.
+- **The hidden history wipe after 10 minutes without the other device.**
+  A device that is simply away is no security event; history now ages out
+  on the retention setting below.
+- **"Ask" in the clipboard firewall.** Rules are Always or Never. An "ask"
+  rule saved by an older version is enforced as Never, and the default
+  rule for detected secrets is Never.
+- **The separate KDE/StatusNotifier tray** (`apps/linux-tray`). The desktop
+  app (`.deb`/`.AppImage`) covers Linux, systray included.
+
+### Added
+- **Android: three ways to send without the Accessibility capture** — a
+  "Send clipboard" button on the FluxSync notification, a quick-settings
+  tile, and "Share → FluxSync" for text and images. Android only lets the
+  app in front read the clipboard, so they go through an invisible screen
+  that reads it and closes.
+- **Password managers are respected.** A copy a password manager flags as
+  secret (macOS `org.nspasteboard.ConcealedType`/`TransientType`, Windows
+  `ExcludeClipboardContentFromMonitorProcessing`, Wayland
+  `x-kde-passwordManagerHint`, Android 13+ `IS_SENSITIVE`) syncs as a
+  secret: never kept in history or on disk. X11 relies on the content-based
+  secret detection alone.
+- **Secrets expire.** A received password or key is cleared from the
+  clipboard after 60 seconds unless something else was copied since
+  (desktop and Android); Android also hides its preview.
+- **Keep history: 1 hour, 1 day (default), 7 days or forever**, in the
+  desktop and Android settings and `fluxctl history keep <1h|1d|7d|forever>`.
+  Pinned items always stay. Applies to the list and the encrypted on-disk
+  vault alike, checked every minute.
+
+### Changed
+- Desktop: the statistics tab is now "Diagnostic". Android: the log moved
+  from the bottom bar to Settings → Diagnostic.
+
 ## [v0.8.0-beta.1] — 2026-10-25
 
 > **Beta.** A big release — a redesigned desktop app and a reworked daemon.

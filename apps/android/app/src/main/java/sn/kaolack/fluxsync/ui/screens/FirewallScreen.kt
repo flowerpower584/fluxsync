@@ -29,7 +29,7 @@ import sn.kaolack.fluxsync.vm.FluxsyncViewModel
 
 /**
  * Screen 05: Firewall.
- * Per-content-type policy (Allow / Ask / Deny) plus the pending-decisions
+ * Per-content-type policy (Allow / Deny) plus the pending-decisions
  * queue for items the daemon parked under an Ask rule. Without this screen an
  * Ask-held item would block forever on Android — the daemon waits for a
  * resolve that only the UI can send.
@@ -214,7 +214,6 @@ private fun RuleSelector(current: String, enabled: Boolean, onPick: (String) -> 
             .border(1.dp, FsDarkBorder, RoundedCornerShape(FsRadius.Pill)),
     ) {
         RuleChip("allow", "ALLOW", current, FsOk, FsOkSoft, enabled, Modifier.weight(1f), onPick)
-        RuleChip("ask", "ASK", current, FsWarn, FsWarnSoft, enabled, Modifier.weight(1f), onPick)
         RuleChip("deny", "DENY", current, FsCrit, FsCritSoft, enabled, Modifier.weight(1f), onPick)
     }
 }

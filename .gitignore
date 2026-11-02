@@ -1,5 +1,5 @@
 /target/
-# Nested Rust build dirs (e.g. apps/linux-tray/target)
+# Nested Rust build dirs (e.g. apps/macos-tray/src-tauri/target)
 **/target/
 **/*.rs.bk
 .DS_Store

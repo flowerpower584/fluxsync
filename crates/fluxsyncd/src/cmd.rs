@@ -44,6 +44,12 @@ pub enum CmdOp {
     Push {
         text: String,
     },
+    /// Same as `Push`, for text a password manager marked as secret: synced
+    /// as a sensitive item (never kept in history or on disk, cleared from
+    /// the receiving clipboard after a minute).
+    PushConcealed {
+        text: String,
+    },
     /// Inject an image clipboard item. `data` is the base64 of the raw
     /// PNG bytes — NDJSON is line-based, so binary payloads ride as
     /// base64. Fired by the Android FFI `push_item("image", …)` and
@@ -70,9 +76,6 @@ pub enum CmdOp {
         #[serde(default = "default_tail_n")]
         n: usize,
     },
-    SetThreshold {
-        value: u8,
-    },
     /// DIR-P3-01: rename this device. Validated + persisted by the daemon
     /// (see `App::set_device_name` + `keystore::save_device_name`); an
     /// already-linked peer sees the new name on the next session
@@ -81,8 +84,10 @@ pub enum CmdOp {
     SetDeviceName {
         name: String,
     },
-    SetChargeOverride {
-        value: bool,
+    /// How long non-favorite history is kept, in seconds: 3600, 86400,
+    /// 604800, or 0 for forever. Persisted.
+    SetHistoryRetention {
+        secs: u64,
     },
     /// FluxVault: pin/unpin a history item (by hex content hash) as a
     /// favorite, exempting it from the vault's TTL + disk cap.

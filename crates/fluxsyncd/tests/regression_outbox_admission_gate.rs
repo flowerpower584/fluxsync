@@ -138,21 +138,6 @@ async fn ipc_up(ipc: &Path, dur: Duration) -> bool {
     .await
 }
 
-/// KNOWN TRAP: a real host battery <=20% and discharging silently pauses
-/// sync (the battery-policy `Paused` gate). Floor both daemons' thresholds
-/// right after boot.
-async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(
-        ipc,
-        CmdRequest {
-            id: 0,
-            op: CmdOp::SetThreshold { value },
-        },
-    )
-    .await;
-    assert!(r.ok, "set-threshold failed: {r:?}");
-}
-
 async fn push(ipc: &Path, text: &str) {
     let r = ipc_send_recv(
         ipc,
@@ -405,9 +390,6 @@ async fn boot_and_pair() -> (
         ipc_up(&ipc_b, Duration::from_secs(5)).await,
         "b: ipc not up"
     );
-
-    set_threshold(&ipc_a, 5).await;
-    set_threshold(&ipc_b, 5).await;
 
     let a_pub = pair_daemons(&ipc_a, addr_a, &ipc_b).await;
 

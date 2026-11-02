@@ -31,9 +31,7 @@
 //!
 //! Two in-process daemons, linked via the `test_pair` shortcut (same as
 //! `two_daemons.rs`) rather than a real handshake — this test isn't
-//! exercising pairing. `SetThreshold { value: 5 }` is issued on both right
-//! after boot so a real host's battery level can never gate the sync this
-//! test depends on.
+//! exercising pairing.
 
 #![cfg(unix)]
 
@@ -106,18 +104,6 @@ async fn status(ipc: &Path) -> Box<fluxsync_core::State> {
         Some(CmdData::State(s)) => s,
         other => panic!("expected State, got {other:?}"),
     }
-}
-
-async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(
-        ipc,
-        CmdRequest {
-            id: 0,
-            op: CmdOp::SetThreshold { value },
-        },
-    )
-    .await;
-    assert!(r.ok, "set-threshold failed: {r:?}");
 }
 
 /// A tiny, genuinely-decodable PNG (not a synthetic byte string) so the
@@ -237,12 +223,6 @@ async fn sensitive_image_syncs_but_excluded_from_history_and_vault() {
     })
     .await;
     assert!(linked_b, "daemon B did not link to A in 3s");
-
-    // Host battery gates sync — floor the threshold on both immediately,
-    // matching resync_on_reconnect.rs's harness convention, so this test's
-    // pass/fail never depends on the machine's actual charge level.
-    set_threshold(&ipc_a, 5).await;
-    set_threshold(&ipc_b, 5).await;
 
     // ── Control: a non-sensitive image proves the pipeline (live sync +
     // history + on-disk vault persistence) actually works end to end,

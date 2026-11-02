@@ -109,11 +109,19 @@ class FluxsyncService : Service() {
     }
 
     private fun createNotification(content: String): Notification {
+        // "Send clipboard" works even when the Accessibility capture is off.
+        val send = android.app.PendingIntent.getActivity(
+            this,
+            1,
+            Intent(this, SendClipboardActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("FluxSync")
             .setContentText(content)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
+            .addAction(android.R.drawable.ic_menu_send, "Send clipboard", send)
             .build()
     }
 

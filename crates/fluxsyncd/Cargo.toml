@@ -78,6 +78,10 @@ nix = { version = "0.28", features = ["fs", "hostname", "signal", "process"] }
 security-framework-sys = "2"
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
+# Password-manager clipboard markers (`driver/concealed.rs`); already in
+# the tree through `arboard`.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
 
 # `arboard` only ships backends for desktop OSes (macOS Cocoa, Linux
 # X11/Wayland, Windows Win32). On Android the same daemon is linked
@@ -122,3 +126,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Memory",
     "Win32_System_Power",
 ] }
+
+# Password-manager clipboard markers (`driver/concealed.rs`); both are
+# already in the tree through `arboard`.
+[target.'cfg(target_os = "windows")'.dependencies.clipboard-win]
+version = "5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wl-clipboard-rs = "0.9"

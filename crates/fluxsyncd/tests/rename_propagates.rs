@@ -78,21 +78,6 @@ async fn status(ipc: &PathBuf) -> Box<fluxsync_core::State> {
     }
 }
 
-/// Floor the battery threshold so a real, low, discharging host battery
-/// (this is an in-process daemon reading the REAL machine battery, see
-/// `battery.rs`) can never force the FSM's policy layer into `Paused` and
-/// gate this test on something it isn't exercising.
-async fn floor_battery_threshold(ipc: &PathBuf) {
-    ipc_send_recv(
-        ipc,
-        CmdRequest {
-            id: 0,
-            op: CmdOp::SetThreshold { value: 5 },
-        },
-    )
-    .await;
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::similar_names)] // sess_a1/sess_b1/sess_a2/sess_b2 etc. name two daemons across two runs
 async fn rename_reaches_linked_peer_live_and_survives_restart() {
@@ -148,8 +133,6 @@ async fn rename_reaches_linked_peer_live_and_survives_restart() {
 
     assert!(wait_until(Duration::from_secs(2), || async { ipc_a.exists() }).await);
     assert!(wait_until(Duration::from_secs(2), || async { ipc_b.exists() }).await);
-    floor_battery_threshold(&ipc_a).await;
-    floor_battery_threshold(&ipc_b).await;
 
     assert!(
         wait_until(Duration::from_secs(2), || async {
@@ -247,8 +230,6 @@ async fn rename_reaches_linked_peer_live_and_survives_restart() {
 
     assert!(wait_until(Duration::from_secs(2), || async { ipc_a.exists() }).await);
     assert!(wait_until(Duration::from_secs(2), || async { ipc_b.exists() }).await);
-    floor_battery_threshold(&ipc_a).await;
-    floor_battery_threshold(&ipc_b).await;
 
     // A's boot-time state must already show the reloaded rename.
     assert_eq!(status(&ipc_a).await.device_name, "Dethie's MacBook");

@@ -105,8 +105,11 @@ The headline turns green and says **Linked**: you're done. The word check makes 
 - **Copy as usual.** What you copy on one device is on the other device's clipboard a moment later. Just paste.
 - **History:** click the FluxSync icon to see everything you've copied recently. Click an item to copy it again, or press **Ctrl/⌘ + 1–9** for the last nine. Type to search; press Enter to copy the best match.
 - **Favorites:** pin an item with the ☆ star to keep it. Favorites aren't deleted with the rest of the history.
+- **How long history is kept:** 1 hour, 1 day (the default), 7 days or forever, in **Settings → Keep history**. Pinned items always stay.
 - **Pause:** the switch at the top turns syncing off and on.
-- **Firewall tab:** choose, for each kind of content (text, links, code, images, passwords and keys), whether it syncs **Always**, **Ask** each time, or **Never**.
+- **Android, send by hand:** tap **Send clipboard** on the FluxSync notification, add the **Send clipboard** tile to your quick settings, or use **Share → FluxSync** from any app. These work even if the Accessibility setting is off.
+- **Passwords:** a password copied from a password manager (or anything that looks like a key) still reaches your other device, but it's never kept in history, and it's wiped from the clipboard after a minute.
+- **Firewall tab:** choose, for each kind of content (text, links, code, images, passwords and keys), whether it syncs **Always** or **Never**.
 - **Devices tab:** see your paired devices, online or not, and unpair any of them.
 
 ## Something not working?

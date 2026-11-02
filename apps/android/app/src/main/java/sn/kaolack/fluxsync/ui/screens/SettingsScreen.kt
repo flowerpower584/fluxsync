@@ -42,7 +42,11 @@ import sn.kaolack.fluxsync.vm.FluxsyncViewModel
  * Comprehensive configuration for battery limits, security, and network discovery.
  */
 @Composable
-fun SettingsScreen(vm: FluxsyncViewModel, onOpenOemGuidance: () -> Unit = {}) {
+fun SettingsScreen(
+    vm: FluxsyncViewModel,
+    onOpenOemGuidance: () -> Unit = {},
+    onOpenDiagnostics: () -> Unit = {},
+) {
     val state by vm.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -87,22 +91,23 @@ fun SettingsScreen(vm: FluxsyncViewModel, onOpenOemGuidance: () -> Unit = {}) {
                         showRenameDialog = true
                     },
                 )
-                SettingsItem(
-                    label = "Battery threshold",
-                    hint = "Pause sync below ${s.threshold}%",
-                    right = { Text("${s.threshold}% ›", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) }
-                )
-                SettingsItem(
-                    label = "Resume on charge",
-                    hint = "Override threshold when plugged in",
-                    right = {
-                        FluxToggle(on = s.chargeOverride, onChange = {
-                            scope.launch { vm.setChargeOverride(it) }
-                        }, size = FluxToggleSize.Sm)
-                    }
-                )
                 // FS-024: dark-only is intentional; surface it explicitly so
                 // the absence of a theme toggle reads as a decision, not a gap.
+                // Tap cycles 1 hour → 1 day → 7 days → forever.
+                SettingsItem(
+                    label = "Keep history",
+                    hint = "Pinned items always stay",
+                    right = {
+                        Text(
+                            "${retentionLabel(s.historyRetentionSecs)} ›",
+                            color = FsDarkMuted,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                    onClick = {
+                        scope.launch { vm.setHistoryRetention(nextRetention(s.historyRetentionSecs)) }
+                    },
+                )
                 SettingsItem(
                     label = "Theme",
                     hint = themeAppearanceHint(isSystemInDarkTheme()),
@@ -141,8 +146,14 @@ fun SettingsScreen(vm: FluxsyncViewModel, onOpenOemGuidance: () -> Unit = {}) {
                     label = "Manufacturer guidance",
                     hint = "How ${Build.MANUFACTURER} handles background apps",
                     right = { Text("VIEW ›", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) },
-                    isLast = true,
                     onClick = onOpenOemGuidance,
+                )
+                SettingsItem(
+                    label = "Diagnostic",
+                    hint = "Service log, for troubleshooting",
+                    right = { Text("VIEW ›", color = FsDarkMuted, style = MaterialTheme.typography.labelSmall) },
+                    isLast = true,
+                    onClick = onOpenDiagnostics,
                 )
             }
         }
@@ -404,6 +415,21 @@ private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> 
             content()
         }
     }
+}
+
+private val RETENTION_CHOICES = listOf(3_600L, 86_400L, 604_800L, 0L)
+
+internal fun retentionLabel(secs: Long): String = when (secs) {
+    3_600L -> "1 hour"
+    86_400L -> "1 day"
+    604_800L -> "7 days"
+    0L -> "Forever"
+    else -> "1 day"
+}
+
+internal fun nextRetention(secs: Long): Long {
+    val i = RETENTION_CHOICES.indexOf(secs)
+    return RETENTION_CHOICES[(i + 1).mod(RETENTION_CHOICES.size)]
 }
 
 @Composable

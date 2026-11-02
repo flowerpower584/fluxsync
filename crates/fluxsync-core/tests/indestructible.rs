@@ -161,8 +161,6 @@ fn toggle_off_from_every_phase() {
         Phase::Discovering,
         Phase::Handshaking,
         Phase::Linked,
-        Phase::Paused,
-        Phase::Halted,
     ] {
         let (next, actions) = transition(start_phase, &Event::ToggleOff);
         assert_eq!(next, Phase::Idle, "ToggleOff from {start_phase:?}");
@@ -172,131 +170,20 @@ fn toggle_off_from_every_phase() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 3. BATTERY POLICY — exhaustive boundary testing
+// 3. STATUS — follows the sync switch, never the battery
 // ═══════════════════════════════════════════════════════════════════
 
-fn make_state(on: bool, sb: u8, sc: bool, pb: u8, pc: bool, thr: u8) -> State {
-    let mut s = State::initial(&Config::default());
-    s.on = on;
-    s.battery_level = sb;
-    s.charging = sc;
-    s.peer_battery = pb;
-    s.peer_charging = pc;
-    s.battery_threshold = thr;
-    s
-}
-
 #[test]
-fn policy_inactive_always_when_off() {
-    for b in [0, 5, 15, 50, 100] {
-        assert_eq!(
-            status_for(&make_state(false, b, false, b, false, 20)),
-            Status::Inactive
-        );
+fn status_follows_the_switch_whatever_the_battery() {
+    for (on, want) in [(false, Status::Inactive), (true, Status::Syncing)] {
+        for b in [0, 4, 5, 15, 50, 100, 255] {
+            let mut s = State::initial(&Config::default());
+            s.on = on;
+            s.battery_level = b;
+            s.peer_battery = b;
+            assert_eq!(status_for(&s), want, "on={on} battery={b}");
+        }
     }
-}
-
-#[test]
-fn policy_critical_at_5_or_below_either_side() {
-    for lvl in 0..=5u8 {
-        assert_eq!(
-            status_for(&make_state(true, lvl, false, 80, false, 20)),
-            Status::Critical
-        );
-        assert_eq!(
-            status_for(&make_state(true, 80, false, lvl, false, 20)),
-            Status::Critical
-        );
-        // Critical even when charging
-        assert_eq!(
-            status_for(&make_state(true, lvl, true, 80, false, 20)),
-            Status::Critical
-        );
-    }
-}
-
-#[test]
-fn policy_paused_at_threshold_boundary() {
-    let thr = 20u8;
-    // At threshold = Paused
-    assert_eq!(
-        status_for(&make_state(true, thr, false, 80, false, thr)),
-        Status::Paused
-    );
-    // One above = Syncing
-    assert_eq!(
-        status_for(&make_state(true, thr + 1, false, 80, false, thr)),
-        Status::Syncing
-    );
-    // Same for peer side
-    assert_eq!(
-        status_for(&make_state(true, 80, false, thr, false, thr)),
-        Status::Paused
-    );
-    assert_eq!(
-        status_for(&make_state(true, 80, false, thr + 1, false, thr)),
-        Status::Syncing
-    );
-}
-
-#[test]
-fn policy_charging_overrides_pause() {
-    assert_eq!(
-        status_for(&make_state(true, 10, true, 80, false, 20)),
-        Status::Syncing
-    );
-    assert_eq!(
-        status_for(&make_state(true, 80, false, 10, true, 20)),
-        Status::Syncing
-    );
-}
-
-#[test]
-fn policy_both_below_still_paused() {
-    assert_eq!(
-        status_for(&make_state(true, 15, false, 15, false, 20)),
-        Status::Paused
-    );
-}
-
-#[test]
-fn policy_phase_mirrors_status_after_link() {
-    let mut app = linked_app();
-    // Set threshold to 20 so level=10 triggers pause
-    app.state.battery_threshold = 20;
-
-    // Drop to paused (10 <= 20, not charging)
-    app.handle(
-        Event::BatteryChangedSelf {
-            level: 10,
-            charging: false,
-        },
-        &wall(),
-    );
-    assert_eq!(app.snapshot().status, Status::Paused);
-    assert_eq!(app.phase, Phase::Paused);
-
-    // Charge → back to linked
-    app.handle(
-        Event::BatteryChangedSelf {
-            level: 10,
-            charging: true,
-        },
-        &wall(),
-    );
-    assert_eq!(app.snapshot().status, Status::Syncing);
-    assert_eq!(app.phase, Phase::Linked);
-
-    // Drop to critical
-    app.handle(
-        Event::BatteryChangedSelf {
-            level: 3,
-            charging: false,
-        },
-        &wall(),
-    );
-    assert_eq!(app.snapshot().status, Status::Critical);
-    assert_eq!(app.phase, Phase::Halted);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -595,7 +482,6 @@ fn state_json_has_all_required_keys() {
     for key in [
         "on",
         "battery_level",
-        "battery_threshold",
         "charging",
         "peer_name",
         "peer_battery",
@@ -614,8 +500,6 @@ fn state_json_has_all_required_keys() {
 fn state_status_serializes_lowercase() {
     assert_eq!(serde_json::to_value(Status::Inactive).unwrap(), "inactive");
     assert_eq!(serde_json::to_value(Status::Syncing).unwrap(), "syncing");
-    assert_eq!(serde_json::to_value(Status::Paused).unwrap(), "paused");
-    assert_eq!(serde_json::to_value(Status::Critical).unwrap(), "critical");
 }
 
 #[test]
@@ -631,6 +515,7 @@ fn state_history_item_serializes_snake_case() {
         favorite: false,
         resync: false,
         source_peer_id: None,
+        created_ms: 0,
     };
     let j = serde_json::to_value(&item).unwrap();
     assert!(j.get("kind").is_some());
@@ -650,17 +535,6 @@ fn state_roundtrip_json() {
 // ═══════════════════════════════════════════════════════════════════
 // 8. THRESHOLD VALIDATION
 // ═══════════════════════════════════════════════════════════════════
-
-#[test]
-fn threshold_range_5_to_50_inclusive() {
-    let mut s = State::initial(&Config::default());
-    assert!(s.set_threshold(5).is_ok());
-    assert!(s.set_threshold(50).is_ok());
-    assert!(s.set_threshold(4).is_err());
-    assert!(s.set_threshold(51).is_err());
-    assert!(s.set_threshold(0).is_err());
-    assert!(s.set_threshold(255).is_err());
-}
 
 #[test]
 fn battery_level_rejects_over_100() {

@@ -31,25 +31,19 @@ async fn fluxsync_toggle(on: bool) -> Result<(), String> {
         .map(|_| ())
 }
 
-#[tauri::command]
-async fn fluxsync_set_threshold(value: u8) -> Result<(), String> {
-    ipc::one_shot(json!({"id": 1, "op": "set_threshold", "value": value}))
-        .await
-        .map(|_| ())
-}
-
-#[tauri::command]
-async fn fluxsync_set_charge_override(value: bool) -> Result<(), String> {
-    ipc::one_shot(json!({"id": 1, "op": "set_charge_override", "value": value}))
-        .await
-        .map(|_| ())
-}
-
 /// DIR-P3-01: rename this device. Validation (non-empty, wire-length
 /// bound, printable) happens daemon-side; a rejected name comes back as
 /// an `Err(String)` the settings UI can show inline. An already-linked
 /// peer sees the new name on the next session establishment, not
 /// immediately.
+/// How long non-favorite history is kept, in seconds (0 = forever).
+#[tauri::command]
+async fn fluxsync_set_history_retention(secs: u64) -> Result<(), String> {
+    ipc::one_shot(json!({"id": 1, "op": "set_history_retention", "secs": secs}))
+        .await
+        .map(|_| ())
+}
+
 #[tauri::command]
 async fn fluxsync_set_device_name(name: String) -> Result<(), String> {
     ipc::one_shot(json!({"id": 1, "op": "set_device_name", "name": name}))
@@ -328,9 +322,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fluxsync_status,
             fluxsync_toggle,
-            fluxsync_set_threshold,
-            fluxsync_set_charge_override,
             fluxsync_set_device_name,
+            fluxsync_set_history_retention,
             fluxsync_pair_show,
             fluxsync_pair_from_uri,
             fluxsync_pair_from_pin,

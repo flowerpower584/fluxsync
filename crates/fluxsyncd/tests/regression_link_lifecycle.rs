@@ -131,18 +131,6 @@ async fn ipc_up(ipc: &Path, dur: Duration) -> bool {
     .await
 }
 
-async fn set_threshold(ipc: &Path, value: u8) {
-    let r = ipc_send_recv(
-        ipc,
-        CmdRequest {
-            id: 0,
-            op: CmdOp::SetThreshold { value },
-        },
-    )
-    .await;
-    assert!(r.ok, "set-threshold failed: {r:?}");
-}
-
 async fn push(ipc: &Path, text: &str) {
     let r = ipc_send_recv(
         ipc,
@@ -342,8 +330,6 @@ async fn toggle_off_then_on_relinks_and_syncs_again() {
         ipc_up(&ipc_b, Duration::from_secs(5)).await,
         "b: ipc not up"
     );
-    set_threshold(&ipc_a, 5).await;
-    set_threshold(&ipc_b, 5).await;
     pair_daemons(&ipc_a, addr_a, &ipc_b).await;
     assert!(
         item_reaches(&ipc_a, &ipc_b, "before-pause").await,
@@ -427,7 +413,6 @@ async fn pairing_another_device_is_not_a_reconnect() {
     }
     for ipc in &ipcs {
         assert!(ipc_up(ipc, Duration::from_secs(5)).await, "ipc not up");
-        set_threshold(ipc, 5).await;
     }
     let (ipc_a, ipc_b, ipc_c) = (&ipcs[0], &ipcs[1], &ipcs[2]);
     let addr_a: SocketAddr = format!("127.0.0.1:{}", ports[0]).parse().unwrap();

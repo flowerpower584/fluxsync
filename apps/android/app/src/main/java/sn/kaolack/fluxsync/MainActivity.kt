@@ -99,7 +99,8 @@ class MainActivity : ComponentActivity() {
         // pushed once, not twice.
         if (!FluxsyncManager.markPushedIfNew(text)) return@OnPrimaryClipChangedListener
 
-        lifecycleScope.launch { vm.pushText(text) }
+        val secret = FluxsyncManager.isMarkedSensitive(clip.description)
+        lifecycleScope.launch { vm.pushText(text, secret) }
     }
 
     /**
@@ -169,7 +170,7 @@ class MainActivity : ComponentActivity() {
         if (clip != null && clip.itemCount > 0) {
             val text = clip.getItemAt(0).coerceToText(this)?.toString()
             if (!text.isNullOrEmpty() && FluxsyncManager.markResumePushIfNew(text)) {
-                currentVm?.pushText(text)
+                currentVm?.pushText(text, FluxsyncManager.isMarkedSensitive(clip.description))
             }
         }
     }

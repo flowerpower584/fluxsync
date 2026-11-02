@@ -24,15 +24,11 @@ pub fn render_status(v: &Value) {
     // Real link state for gating the peer readout (a dropped peer keeps its
     // name for reconnect UX, but its battery must not read as live).
     let phase = data.get("phase").and_then(Value::as_str).unwrap_or("");
-    let peer_connected = matches!(phase, "linked" | "paused" | "halted");
+    let peer_connected = phase == "linked";
     let cipher = data.get("cipher").and_then(Value::as_str).unwrap_or("?");
     let version = data.get("version").and_then(Value::as_str).unwrap_or("?");
     let battery = data
         .get("battery_level")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let threshold = data
-        .get("battery_threshold")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let charging = data
@@ -109,18 +105,12 @@ pub fn render_status(v: &Value) {
     // 255 (or any >100) = not read yet / no battery (desktop) → "—".
     let battery_color = if battery > 100 {
         "—".bright_black().to_string()
-    } else if charging || battery > threshold {
+    } else if charging || battery > 20 {
         format!("{battery}%").green().to_string()
     } else {
         format!("{battery}%").red().bold().to_string()
     };
-    println!(
-        "  {}   {} {:<14}  threshold {}%",
-        "battery".dimmed(),
-        bolt,
-        battery_color,
-        threshold
-    );
+    println!("  {}   {} {}", "battery".dimmed(), bolt, battery_color);
 
     let lat_color = if latency == 0 {
         "—".bright_black().to_string()
@@ -149,7 +139,7 @@ pub fn render_status(v: &Value) {
         } else {
             String::new()
         };
-        let batt_str = if peer_charging || peer_batt > threshold {
+        let batt_str = if peer_charging || peer_batt > 20 {
             format!("{peer_batt}%").green().to_string()
         } else {
             format!("{peer_batt}%").red().bold().to_string()
@@ -430,7 +420,6 @@ mod tests {
                 "peer_name": "Galaxy S21",
                 "peer_platform": "android",
                 "battery_level": 80,
-                "battery_threshold": 20,
                 "charging": false,
                 "peer_battery": 55,
                 "peer_charging": true,

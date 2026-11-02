@@ -26,7 +26,7 @@ fn paired_app() -> (App, StubWallClock) {
 
     app.handle(Event::HandshakeOk, &wall);
     assert!(
-        matches!(app.phase, Phase::Linked | Phase::Paused | Phase::Halted),
+        matches!(app.phase, Phase::Linked),
         "should be Linked (or policy override), got {:?}",
         app.phase
     );
@@ -184,7 +184,7 @@ fn wifi_blip_does_not_clear_peer() {
     // Handshake completes.
     app.handle(Event::HandshakeOk, &wall);
     assert!(
-        matches!(app.phase, Phase::Linked | Phase::Paused | Phase::Halted),
+        matches!(app.phase, Phase::Linked),
         "should be back to Linked"
     );
 }

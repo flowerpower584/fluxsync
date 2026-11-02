@@ -48,7 +48,7 @@ fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
                 title = when(currentRoute) {
                     Routes.HOME -> "FluxSync"
                     Routes.DEVICES -> "Devices"
-                    Routes.LOGS -> "Activity"
+                    Routes.LOGS -> "Diagnostic"
                     Routes.FIREWALL -> "Firewall"
                     Routes.SETTINGS -> "Settings"
                     else -> "FluxSync"
@@ -85,7 +85,11 @@ fun LinkedScreen(vm: FluxsyncViewModel, onNavigateToPairing: () -> Unit) {
             composable(Routes.LOGS) { LogsScreen(vm) }
             composable(Routes.FIREWALL) { FirewallScreen(vm) }
             composable(Routes.SETTINGS) {
-                SettingsScreen(vm, onOpenOemGuidance = { innerNav.navigate(Routes.OEM_GUIDANCE) })
+                SettingsScreen(
+                    vm,
+                    onOpenOemGuidance = { innerNav.navigate(Routes.OEM_GUIDANCE) },
+                    onOpenDiagnostics = { innerNav.navigate(Routes.LOGS) },
+                )
             }
             // DIR-P3-07: manufacturer-specific "don't kill my app" guidance.
             composable(Routes.OEM_GUIDANCE) {
@@ -132,7 +136,6 @@ private fun BottomNav(currentRoute: String, onNavigate: (String) -> Unit) {
         val tabs = listOf(
             TabItem(Routes.HOME, "Home", "home"),
             TabItem(Routes.DEVICES, "Devices", "devices"),
-            TabItem(Routes.LOGS, "Logs", "logs"),
             TabItem(Routes.FIREWALL, "Firewall", "firewall"),
             TabItem(Routes.SETTINGS, "Settings", "settings")
         )

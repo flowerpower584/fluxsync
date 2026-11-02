@@ -1249,6 +1249,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "clap",
+ "clipboard-win",
  "core-foundation 0.10.1",
  "core-foundation-sys",
  "dirs",
@@ -1260,6 +1261,8 @@ dependencies = [
  "keyring",
  "mdns-sd",
  "nix 0.28.0",
+ "objc2-app-kit",
+ "objc2-foundation",
  "rand_core 0.6.4",
  "security-framework-sys",
  "sentry",
@@ -1272,6 +1275,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.59.0",
+ "wl-clipboard-rs",
  "zeroize",
 ]
 

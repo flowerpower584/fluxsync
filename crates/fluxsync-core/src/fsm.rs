@@ -17,8 +17,6 @@ pub enum Phase {
     Discovering,
     Handshaking,
     Linked,
-    Paused,
-    Halted,
 }
 
 /// Build the friendly log line for an inbound clipboard frame. Text-like
@@ -214,9 +212,9 @@ pub fn transition(phase: Phase, event: &Event) -> (Phase, Vec<Action>) {
             ],
         ),
 
-        // Linked/Paused/Halted → Discovering on PeerLost. Peer-agnostic for
+        // Linked → Discovering on PeerLost. Peer-agnostic for
         // the same reason as the Handshaking arm above.
-        (P::Linked | P::Paused | P::Halted, E::PeerLost { .. }) => (
+        (P::Linked, E::PeerLost { .. }) => (
             P::Discovering,
             vec![
                 A::CloseSession,
@@ -325,8 +323,6 @@ mod tests {
             Phase::Discovering,
             Phase::Handshaking,
             Phase::Linked,
-            Phase::Paused,
-            Phase::Halted,
         ] {
             let (p, a) = transition(phase, &Event::ToggleOff);
             assert_eq!(p, Phase::Idle, "from {phase:?}");
@@ -463,32 +459,6 @@ mod tests {
             },
         );
         assert_eq!(p, Phase::Linked);
-        assert!(a.contains(&A::EmitState));
-    }
-
-    #[test]
-    fn paused_battery_change_stays_paused_emits_state() {
-        let (p, a) = transition(
-            Phase::Paused,
-            &Event::BatteryChangedSelf {
-                level: 80,
-                charging: true,
-            },
-        );
-        assert_eq!(p, Phase::Paused);
-        assert!(a.contains(&A::EmitState));
-    }
-
-    #[test]
-    fn halted_battery_change_stays_halted_emits_state() {
-        let (p, a) = transition(
-            Phase::Halted,
-            &Event::BatteryChangedPeer {
-                level: 6,
-                charging: false,
-            },
-        );
-        assert_eq!(p, Phase::Halted);
         assert!(a.contains(&A::EmitState));
     }
 

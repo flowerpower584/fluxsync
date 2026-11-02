@@ -9,6 +9,14 @@ import kotlinx.coroutines.flow.update
 import java.util.concurrent.atomic.AtomicLong
 
 object FluxsyncManager {
+    /**
+     * Whether a password manager flagged this copy as secret
+     * (`ClipDescription.EXTRA_IS_SENSITIVE`, Android 13+; read by key so it
+     * compiles against older SDKs too).
+     */
+    fun isMarkedSensitive(description: android.content.ClipDescription?): Boolean =
+        description?.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true
+
     private const val LOG_VIEW_CAP = 200
 
     private val handleLock = Object()
