@@ -5,6 +5,12 @@ Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.8.0-beta.2] — 2026-11-02
+
+> **Beta.** Passes the automated suite on Linux, macOS, Windows and Android;
+> not yet tested on real devices. Text and images still sync with v0.7.0 and
+> v0.8.0-beta.1 devices; files need both devices on this version.
+
 ### Removed
 - **Battery saver.** The "pause below X% battery" threshold and "resume on
   charge" are gone, on every platform and in `fluxctl`
