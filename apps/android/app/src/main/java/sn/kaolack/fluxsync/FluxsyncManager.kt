@@ -17,6 +17,15 @@ object FluxsyncManager {
     fun isMarkedSensitive(description: android.content.ClipDescription?): Boolean =
         description?.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true
 
+    /** When the focused send screen last read the clipboard (elapsedRealtime). */
+    @Volatile
+    var lastClipboardReadAt: Long = 0L
+        private set
+
+    fun markClipboardRead() {
+        lastClipboardReadAt = SystemClock.elapsedRealtime()
+    }
+
     private const val LOG_VIEW_CAP = 200
 
     private val handleLock = Object()
@@ -62,8 +71,14 @@ object FluxsyncManager {
     fun rememberPeerClip(text: String, nowMs: Long = SystemClock.elapsedRealtime()) {
         val key = text.trim()
         if (key.isEmpty()) return
+        lastPeerWriteAt = nowMs
         synchronized(peerClipLock) { record(peerClips, key, nowMs, PEER_CLIP_CAP) }
     }
+
+    /** elapsedRealtime of our last write of a peer item to the clipboard. */
+    @Volatile
+    var lastPeerWriteAt: Long = 0L
+        private set
 
     /** True only within [ECHO_WINDOW_MS] of writing [text] from a peer. */
     fun isRecentPeerClip(text: String, nowMs: Long = SystemClock.elapsedRealtime()): Boolean {

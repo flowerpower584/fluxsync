@@ -10,19 +10,24 @@ The Accessibility API is the one Android capability that can observe UI events (
 
 ## What FluxSync actually does with it
 
-FluxSync's Accessibility Service (`FluxsyncAccessibilityService.kt`, in `apps/android`) is a **fallback**, not the primary path. The primary clipboard capture is a normal `ClipboardManager.OnPrimaryClipChangedListener`, which works whenever the app process is alive. The Accessibility Service only exists to catch the cases where a copy never reaches that listener — for example, some in-app "share" or "copy link" actions in third-party apps that don't always trigger the standard system clipboard broadcast.
+Android only lets the app **in front** (or your keyboard) read the clipboard. So FluxSync's Accessibility Service (`FluxsyncAccessibilityService.kt`, in `apps/android`) doesn't read the clipboard itself. It watches for the **signs that you just copied something**, and then lets FluxSync read the clipboard the way Android allows: in front, for an instant.
 
-The service is configured to listen for exactly three UI event types:
+The signs it looks at (and nothing else):
 
-- **Text selection changed** — records the text the user just selected.
-- **Long click on a view** — records the label/description of the long-clicked control (a fallback for links, buttons, and images that use a long-press-to-copy pattern).
-- **Click on a view** — checked only to see whether the clicked control's label or description contains a word like "copy"/"copier"; if so, the previously captured selection/long-click text is treated as a completed copy.
+- **A tap on a "Copy" button or menu item** — the clicked control's label or description contains a word like "copy" / "copier" / "copiar".
+- **A "Copied" message** — a toast whose text says "copied" / "copié" / "copiado"…
+- **The system clipboard bubble** — the small preview Android 13+ and Samsung One UI show after a copy (a window whose class name mentions the clipboard).
+- **Text selection and long-press** — remembered only as a fallback (below).
 
-For each of these events, FluxSync reads the text of **the single UI node tied to that event** — never a full-screen dump. There is no code path that walks the rest of the visible view tree, and no scheduled or periodic screen scan.
+When it sees one, it opens an **invisible FluxSync screen for a fraction of a second**: that screen is in front, so Android lets it read the clipboard. It sends the copy to your paired devices if it's new, and closes. Android 12+ shows its usual "FluxSync pasted from your clipboard" notice when this happens — that's Android being transparent about it, and it's expected.
+
+Opening that screen from the background is allowed by Android for an app whose accessibility service you turned on (a documented exception to the background-activity rules). If your phone blocks it anyway (some manufacturers have a "show pop-up windows while running in the background" switch — on Xiaomi, turn it on for FluxSync), FluxSync falls back to sending the text you had selected when you tapped "Copy".
+
+You can always send by hand too: the **Send clipboard** button on FluxSync's notification, the quick-settings tile, or **Share → FluxSync**.
 
 ## What FluxSync never does
 
-- **No keylogging.** The service does not listen for key events or IME input; it only reacts to selection/click/long-click events.
+- **No keylogging.** The service does not listen for key events or IME input; it only reacts to the copy signs listed above.
 - **No general screen-content collection.** It reads the label or text of the specific node involved in a copy-shaped event, nothing else on screen.
 - **No input injection.** FluxSync never simulates taps, gestures, or button presses through this service — it only observes events the user already generated.
 - **No network access beyond your paired LAN peers.** Whatever is captured goes straight into the same end-to-end-encrypted Noise IK pipeline as clipboard content from any other source, sent only to devices you've explicitly paired with, over your local network. Nothing is ever sent to a server FluxSync operates, because there is no such server — see the main [README](../README.md) and [`SECURITY.md`](./SECURITY.md).
@@ -42,6 +47,6 @@ Accessibility permission is optional and revocable at any time:
 
 **Settings → Accessibility → FluxSync → turn off.**
 
-With it off, FluxSync still syncs clipboard content it can capture via the normal foreground `ClipboardManager` path — you'll just lose the fallback capture for the third-party apps/actions described above. Nothing else in the app is affected, and you don't need to uninstall or re-pair anything.
+With it off, copies made on the phone are only sent when FluxSync is open, or by hand (notification button, tile, Share). What you copy on your other devices still arrives on the phone. Nothing else in the app is affected, and you don't need to uninstall or re-pair anything.
 
 If you'd rather not grant Accessibility at all, you can still use FluxSync one-way or opportunistically (copy while the app is open/foregrounded), or use it purely as a receiver on that device.

@@ -25,13 +25,18 @@ import java.io.File
  *
  * Responsibilities:
  *   1. Boot the Rust daemon (FluxsyncHandle) in onCreate()
- *   2. Capture local copies — text AND image — via a system clipboard
- *      listener. A connected AccessibilityService is exempt from Android's
- *      background clipboard-read restriction, so this fires for every copy
- *      regardless of locale, icon-only "copy" buttons, or whether a FluxSync
- *      window is focused. This is the real background-capture path.
- *   3. Detect "Copy" button clicks as a secondary fallback that pushes the
- *      selected text (covers the rare case a copy never reaches the clipboard).
+ *   2. Capture local copies with no tap. Since Android 10 only the focused
+ *      app (or the keyboard) may read the clipboard, so the clipboard
+ *      listener alone stays silent in the background. Instead this service
+ *      watches for the signs of a copy — a "Copy" tap, a "Copied" toast, the
+ *      system clipboard bubble (Android 13+, One UI) — and then opens the
+ *      invisible [SendClipboardActivity] for an instant: it takes focus,
+ *      reads the clipboard, sends what's new and closes. Starting it from
+ *      the background is allowed because this accessibility service is
+ *      bound by the system (Android's documented exemption).
+ *   3. If that read doesn't happen (a manufacturer blocking pop-ups from the
+ *      background, say), fall back to the selected text the "Copy" tap
+ *      acted on.
  *   4. Push captured items to the daemon
  *   5. Ensure the FluxsyncService notification stays alive
  */
@@ -659,28 +664,27 @@ class FluxsyncAccessibilityService : AccessibilityService() {
                     }
                 }
                 AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                    // Detect "Copy" button clicks in context menus
+                    // A "Copy" button or menu item (any of our languages).
                     val nodeText = event.text?.joinToString("")?.lowercase() ?: ""
                     val contentDesc = event.contentDescription?.toString()?.lowercase() ?: ""
-
-                    val isCopyAction = nodeText.contains("copy") ||
-                                     nodeText.contains("copier") ||
-                                     contentDesc.contains("copy") ||
-                                     contentDesc.contains("copier")
-
-                    if (isCopyAction) {
-                        android.util.Log.i("FluxSync", "Copy click detected! nodeText='$nodeText' desc='$contentDesc'")
-                        // Priority 1: Selected text
-                        if (lastSelectedText.isNotEmpty()) {
-                            pushTextToDaemon(lastSelectedText)
-                            lastSelectedText = ""
-                        }
-                        // Priority 2: Long-clicked element (e.g. a link)
-                        else if (lastLongClickedText.isNotEmpty()) {
-                            pushTextToDaemon(lastLongClickedText)
-                            lastLongClickedText = ""
-                        }
+                    val label = nodeText.ifEmpty { contentDesc }
+                    if (label.length <= 40 && COPY_WORDS.any { label.contains(it) }) {
+                        val selected = lastSelectedText.ifEmpty { lastLongClickedText }
+                        lastSelectedText = ""
+                        lastLongClickedText = ""
+                        onCopySeen(fallbackText = selected)
                     }
+                }
+                AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
+                    // A "Copied" toast (Chrome, One UI, most apps).
+                    val text = event.text?.joinToString(" ")?.lowercase() ?: ""
+                    if (COPIED_WORDS.any { text.contains(it) }) onCopySeen()
+                }
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                    // The system clipboard bubble (Android 13+, One UI).
+                    val pkg = event.packageName?.toString().orEmpty()
+                    val cls = event.className?.toString()?.lowercase().orEmpty()
+                    if (pkg != packageName && cls.contains("clipboard")) onCopySeen()
                 }
             }
         } catch (e: Exception) {
@@ -688,6 +692,49 @@ class FluxsyncAccessibilityService : AccessibilityService() {
         }
     }
 
+
+    // ── Copy seen → read the clipboard with focus ──────────────────
+
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var lastCopySeenAt = 0L
+
+    /**
+     * Something was just copied: open the invisible send screen so it can
+     * read the clipboard (only the focused app may). [fallbackText] — the
+     * selection a "Copy" tap acted on — is sent instead if that read hasn't
+     * happened a moment later.
+     */
+    private fun onCopySeen(fallbackText: String = "") {
+        val seenAt = android.os.SystemClock.elapsedRealtime()
+        if (seenAt - lastCopySeenAt < COPY_DEBOUNCE_MS) return
+        // The clipboard bubble also shows for an item we just received:
+        // nothing new to read then.
+        if (seenAt - FluxsyncManager.lastPeerWriteAt < COPY_DEBOUNCE_MS) return
+        lastCopySeenAt = seenAt
+        val power = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        if (!power.isInteractive) return
+        // The copy lands a few ms after the tap or toast.
+        mainHandler.postDelayed({
+            try {
+                startActivity(
+                    Intent(this, SendClipboardActivity::class.java)
+                        .putExtra(SendClipboardActivity.EXTRA_AUTO, true)
+                        .addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_NO_ANIMATION or
+                                Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS,
+                        ),
+                )
+            } catch (e: Exception) {
+                android.util.Log.w("FluxSync", "Auto capture couldn't start: ${e.message}")
+            }
+        }, COPY_SETTLE_MS)
+        if (fallbackText.isNotEmpty()) {
+            mainHandler.postDelayed({
+                if (FluxsyncManager.lastClipboardReadAt < seenAt) pushTextToDaemon(fallbackText)
+            }, FALLBACK_AFTER_MS)
+        }
+    }
 
     // ── Push to Daemon ─────────────────────────────────────────────
 
@@ -717,6 +764,21 @@ class FluxsyncAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
 
     companion object {
+        /** Words on a "Copy" button or menu item. */
+        private val COPY_WORDS = listOf(
+            "copy", "copier", "copiar", "copia", "kopieren", "kopiëren", "копировать", "复制", "コピー", "복사",
+        )
+
+        /** Words in a "Copied" toast. */
+        private val COPIED_WORDS = listOf(
+            "copied", "copié", "copiée", "copiado", "copiada", "copiato", "kopiert", "gekopieerd",
+            "скопирован", "已复制", "コピーしました", "복사됨", "복사했",
+        )
+
+        private const val COPY_DEBOUNCE_MS = 1_200L
+        private const val COPY_SETTLE_MS = 150L
+        private const val FALLBACK_AFTER_MS = 1_500L
+
         /** How long a received secret stays on the clipboard (desktop: 60 s too). */
         private const val SECRET_LIFETIME_MS = 60_000L
 

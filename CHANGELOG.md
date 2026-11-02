@@ -5,6 +5,23 @@ Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.8.0-beta.4] — 2026-11-02
+
+### Changed
+- **Android: copies on the phone sync with no tap.** Since Android 10 only
+  the focused app or the keyboard may read the clipboard, so the
+  Accessibility service's clipboard listener stayed silent in the
+  background (its doc claimed an exemption that doesn't exist). The
+  service now watches for the signs of a copy — a "Copy" tap (several
+  languages), a "Copied" toast, the system clipboard bubble (Android 13+,
+  One UI) — and opens the invisible send screen for an instant: focused,
+  it may read the clipboard; it sends what's new (never a peer item just
+  written) and closes. Starting it from the background is allowed for an
+  app with a bound accessibility service. If it can't start, the selection
+  the "Copy" tap acted on is sent as before. Skipped right after FluxSync
+  itself wrote a received item, and while the screen is off.
+- docs/WHY-ACCESSIBILITY.md rewritten to match.
+
 ## [v0.8.0-beta.3] — 2026-11-02
 
 ### Added

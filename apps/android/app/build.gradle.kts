@@ -38,8 +38,8 @@ android {
         applicationId = "sn.kaolack.fluxsync"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "0.8.0-beta.3"
+        versionCode = 9
+        versionName = "0.8.0-beta.4"
         buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
         ndk {
             // v0.1 supports modern 64-bit ARM only.

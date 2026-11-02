@@ -8,7 +8,7 @@
 [![CI](https://github.com/flowerpower584/fluxsync/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/flowerpower584/fluxsync/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-> 🧪 **The newest version, [v0.8.0-beta.3](https://github.com/flowerpower584/fluxsync/releases/tag/v0.8.0-beta.3), is a beta**: a redesigned desktop app and lots of fixes, still being tested on real devices. Want the proven version? Use [v0.7.0](https://github.com/flowerpower584/fluxsync/releases/tag/v0.7.0). [What changed](CHANGELOG.md)
+> 🧪 **The newest version, [v0.8.0-beta.4](https://github.com/flowerpower584/fluxsync/releases/tag/v0.8.0-beta.4), is a beta**: a redesigned desktop app and lots of fixes, still being tested on real devices. Want the proven version? Use [v0.7.0](https://github.com/flowerpower584/fluxsync/releases/tag/v0.7.0). [What changed](CHANGELOG.md)
 
 ## What it does
 
@@ -22,7 +22,7 @@
 
 ## 1. Install FluxSync on each device
 
-Open the [**release page**](https://github.com/flowerpower584/fluxsync/releases/tag/v0.8.0-beta.3), scroll down to **Assets**, and download the file for your device:
+Open the [**release page**](https://github.com/flowerpower584/fluxsync/releases/tag/v0.8.0-beta.4), scroll down to **Assets**, and download the file for your device:
 
 | Your device | File to download |
 |---|---|
@@ -44,7 +44,8 @@ Not sure which Mac you have? Apple menu  → **About This Mac**: it says "Chip A
 1. Open the downloaded `.apk`. If Android blocks it, allow installs from your browser or Files app when it asks (or in **Settings → Apps → Special app access → Install unknown apps**).
 2. Open FluxSync. It asks for:
    - **Camera:** to scan the pairing QR code.
-   - **Accessibility:** turn FluxSync on under **Settings → Accessibility**. Android doesn't let apps see your copies while they're in the background; this is the only way around it. [What it does and doesn't do](docs/WHY-ACCESSIBILITY.md).
+   - **Accessibility:** turn FluxSync on under **Settings → Accessibility**. Android doesn't let apps see your copies while they're in the background; with this on, FluxSync notices each copy and sends it by itself — no button to press. [What it does and doesn't do](docs/WHY-ACCESSIBILITY.md).
+   - **Xiaomi / Redmi / POCO only:** also allow FluxSync to *show pop-up windows while running in the background* (Settings → Apps → FluxSync → Other permissions).
 3. Recommended: in your phone's battery settings, set FluxSync to **Unrestricted** so Android doesn't put it to sleep.
 
 </details>
@@ -166,7 +167,7 @@ Install the service and the command line with Rust (`rustup`):
 
 ```sh
 cargo install --git https://github.com/flowerpower584/fluxsync \
-              --tag v0.8.0-beta.3 fluxsyncd fluxctl    # or --tag v0.7.0 for the stable one
+              --tag v0.8.0-beta.4 fluxsyncd fluxctl    # or --tag v0.7.0 for the stable one
 ```
 
 Start it on login with a systemd user service at `~/.config/systemd/user/fluxsync.service`:
